@@ -1,7 +1,6 @@
 services:
   media-monitor:
-    build: .
-    image: media-monitor:1.0.0
+    image: ivanchelo/media-monitor:3.22.26
     container_name: media-monitor
     restart: unless-stopped
     ports:
