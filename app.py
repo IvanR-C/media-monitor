@@ -1098,6 +1098,7 @@ def mux_subtitle_into_video(filepath, srt_path):
         '-c', 'copy',
         f'-metadata:s:s:{new_sub_idx}', 'language=spa',
         f'-metadata:s:s:{new_sub_idx}', 'title=Spanish (Cuban)',
+        '-f', 'matroska',
         tmp_path,
     ]
 
