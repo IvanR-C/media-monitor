@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useMemo } from "react"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import {
@@ -26,7 +26,10 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { cn } from "@/lib/utils"
-import { MoreHorizontal, Play, Languages, ChevronRight, ChevronDown, Tag } from "lucide-react"
+import {
+  MoreHorizontal, Play, Languages, ChevronRight, ChevronDown,
+  Tag, Loader2, ArrowUp, ArrowDown, ArrowUpDown,
+} from "lucide-react"
 import type { MediaFile, MediaType, AudioTrack, SubtitleTrack } from "./media-library-tab"
 
 const IMAGE_CODECS = new Set([
@@ -48,6 +51,9 @@ const LANG_OPTIONS = [
   { value: 'ara', label: 'Arabic' },
   { value: 'hin', label: 'Hindi' },
 ]
+
+type SortCol = 'title' | 'file' | 'size' | 'res' | 'codec' | 'audio' | 'subs' | 'status'
+type SortDir = 'asc' | 'desc'
 
 interface MediaTableProps {
   files: MediaFile[]
@@ -76,15 +82,21 @@ export function MediaTable({
   mediaType,
   loading,
 }: MediaTableProps) {
-  const [expandedShows, setExpandedShows] = useState<Set<string>>(new Set())
+  const [expandedShows,   setExpandedShows]   = useState<Set<string>>(new Set())
   const [expandedSeasons, setExpandedSeasons] = useState<Set<string>>(new Set())
   const [assignDialogFile, setAssignDialogFile] = useState<MediaFile | null>(null)
+  const [sortCol, setSortCol] = useState<SortCol>('title')
+  const [sortDir, setSortDir] = useState<SortDir>('asc')
+
+  const handleSort = (col: SortCol) => {
+    if (sortCol === col) setSortDir(d => d === 'asc' ? 'desc' : 'asc')
+    else { setSortCol(col); setSortDir('asc') }
+  }
 
   const toggleShow = (showName: string) => {
     setExpandedShows(prev => {
       const next = new Set(prev)
-      if (next.has(showName)) next.delete(showName)
-      else next.add(showName)
+      if (next.has(showName)) next.delete(showName); else next.add(showName)
       return next
     })
   }
@@ -92,19 +104,35 @@ export function MediaTable({
   const toggleSeason = (key: string) => {
     setExpandedSeasons(prev => {
       const next = new Set(prev)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
+      if (next.has(key)) next.delete(key); else next.add(key)
       return next
     })
   }
 
   const allSelected = files.length > 0 && selectedIds.size === files.length
 
-  // Compute how many selected files have translatable (text-based) subtitle tracks
   const selectedFiles = files.filter(f => selectedIds.has(f.id))
   const translatableSelectedCount = selectedFiles.filter(f =>
     f.subtitle_tracks.some(t => !IMAGE_CODECS.has(t.codec))
   ).length
+
+  // Apply client-side sort
+  const sortedFiles = useMemo(() => {
+    const cmp = (a: MediaFile, b: MediaFile): number => {
+      switch (sortCol) {
+        case 'title':  return (a.folder_name ?? '').localeCompare(b.folder_name ?? '')
+        case 'file':   return (a.filename ?? '').localeCompare(b.filename ?? '')
+        case 'size':   return (a.size_gb ?? 0) - (b.size_gb ?? 0)
+        case 'res':    return (a.video_height ?? 0) - (b.video_height ?? 0)
+        case 'codec':  return (a.video_codec ?? '').localeCompare(b.video_codec ?? '')
+        case 'audio':  return a.audio_tracks.length - b.audio_tracks.length
+        case 'subs':   return a.subtitle_tracks.length - b.subtitle_tracks.length
+        case 'status': return (a.status ?? '').localeCompare(b.status ?? '')
+        default:       return 0
+      }
+    }
+    return [...files].sort((a, b) => sortDir === 'asc' ? cmp(a, b) : -cmp(a, b))
+  }, [files, sortCol, sortDir])
 
   if (loading) {
     return (
@@ -125,10 +153,12 @@ export function MediaTable({
     )
   }
 
-  // Build show tree for shows, flat list for movies
+  const naturalSort = (a: string, b: string) =>
+    a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
+
   const renderRows = () => {
     if (mediaType !== "show") {
-      return files.map(file => (
+      return sortedFiles.map(file => (
         <MediaTableRow
           key={file.id}
           file={file}
@@ -141,43 +171,33 @@ export function MediaTable({
       ))
     }
 
-    // Natural sort helper — sorts "Season 2" before "Season 10"
-    const naturalSort = (a: string, b: string) =>
-      a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
-
-    // Build tree: showName -> seasonKey -> episodes[]
+    // Build tree from sortedFiles so show order follows the sort
     const showMap = new Map<string, Map<string, MediaFile[]>>()
-    for (const f of files) {
-      const show = f.show_name || f.folder_name || 'Unknown'
-      if (!showMap.has(show)) showMap.set(show, new Map())
-      const seasonMap = showMap.get(show)!
+    for (const f of sortedFiles) {
+      const show   = f.show_name || f.folder_name || 'Unknown'
       const season = f.folder_name || 'Unknown Season'
-      if (!seasonMap.has(season)) seasonMap.set(season, [])
-      seasonMap.get(season)!.push(f)
+      if (!showMap.has(show)) showMap.set(show, new Map())
+      const sm = showMap.get(show)!
+      if (!sm.has(season)) sm.set(season, [])
+      sm.get(season)!.push(f)
     }
 
-    // Sort shows alphabetically, seasons naturally, episodes by season_episode
-    const sortedShows = Array.from(showMap.keys()).sort(naturalSort)
-    for (const [, seasonMap] of showMap) {
-      const sortedSeasons = Array.from(seasonMap.keys()).sort(naturalSort)
-      for (const season of sortedSeasons) {
-        const eps = seasonMap.get(season)!
-        eps.sort((a, b) => naturalSort(a.season_episode ?? a.filename, b.season_episode ?? b.filename))
-      }
-      // Rebuild seasonMap in sorted order
-      const sorted = new Map(sortedSeasons.map(s => [s, seasonMap.get(s)!]))
-      seasonMap.clear()
-      for (const [k, v] of sorted) seasonMap.set(k, v)
+    // Sort seasons naturally within each show; episodes already sorted by sortedFiles
+    for (const [, sm] of showMap) {
+      const sortedSeasons = Array.from(sm.keys()).sort(naturalSort)
+      const sorted = new Map(sortedSeasons.map(s => [s, sm.get(s)!]))
+      sm.clear()
+      for (const [k, v] of sorted) sm.set(k, v)
     }
 
     const rows: React.ReactNode[] = []
 
-    for (const showName of sortedShows) {
-      const seasonMap = showMap.get(showName)!
-      const isShowExpanded = expandedShows.has(showName)
-      const totalEpisodes = Array.from(seasonMap.values()).reduce((s, eps) => s + eps.length, 0)
-      const allShowIds = Array.from(seasonMap.values()).flat().map(f => f.id)
-      const anySelected = allShowIds.some(id => selectedIds.has(id))
+    for (const showName of showMap.keys()) {
+      const seasonMap    = showMap.get(showName)!
+      const isExpanded   = expandedShows.has(showName)
+      const totalEps     = Array.from(seasonMap.values()).reduce((s, eps) => s + eps.length, 0)
+      const allShowIds   = Array.from(seasonMap.values()).flat().map(f => f.id)
+      const anySelected  = allShowIds.some(id => selectedIds.has(id))
 
       rows.push(
         <tr
@@ -185,28 +205,26 @@ export function MediaTable({
           className="cursor-pointer bg-secondary/30 hover:bg-secondary/50 select-none"
           onClick={() => toggleShow(showName)}
         >
-          <td className="px-3 py-2">
+          <td className="px-3 py-2" onClick={e => e.stopPropagation()}>
             <Checkbox
               checked={anySelected && allShowIds.every(id => selectedIds.has(id))}
-              onCheckedChange={(checked) => {
+              onCheckedChange={checked => {
                 allShowIds.forEach(id => {
                   const has = selectedIds.has(id)
                   if (checked && !has) onToggleSelect(id)
                   if (!checked && has) onToggleSelect(id)
                 })
               }}
-              onClick={e => e.stopPropagation()}
             />
           </td>
           <td className="px-3 py-2" colSpan={8}>
             <div className="flex items-center gap-2">
-              {isShowExpanded
+              {isExpanded
                 ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-              }
+                : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
               <span className="font-medium text-foreground">{showName}</span>
               <span className="ml-1 text-xs text-muted-foreground">
-                {seasonMap.size} season{seasonMap.size !== 1 ? 's' : ''} · {totalEpisodes} ep{totalEpisodes !== 1 ? 's' : ''}
+                {seasonMap.size} season{seasonMap.size !== 1 ? 's' : ''} · {totalEps} ep{totalEps !== 1 ? 's' : ''}
               </span>
             </div>
           </td>
@@ -214,13 +232,13 @@ export function MediaTable({
         </tr>
       )
 
-      if (!isShowExpanded) continue
+      if (!isExpanded) continue
 
       for (const [seasonName, episodes] of seasonMap) {
-        const seasonKey = `${showName}::${seasonName}`
+        const seasonKey       = `${showName}::${seasonName}`
         const isSeasonExpanded = expandedSeasons.has(seasonKey)
-        const allSeasonIds = episodes.map(f => f.id)
-        const anySeasonSelected = allSeasonIds.some(id => selectedIds.has(id))
+        const allSeasonIds    = episodes.map(f => f.id)
+        const anySeasonSel    = allSeasonIds.some(id => selectedIds.has(id))
 
         rows.push(
           <tr
@@ -228,25 +246,23 @@ export function MediaTable({
             className="cursor-pointer bg-secondary/10 hover:bg-secondary/20 select-none"
             onClick={() => toggleSeason(seasonKey)}
           >
-            <td className="px-3 py-2 pl-8">
+            <td className="px-3 py-2 pl-8" onClick={e => e.stopPropagation()}>
               <Checkbox
-                checked={anySeasonSelected && allSeasonIds.every(id => selectedIds.has(id))}
-                onCheckedChange={(checked) => {
+                checked={anySeasonSel && allSeasonIds.every(id => selectedIds.has(id))}
+                onCheckedChange={checked => {
                   allSeasonIds.forEach(id => {
                     const has = selectedIds.has(id)
                     if (checked && !has) onToggleSelect(id)
                     if (!checked && has) onToggleSelect(id)
                   })
                 }}
-                onClick={e => e.stopPropagation()}
               />
             </td>
             <td className="px-3 py-2 pl-6" colSpan={8}>
               <div className="flex items-center gap-2">
                 {isSeasonExpanded
                   ? <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
-                  : <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground" />
-                }
+                  : <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground" />}
                 <span className="text-sm font-medium text-foreground/80">{seasonName}</span>
                 <span className="text-xs text-muted-foreground">{episodes.length} ep{episodes.length !== 1 ? 's' : ''}</span>
               </div>
@@ -273,7 +289,6 @@ export function MediaTable({
         }
       }
     }
-
     return rows
   }
 
@@ -290,7 +305,7 @@ export function MediaTable({
             {translatableSelectedCount > 0 && (
               <Button size="sm" variant="outline" className="h-7 text-xs" onClick={onTranslateSelected}>
                 <Languages className="mr-1 h-3 w-3" />
-                Translate {translatableSelectedCount > 1 ? `${translatableSelectedCount}` : ""}
+                Translate{translatableSelectedCount > 1 ? ` ${translatableSelectedCount}` : ''}
               </Button>
             )}
             <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => onToggleSelectAll()}>
@@ -319,31 +334,15 @@ export function MediaTable({
               <th className="px-3 py-2 text-left">
                 <Checkbox checked={allSelected} onCheckedChange={onToggleSelectAll} />
               </th>
-              <th className="px-3 py-2 text-left text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                {mediaType === "show" ? "Show" : "Title"}
-              </th>
-              <th className="hidden px-3 py-2 text-left text-[11px] font-medium uppercase tracking-wider text-muted-foreground lg:table-cell">
-                File
-              </th>
-              <th className="px-3 py-2 text-left text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                Size
-              </th>
-              <th className="hidden px-3 py-2 text-left text-[11px] font-medium uppercase tracking-wider text-muted-foreground md:table-cell">
-                Res
-              </th>
-              <th className="hidden px-3 py-2 text-left text-[11px] font-medium uppercase tracking-wider text-muted-foreground lg:table-cell">
-                Codec
-              </th>
-              <th className="hidden px-3 py-2 text-left text-[11px] font-medium uppercase tracking-wider text-muted-foreground xl:table-cell">
-                Audio
-              </th>
-              <th className="hidden px-3 py-2 text-left text-[11px] font-medium uppercase tracking-wider text-muted-foreground xl:table-cell">
-                Subs
-              </th>
-              <th className="px-3 py-2 text-left text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                Status
-              </th>
-              <th className="px-2 py-2"></th>
+              <SortHeader col="title" label={mediaType === "show" ? "Show" : "Title"} sortCol={sortCol} sortDir={sortDir} onSort={handleSort} />
+              <SortHeader col="file"  label="File"   sortCol={sortCol} sortDir={sortDir} onSort={handleSort} className="hidden lg:table-cell" />
+              <SortHeader col="size"  label="Size"   sortCol={sortCol} sortDir={sortDir} onSort={handleSort} />
+              <SortHeader col="res"   label="Res"    sortCol={sortCol} sortDir={sortDir} onSort={handleSort} className="hidden md:table-cell" />
+              <SortHeader col="codec" label="Codec"  sortCol={sortCol} sortDir={sortDir} onSort={handleSort} className="hidden lg:table-cell" />
+              <SortHeader col="audio" label="Audio"  sortCol={sortCol} sortDir={sortDir} onSort={handleSort} className="hidden xl:table-cell" />
+              <SortHeader col="subs"  label="Subs"   sortCol={sortCol} sortDir={sortDir} onSort={handleSort} className="hidden xl:table-cell" />
+              <SortHeader col="status" label="Status" sortCol={sortCol} sortDir={sortDir} onSort={handleSort} />
+              <th className="px-2 py-2" />
             </tr>
           </thead>
           <tbody className="divide-y divide-border/20">
@@ -365,6 +364,39 @@ export function MediaTable({
   )
 }
 
+// ── Sort header ────────────────────────────────────────────────────────────────
+
+function SortHeader({
+  col, label, sortCol, sortDir, onSort, className,
+}: {
+  col: SortCol; label: string; sortCol: SortCol; sortDir: SortDir
+  onSort: (c: SortCol) => void; className?: string
+}) {
+  const active = sortCol === col
+  return (
+    <th
+      className={cn(
+        "cursor-pointer select-none px-3 py-2 text-left text-[11px] font-medium uppercase tracking-wider transition-colors",
+        active ? "text-foreground" : "text-muted-foreground hover:text-foreground",
+        className,
+      )}
+      onClick={() => onSort(col)}
+    >
+      <span className="flex items-center gap-1">
+        {label}
+        {active
+          ? sortDir === 'asc'
+            ? <ArrowUp className="h-2.5 w-2.5" />
+            : <ArrowDown className="h-2.5 w-2.5" />
+          : <ArrowUpDown className="h-2.5 w-2.5 opacity-30" />
+        }
+      </span>
+    </th>
+  )
+}
+
+// ── Table row ─────────────────────────────────────────────────────────────────
+
 interface MediaTableRowProps {
   file: MediaFile
   isSelected: boolean
@@ -376,13 +408,7 @@ interface MediaTableRowProps {
 }
 
 function MediaTableRow({
-  file,
-  isSelected,
-  onToggleSelect,
-  onEnqueue,
-  onTranslate,
-  onOpenAssignDialog,
-  isEpisode,
+  file, isSelected, onToggleSelect, onEnqueue, onTranslate, onOpenAssignDialog, isEpisode,
 }: MediaTableRowProps) {
   const textSubTracks = file.subtitle_tracks.filter(t => !IMAGE_CODECS.has(t.codec))
 
@@ -390,27 +416,20 @@ function MediaTableRow({
     <tr className={cn(
       "transition-colors hover:bg-secondary/20",
       isSelected && "bg-accent/5",
-      isEpisode && "pl-16"
     )}>
-      <td className={cn("px-3 py-2", isEpisode && "pl-14")}>
+      <td className="px-3 py-2" onClick={e => e.stopPropagation()}>
         <Checkbox checked={isSelected} onCheckedChange={onToggleSelect} />
       </td>
-      <td className="overflow-hidden px-3 py-2">
+      <td className={cn("overflow-hidden px-3 py-2", isEpisode && "pl-10")}>
         <div
           className="truncate font-medium text-foreground"
           title={isEpisode ? (file.season_episode || file.filename) : file.folder_name}
         >
-          {isEpisode
-            ? (file.season_episode || file.filename)
-            : file.folder_name
-          }
+          {isEpisode ? (file.season_episode || file.filename) : file.folder_name}
         </div>
       </td>
       <td className="hidden overflow-hidden px-3 py-2 lg:table-cell">
-        <span
-          className="block truncate font-mono text-[11px] text-muted-foreground"
-          title={file.filename}
-        >
+        <span className="block truncate font-mono text-[11px] text-muted-foreground" title={file.filename}>
           {file.filename}
         </span>
       </td>
@@ -423,19 +442,19 @@ function MediaTableRow({
         </div>
       </td>
       <td className="hidden px-3 py-2 text-xs text-muted-foreground md:table-cell">
-        {file.video_width && file.video_height ? `${file.video_width}×${file.video_height}` : "-"}
+        {file.video_width && file.video_height ? `${file.video_width}×${file.video_height}` : '-'}
       </td>
       <td className="hidden px-3 py-2 lg:table-cell">
-        <span className="text-xs uppercase text-muted-foreground">{file.video_codec || "-"}</span>
+        <span className="text-xs uppercase text-muted-foreground">{file.video_codec || '-'}</span>
       </td>
       <td className="hidden px-3 py-2 xl:table-cell">
-        <TrackBadges tracks={file.audio_tracks} type="audio" />
+        <TrackBadges tracks={file.audio_tracks} />
       </td>
       <td className="hidden px-3 py-2 xl:table-cell">
-        <TrackBadges tracks={file.subtitle_tracks} type="sub" />
+        <TrackBadges tracks={file.subtitle_tracks} />
       </td>
       <td className="px-3 py-2">
-        <StatusBadge status={file.status} encodeStatus={file.encode_status} />
+        <RowStatus file={file} />
       </td>
       <td className="px-2 py-2">
         <DropdownMenu>
@@ -472,45 +491,51 @@ function MediaTableRow({
   )
 }
 
-function formatSize(gb: number): string {
-  if (gb < 0.1) return `${(gb * 1024).toFixed(0)} MB`
-  if (gb >= 100) return `${gb.toFixed(0)} GB`
-  return `${gb.toFixed(1)} GB`
+// ── Row status (shows live progress when encoding/translating) ─────────────────
+
+const TRANSLATE_LABEL: Record<string, string> = {
+  pending: 'Queued', extracting: 'Extracting', translating: 'Translating', muxing: 'Muxing',
 }
 
-function TrackBadges({ tracks, type }: { tracks: AudioTrack[] | SubtitleTrack[]; type: 'audio' | 'sub' }) {
-  if (tracks.length === 0) return <span className="text-xs text-muted-foreground">-</span>
-  const hasUnknown = tracks.some(t => !t.lang)
-  return (
-    <div className="flex items-center gap-1">
-      <span
-        className={cn(
-          "inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium",
-          hasUnknown ? "bg-warning/20 text-warning" : "bg-secondary text-muted-foreground"
-        )}
-        title={tracks.map(t => `${t.codec} ${t.lang || '?'}${('title' in t && t.title) ? ` (${t.title})` : ''}`).join('\n')}
-      >
-        {tracks.length}
-      </span>
-    </div>
-  )
-}
-
-function StatusBadge({ status, encodeStatus }: { status: string; encodeStatus?: string }) {
+function RowStatus({ file }: { file: MediaFile }) {
   const base = "inline-flex shrink-0 items-center whitespace-nowrap rounded px-1.5 py-0.5 text-[10px] font-medium"
-  if (encodeStatus === "encoding") return <span className={cn(base, "animate-pulse bg-accent/20 text-accent")}>Encoding</span>
-  if (encodeStatus === "queued")   return <span className={cn(base, "bg-secondary text-muted-foreground")}>Queued</span>
-  if (encodeStatus === "done")     return <span className={cn(base, "bg-success/20 text-success")}>Done</span>
-  if (encodeStatus === "failed")   return <span className={cn(base, "bg-destructive/20 text-destructive")}>Failed</span>
 
-  // Collect all active flags — a file can have multiple issues
-  const hasReEncode   = status?.includes("RE-ENCODE")
-  const hasRemux      = status?.includes("REMUX")
-  const hasMissingLang = status?.includes("MISSING LANG")
+  // Live encode progress
+  if (file.encode_status === 'encoding') {
+    const pct = file.encode_progress != null ? `${Math.round(file.encode_progress)}%` : ''
+    return (
+      <div className="flex items-center gap-1.5">
+        <Loader2 className="h-3 w-3 animate-spin text-accent" />
+        <span className="text-[10px] text-accent">Encode {pct}</span>
+      </div>
+    )
+  }
+
+  // Live translate progress
+  if (file.translate_status && TRANSLATE_LABEL[file.translate_status]) {
+    const label = TRANSLATE_LABEL[file.translate_status]
+    const pct   = file.translate_progress != null && file.translate_progress > 0
+      ? `${Math.round(file.translate_progress)}%`
+      : ''
+    return (
+      <div className="flex items-center gap-1.5">
+        <Loader2 className="h-3 w-3 animate-spin text-accent" />
+        <span className="text-[10px] text-accent">{label}{pct ? ` ${pct}` : ''}</span>
+      </div>
+    )
+  }
+
+  if (file.encode_status === 'queued')  return <span className={cn(base, "bg-secondary text-muted-foreground")}>Queued</span>
+  if (file.encode_status === 'done')    return <span className={cn(base, "bg-success/20 text-success")}>Done</span>
+  if (file.encode_status === 'failed')  return <span className={cn(base, "bg-destructive/20 text-destructive")}>Failed</span>
+
+  const hasReEncode    = file.status?.includes('RE-ENCODE')
+  const hasRemux       = file.status?.includes('REMUX')
+  const hasMissingLang = file.status?.includes('MISSING LANG')
 
   if (!hasReEncode && !hasRemux && !hasMissingLang) {
-    if (status === "OK") return <span className={cn(base, "bg-success/20 text-success")}>OK</span>
-    return <span className={cn(base, "bg-secondary text-muted-foreground")}>{status}</span>
+    if (file.status === 'OK') return <span className={cn(base, "bg-success/20 text-success")}>OK</span>
+    return <span className={cn(base, "bg-secondary text-muted-foreground")}>{file.status}</span>
   }
 
   return (
@@ -522,43 +547,47 @@ function StatusBadge({ status, encodeStatus }: { status: string; encodeStatus?: 
   )
 }
 
-// ── Track Assignment Dialog ──────────────────────────────────────────────────
+// ── Helpers ────────────────────────────────────────────────────────────────────
 
-interface TrackState {
-  lang: string
-  action: 'keep' | 'drop'
+function formatSize(gb: number): string {
+  if (gb < 0.1) return `${(gb * 1024).toFixed(0)} MB`
+  if (gb >= 100) return `${gb.toFixed(0)} GB`
+  return `${gb.toFixed(1)} GB`
 }
 
+function TrackBadges({ tracks }: { tracks: AudioTrack[] | SubtitleTrack[] }) {
+  if (tracks.length === 0) return <span className="text-xs text-muted-foreground">-</span>
+  const hasUnknown = tracks.some(t => !t.lang)
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium",
+        hasUnknown ? "bg-warning/20 text-warning" : "bg-secondary text-muted-foreground",
+      )}
+      title={tracks.map(t => `${t.codec} ${t.lang || '?'}`).join('\n')}
+    >
+      {tracks.length}
+    </span>
+  )
+}
+
+// ── Track Assign Dialog ────────────────────────────────────────────────────────
+
+interface TrackState { lang: string; action: 'keep' | 'drop' }
+
 function TrackRow({
-  label,
-  lang,
-  action,
-  onLangChange,
-  onActionChange,
+  label, lang, action, onLangChange, onActionChange,
 }: {
-  label: string
-  lang: string
-  action: 'keep' | 'drop'
-  onLangChange: (v: string) => void
-  onActionChange: (v: 'keep' | 'drop') => void
+  label: string; lang: string; action: 'keep' | 'drop'
+  onLangChange: (v: string) => void; onActionChange: (v: 'keep' | 'drop') => void
 }) {
-  const selectValue = lang || '__none__'
   return (
     <div className="flex items-center gap-2 border-b border-border/20 py-1.5 last:border-0">
-      <span className="w-36 shrink-0 font-mono text-[11px] text-muted-foreground truncate" title={label}>
-        {label}
-      </span>
-      <Select
-        value={selectValue}
-        onValueChange={v => onLangChange(v === '__none__' ? '' : v)}
-      >
-        <SelectTrigger className="h-7 flex-1 text-xs">
-          <SelectValue />
-        </SelectTrigger>
+      <span className="w-36 shrink-0 truncate font-mono text-[11px] text-muted-foreground" title={label}>{label}</span>
+      <Select value={lang || '__none__'} onValueChange={v => onLangChange(v === '__none__' ? '' : v)}>
+        <SelectTrigger className="h-7 flex-1 text-xs"><SelectValue /></SelectTrigger>
         <SelectContent>
-          {LANG_OPTIONS.map(o => (
-            <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
-          ))}
+          {LANG_OPTIONS.map(o => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
         </SelectContent>
       </Select>
       <button
@@ -567,7 +596,7 @@ function TrackRow({
           "shrink-0 rounded px-2 py-0.5 text-[10px] font-medium transition-colors",
           action === 'drop'
             ? "bg-destructive/20 text-destructive hover:bg-destructive/30"
-            : "bg-secondary text-muted-foreground hover:bg-secondary/60"
+            : "bg-secondary text-muted-foreground hover:bg-secondary/60",
         )}
       >
         {action === 'drop' ? 'Drop' : 'Keep'}
@@ -577,15 +606,10 @@ function TrackRow({
 }
 
 function TrackAssignDialog({
-  file,
-  open,
-  onClose,
-  onSave,
+  file, open, onClose, onSave,
 }: {
-  file: MediaFile | null
-  open: boolean
-  onClose: () => void
-  onSave: (file: MediaFile, audio: any[], subs: any[]) => Promise<void>
+  file: MediaFile | null; open: boolean
+  onClose: () => void; onSave: (file: MediaFile, audio: any[], subs: any[]) => Promise<void>
 }) {
   const [audioState, setAudioState] = useState<Map<number, TrackState>>(new Map())
   const [subState,   setSubState]   = useState<Map<number, TrackState>>(new Map())
@@ -597,7 +621,6 @@ function TrackAssignDialog({
     for (const t of file.audio_tracks)
       am.set(t.audio_idx, { lang: t.lang || '', action: t.action || 'keep' })
     setAudioState(am)
-
     const sm = new Map<number, TrackState>()
     for (const t of file.subtitle_tracks)
       sm.set(t.sub_idx, { lang: t.lang || '', action: t.action || 'keep' })
@@ -627,7 +650,6 @@ function TrackAssignDialog({
 
   const updateAudio = (idx: number, patch: Partial<TrackState>) =>
     setAudioState(m => new Map(m).set(idx, { ...m.get(idx)!, ...patch }))
-
   const updateSub = (idx: number, patch: Partial<TrackState>) =>
     setSubState(m => new Map(m).set(idx, { ...m.get(idx)!, ...patch }))
 
@@ -638,21 +660,18 @@ function TrackAssignDialog({
           <DialogTitle>Assign Track Languages</DialogTitle>
           <DialogDescription className="truncate text-xs">{file.folder_name}</DialogDescription>
         </DialogHeader>
-
         <div className="mt-1 max-h-[60vh] space-y-4 overflow-y-auto pr-1">
           {file.audio_tracks.length > 0 && (
             <div>
-              <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                Audio Tracks
-              </p>
+              <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Audio Tracks</p>
               {file.audio_tracks.map(t => {
-                const state = audioState.get(t.audio_idx)
+                const s = audioState.get(t.audio_idx)
                 return (
                   <TrackRow
                     key={t.audio_idx}
                     label={`#${t.audio_idx} · ${t.codec}${t.channels ? ` · ${t.channels}ch` : ''}`}
-                    lang={state?.lang ?? t.lang ?? ''}
-                    action={state?.action ?? 'keep'}
+                    lang={s?.lang ?? t.lang ?? ''}
+                    action={s?.action ?? 'keep'}
                     onLangChange={v => updateAudio(t.audio_idx, { lang: v })}
                     onActionChange={a => updateAudio(t.audio_idx, { action: a })}
                   />
@@ -660,21 +679,17 @@ function TrackAssignDialog({
               })}
             </div>
           )}
-
           {file.subtitle_tracks.length > 0 && (
             <div>
-              <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                Subtitle Tracks
-              </p>
+              <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Subtitle Tracks</p>
               {file.subtitle_tracks.map(t => {
-                const state   = subState.get(t.sub_idx)
-                const isImage = IMAGE_CODECS.has(t.codec)
+                const s = subState.get(t.sub_idx)
                 return (
                   <TrackRow
                     key={t.sub_idx}
-                    label={`#${t.sub_idx} · ${t.codec}${isImage ? ' (img)' : ''}`}
-                    lang={state?.lang ?? t.lang ?? ''}
-                    action={state?.action ?? 'keep'}
+                    label={`#${t.sub_idx} · ${t.codec}${IMAGE_CODECS.has(t.codec) ? ' (img)' : ''}`}
+                    lang={s?.lang ?? t.lang ?? ''}
+                    action={s?.action ?? 'keep'}
                     onLangChange={v => updateSub(t.sub_idx, { lang: v })}
                     onActionChange={a => updateSub(t.sub_idx, { action: a })}
                   />
@@ -682,21 +697,13 @@ function TrackAssignDialog({
               })}
             </div>
           )}
-
           {file.audio_tracks.length === 0 && file.subtitle_tracks.length === 0 && (
-            <p className="py-4 text-center text-xs text-muted-foreground">
-              No audio or subtitle tracks found.
-            </p>
+            <p className="py-4 text-center text-xs text-muted-foreground">No audio or subtitle tracks found.</p>
           )}
         </div>
-
         <DialogFooter className="mt-4">
-          <Button variant="ghost" onClick={onClose} disabled={saving}>
-            Cancel
-          </Button>
-          <Button onClick={handleSave} disabled={saving}>
-            {saving ? 'Saving…' : 'Save Assignments'}
-          </Button>
+          <Button variant="ghost" onClick={onClose} disabled={saving}>Cancel</Button>
+          <Button onClick={handleSave} disabled={saving}>{saving ? 'Saving…' : 'Save Assignments'}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

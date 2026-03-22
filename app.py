@@ -1621,7 +1621,26 @@ def get_media():
             if 'RE-ENCODE' in (r['status'] or '')
             else None
         )
+        d['encode_progress']    = None
+        d['translate_status']   = None
+        d['translate_progress'] = None
         result.append(d)
+
+    # Merge active encode / translation progress into result rows
+    id_index = {d['id']: d for d in result}
+    with db() as conn:
+        for enc_row in conn.execute(
+            "SELECT media_file_id, progress FROM encode_jobs WHERE status='encoding'"
+        ).fetchall():
+            if enc_row['media_file_id'] in id_index:
+                id_index[enc_row['media_file_id']]['encode_progress'] = enc_row['progress']
+        for tr_row in conn.execute(
+            "SELECT media_file_id, status, progress FROM translation_jobs "
+            "WHERE status IN ('pending','extracting','translating','muxing')"
+        ).fetchall():
+            if tr_row['media_file_id'] in id_index:
+                id_index[tr_row['media_file_id']]['translate_status']   = tr_row['status']
+                id_index[tr_row['media_file_id']]['translate_progress'] = tr_row['progress']
 
     # Library stats filtered by type
     with db() as conn:
