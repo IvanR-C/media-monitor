@@ -622,7 +622,10 @@ def build_ffmpeg_cmd(filepath, output_path, row):
         # stderr carries only warnings/errors (safe to buffer until done).
         '-progress', 'pipe:1',
         '-nostats',
+        # Keep decoded frames on the GPU to avoid RAM spikes when encoding
+        # large remux files (prevents OOM kills on the container).
         '-hwaccel', 'cuda',
+        '-hwaccel_output_format', 'cuda',
         '-i', filepath,
         '-map', '0:v:0',
     ]
@@ -636,10 +639,12 @@ def build_ffmpeg_cmd(filepath, output_path, row):
         '-preset:v', 'p4',
         '-cq:v', '20',
         '-profile:v', 'main10',
+        '-rc-lookahead', '20',   # default is 32; reduce to lower RAM usage
     ]
 
     if height > 1080:
-        cmd += ['-vf', 'scale=-2:1080']
+        # scale_cuda filter required when using hwaccel_output_format cuda
+        cmd += ['-vf', 'scale_cuda=-2:1080']
 
     cmd += ['-c:a', 'copy']
     if sel_subs:
