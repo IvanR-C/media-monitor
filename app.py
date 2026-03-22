@@ -10,7 +10,7 @@ import shutil
 import threading
 import sqlite3
 import subprocess
-from collections import Counter
+from collections import Counter, deque
 from contextlib import contextmanager
 from pathlib import Path
 from queue import Queue
@@ -57,6 +57,20 @@ LANG_MAP = {
 SHOW_ROOT_SEGMENTS  = {'series', 'tv', 'shows', 'anime', 'television'}
 MOVIE_ROOT_SEGMENTS = {'movies', 'movie', 'films', 'film'}
 SE_PATTERN          = re.compile(r'[Ss](\d{1,2})[Ee](\d{1,2})')
+
+# ── In-memory log buffer (frontend /api/logs) ─────────────────────────────────
+_log_buffer     = deque(maxlen=500)
+_log_seq        = 0
+_log_lock       = threading.Lock()
+
+def log(level: str, msg: str):
+    """Log to stdout and the in-memory ring buffer exposed via /api/logs."""
+    global _log_seq
+    ts = datetime.now().strftime('%H:%M:%S')
+    print(f"[{ts}] [{level.upper()}] {msg}", flush=True)
+    with _log_lock:
+        _log_seq += 1
+        _log_buffer.append({'seq': _log_seq, 'ts': ts, 'level': level, 'msg': msg})
 
 
 def detect_media_type(filepath):
@@ -734,7 +748,7 @@ def _fail_job(job_id, filepath, tmp_path, error):
             "UPDATE media_files SET encode_status='failed' WHERE filepath=?",
             (filepath,),
         )
-    print(f"[encode] job {job_id} failed: {error}")
+    log('error', f"[encode] job {job_id} failed: {error}")
     folder_name = Path(filepath).parent.name
     filename    = Path(filepath).name
     send_ntfy_notification(
@@ -752,7 +766,11 @@ def run_encode_job(job_id):
         job = conn.execute(
             'SELECT * FROM encode_jobs WHERE id=?', (job_id,)
         ).fetchone()
-        if not job or job['status'] in ('cancelled', 'done', 'failed'):
+        if not job:
+            log('warn', f"[encode] job {job_id} not found in DB — skipping")
+            return
+        if job['status'] in ('cancelled', 'done', 'failed'):
+            log('info', f"[encode] job {job_id} already in terminal state '{job['status']}' — skipping")
             return
         mf = conn.execute(
             'SELECT * FROM media_files WHERE filepath=?', (job['filepath'],)
@@ -761,6 +779,7 @@ def run_encode_job(job_id):
     if not mf:
         _fail_job(job_id, job['filepath'], None, 'Media record not found in DB')
         return
+    log('info', f"[encode] job {job_id} picked up — {Path(job['filepath']).name}")
 
     filepath = job['filepath']
     tmp_path = filepath + '.encoding.tmp'
@@ -787,7 +806,8 @@ def run_encode_job(job_id):
 
     cmd      = build_ffmpeg_cmd(filepath, tmp_path, dict(mf))
     duration = mf['duration_seconds'] or 0
-    print(f"[encode] job {job_id} starting — {Path(filepath).name}")
+    log('info', f"[encode] job {job_id} starting — {Path(filepath).name}")
+    log('info', f"[encode] cmd: {' '.join(cmd)}")
 
     stderr_lines = []
 
@@ -837,7 +857,7 @@ def run_encode_job(job_id):
 
     if retcode != 0:
         err_tail = '\n'.join(stderr_lines[-10:]) if stderr_lines else ''
-        print(f"[encode] job {job_id} ffmpeg stderr:\n{err_tail}")
+        log('error', f"[encode] job {job_id} ffmpeg stderr:\n{err_tail}")
         _fail_job(job_id, filepath, tmp_path, f'ffmpeg exited with code {retcode}')
         return
 
@@ -886,10 +906,10 @@ def run_encode_job(job_id):
     orig_h       = mf['video_height'] or 0
     new_h        = new_info['video_height'] if new_info else orig_h
     res_str      = f"{orig_h}p → {new_h}p" if new_h and new_h != orig_h else f"{new_h or orig_h}p"
-    print(
+    log('info',
         f"[encode] job {job_id} done — "
         f"{orig_size/1e9:.2f} GB → {encoded_size/1e9:.2f} GB "
-        f"(saved {savings_pct:.0f}%)"
+        f"(saved {savings_pct:.0f}%, {res_str})"
     )
     send_ntfy_notification(
         f"Encode Complete: {mf['folder_name']}",
@@ -903,6 +923,7 @@ def run_encode_job(job_id):
 
 def encode_worker_loop():
     """Single-threaded worker — processes encode jobs one at a time (one GPU)."""
+    log('info', '[encode] worker thread started')
     while True:
         try:
             job_id = encode_queue.get(timeout=2)
@@ -911,7 +932,7 @@ def encode_worker_loop():
         try:
             run_encode_job(job_id)
         except Exception as e:
-            print(f"[encode] unhandled error in job {job_id}: {e}")
+            log('error', f"[encode] unhandled error in job {job_id}: {e}")
         encode_queue.task_done()
 
 
@@ -980,7 +1001,7 @@ def extract_subtitle_to_srt(filepath, sub_stream_idx, output_path):
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=None)
     if result.returncode != 0:
-        print(f'[translate] subtitle extract stderr: {result.stderr[-500:]}')
+        log('error', f'[translate] subtitle extract stderr: {result.stderr[-500:]}')
     return result.returncode == 0
 
 
@@ -1111,7 +1132,7 @@ def _fail_translation_job(job_id, error):
         job = conn.execute(
             'SELECT filepath FROM translation_jobs WHERE id=?', (job_id,)
         ).fetchone()
-    print(f"[translate] job {job_id} failed: {error}")
+    log('error', f"[translate] job {job_id} failed: {error}")
     if job:
         folder_name = Path(job['filepath']).parent.name
         filename    = Path(job['filepath']).name
@@ -1221,7 +1242,7 @@ def run_translation_job(job_id):
                 (srt_path, job_id),
             )
 
-        print(f"[translate] job {job_id} done → {srt_path}")
+        log('info', f"[translate] job {job_id} done → {srt_path}")
         src_label = source_lang.upper() if source_lang else 'unknown'
         send_ntfy_notification(
             f"Subtitle Ready: {mf['folder_name']}",
@@ -1250,7 +1271,7 @@ def translation_worker_loop():
         try:
             run_translation_job(job_id)
         except Exception as e:
-            print(f"[translate] unhandled error in job {job_id}: {e}")
+            log('error', f"[translate] unhandled error in job {job_id}: {e}")
         translation_queue.task_done()
 
 
@@ -1828,6 +1849,17 @@ def get_translation_jobs():
     return jsonify({'jobs': [dict(r) for r in rows]})
 
 
+@app.route('/api/logs')
+def get_logs():
+    """Return recent log entries from the in-memory ring buffer.
+    Optional ?since=N returns only entries with seq > N (for polling).
+    """
+    since = request.args.get('since', 0, type=int)
+    with _log_lock:
+        entries = [e for e in _log_buffer if e['seq'] > since]
+    return jsonify({'logs': entries, 'total': _log_seq})
+
+
 # ── Startup ───────────────────────────────────────────────────────────────────
 def _recover_queued_jobs():
     """Re-enqueue any encode jobs that were left in 'queued' or 'encoding'
@@ -1845,7 +1877,7 @@ def _recover_queued_jobs():
     for row in rows:
         encode_queue.put(row['id'])
     if rows:
-        print(f"[startup] re-queued {len(rows)} interrupted encode job(s)")
+        log('warn', f"[startup] re-queued {len(rows)} interrupted encode job(s)")
 
 
 if __name__ == '__main__':
