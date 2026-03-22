@@ -664,7 +664,8 @@ def build_ffmpeg_cmd(filepath, output_path, row):
     if sel_subs:
         cmd += ['-c:s', 'copy']
 
-    cmd.append(output_path)
+    # Explicitly set container format — ffmpeg can't infer it from .encoding.tmp
+    cmd += ['-f', 'matroska', output_path]
     return cmd
 
 
