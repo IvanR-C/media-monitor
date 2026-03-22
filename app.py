@@ -927,14 +927,23 @@ def is_image_based_subtitle(codec):
 
 
 def extract_subtitle_to_srt(filepath, sub_stream_idx, output_path):
-    """Extract subtitle track at position sub_stream_idx to SRT via ffmpeg."""
+    """Extract subtitle track at position sub_stream_idx to SRT via ffmpeg.
+
+    No timeout — large remux files (40-50 GB BluRay) can take several minutes
+    to demux even a single subtitle stream.  This always runs inside the
+    translation worker thread so there is no risk of blocking the Flask server.
+    """
     cmd = [
-        'ffmpeg', '-y', '-i', filepath,
+        'ffmpeg', '-y',
+        '-fflags', '+genpts',   # helps with malformed PTS in remux streams
+        '-i', filepath,
         '-map', f'0:s:{sub_stream_idx}',
         '-c:s', 'srt',
         output_path,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=None)
+    if result.returncode != 0:
+        print(f'[translate] subtitle extract stderr: {result.stderr[-500:]}')
     return result.returncode == 0
 
 
@@ -1027,7 +1036,9 @@ def mux_subtitle_into_video(filepath, srt_path):
         tmp_path,
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    # No timeout — muxing a 40-50 GB remux can take longer than 5 minutes.
+    # Runs in the translation worker thread, never blocks Flask.
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=None)
     if result.returncode != 0:
         if os.path.exists(tmp_path):
             try: os.remove(tmp_path)
