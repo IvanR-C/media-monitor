@@ -26,6 +26,7 @@ export interface MediaFile {
   status: string
   encode_status?: string
   encode_progress?: number
+  encode_job_type?: 'encode' | 'remux'
   translate_status?: string
   translate_progress?: number
   poster_url?: string
@@ -206,9 +207,22 @@ export function MediaLibraryTab() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ audio, subtitles: subs }),
       })
-      if (!r.ok) throw new Error('Failed')
-      toast.success('Languages saved — remux queued to apply changes to file')
-      fetchMedia()
+      const data = await r.json()
+      if (!r.ok && r.status !== 207) throw new Error(data.error || 'Failed')
+      if (r.status === 207) {
+        // Assignments saved but remux queue failed
+        toast.warning(data.error || 'Languages saved but remux could not be queued')
+      } else {
+        toast.success('Languages saved — remux queued to apply changes to file')
+      }
+      // Optimistically mark this file as remux-queued so the row shows feedback
+      // immediately, even if the current filter would remove it from view.
+      setFiles(prev => prev.map(f =>
+        f.id === fileId
+          ? { ...f, encode_status: 'queued', encode_job_type: 'remux' }
+          : f
+      ))
+      fetchMedia(true)
     } catch {
       toast.error('Failed to save track languages')
     }

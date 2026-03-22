@@ -500,13 +500,14 @@ const TRANSLATE_LABEL: Record<string, string> = {
 function RowStatus({ file }: { file: MediaFile }) {
   const base = "inline-flex shrink-0 items-center whitespace-nowrap rounded px-1.5 py-0.5 text-[10px] font-medium"
 
-  // Live encode progress
+  // Live encode / remux progress
   if (file.encode_status === 'encoding') {
+    const isRemux = file.encode_job_type === 'remux'
     const pct = file.encode_progress != null ? `${Math.round(file.encode_progress)}%` : ''
     return (
       <div className="flex items-center gap-1.5">
         <Loader2 className="h-3 w-3 animate-spin text-accent" />
-        <span className="text-[10px] text-accent">Encode {pct}</span>
+        <span className="text-[10px] text-accent">{isRemux ? 'Remuxing' : 'Encoding'}{pct ? ` ${pct}` : ''}</span>
       </div>
     )
   }
@@ -525,7 +526,10 @@ function RowStatus({ file }: { file: MediaFile }) {
     )
   }
 
-  if (file.encode_status === 'queued')  return <span className={cn(base, "bg-secondary text-muted-foreground")}>Queued</span>
+  if (file.encode_status === 'queued') {
+    const label = file.encode_job_type === 'remux' ? 'Remux Queued' : 'Queued'
+    return <span className={cn(base, "bg-secondary text-muted-foreground")}>{label}</span>
+  }
   if (file.encode_status === 'done')    return <span className={cn(base, "bg-success/20 text-success")}>Done</span>
   if (file.encode_status === 'failed')  return <span className={cn(base, "bg-destructive/20 text-destructive")}>Failed</span>
 
