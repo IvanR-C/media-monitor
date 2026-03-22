@@ -1,4 +1,5 @@
 import { HardDrive, FileVideo, AlertCircle, Loader2 } from "lucide-react"
+import { cn } from "@/lib/utils"
 
 interface LibraryStatsProps {
   stats: {
@@ -39,6 +40,7 @@ export function LibraryStats({ stats }: LibraryStatsProps) {
         value={stats.encoding_active.toString()}
         label="In Queue / Active"
         variant="active"
+        spinning={stats.encoding_active > 0}
       />
     </div>
   )
@@ -49,18 +51,19 @@ interface StatItemProps {
   value: string
   label: string
   variant?: "default" | "warning" | "active"
+  spinning?: boolean
 }
 
-function StatItem({ icon: Icon, value, label, variant = "default" }: StatItemProps) {
+function StatItem({ icon: Icon, value, label, variant = "default", spinning = false }: StatItemProps) {
   const iconClassName = {
     default: "text-muted-foreground",
     warning: "text-warning",
-    active: "text-accent animate-spin"
+    active: "text-accent",
   }[variant]
 
   return (
     <div className="flex items-center gap-3 rounded-lg border border-border/50 bg-card/30 px-4 py-3">
-      <Icon className={`h-4 w-4 ${iconClassName}`} />
+      <Icon className={cn(`h-4 w-4`, iconClassName, spinning && "animate-spin")} />
       <div>
         <div className="text-lg font-semibold text-foreground">{value}</div>
         <div className="text-xs text-muted-foreground">{label}</div>
