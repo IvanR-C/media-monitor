@@ -766,15 +766,19 @@ def run_encode_job(job_id):
         except OSError:
             pass
 
-    with db() as conn:
-        conn.execute(
-            "UPDATE encode_jobs SET status='encoding', started_at=datetime('now') WHERE id=?",
-            (job_id,),
-        )
-        conn.execute(
-            "UPDATE media_files SET encode_status='encoding' WHERE filepath=?",
-            (filepath,),
-        )
+    try:
+        with db() as conn:
+            conn.execute(
+                "UPDATE encode_jobs SET status='encoding', started_at=datetime('now') WHERE id=?",
+                (job_id,),
+            )
+            conn.execute(
+                "UPDATE media_files SET encode_status='encoding' WHERE filepath=?",
+                (filepath,),
+            )
+    except Exception as e:
+        _fail_job(job_id, filepath, tmp_path, f'DB error before encode start: {e}')
+        return
 
     cmd      = build_ffmpeg_cmd(filepath, tmp_path, dict(mf))
     duration = mf['duration_seconds'] or 0
@@ -1820,11 +1824,32 @@ def get_translation_jobs():
 
 
 # ── Startup ───────────────────────────────────────────────────────────────────
+def _recover_queued_jobs():
+    """Re-enqueue any encode jobs that were left in 'queued' or 'encoding'
+    state from a previous run (e.g. container restart mid-encode).
+    'encoding' jobs are reset to 'queued' first since the process is gone.
+    """
+    with db() as conn:
+        conn.execute(
+            "UPDATE encode_jobs SET status='queued', progress=0 "
+            "WHERE status='encoding'"
+        )
+        rows = conn.execute(
+            "SELECT id FROM encode_jobs WHERE status='queued' ORDER BY created_at"
+        ).fetchall()
+    for row in rows:
+        encode_queue.put(row['id'])
+    if rows:
+        print(f"[startup] re-queued {len(rows)} interrupted encode job(s)")
+
+
 if __name__ == '__main__':
     init_db()
     _migrate_db()
     load_config()
     os.makedirs(WATCH_DIR, exist_ok=True)
+
+    _recover_queued_jobs()
 
     threading.Thread(target=start_monitoring,       daemon=True).start()
     threading.Thread(target=encode_worker_loop,     daemon=True).start()
