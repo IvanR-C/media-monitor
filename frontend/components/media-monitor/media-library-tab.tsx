@@ -203,7 +203,7 @@ export function MediaLibraryTab() {
         body: JSON.stringify({ audio, subtitles: subs }),
       })
       if (!r.ok) throw new Error('Failed')
-      toast.success('Track languages saved')
+      toast.success('Languages saved — remux queued to apply changes to file')
       fetchMedia()
     } catch {
       toast.error('Failed to save track languages')
