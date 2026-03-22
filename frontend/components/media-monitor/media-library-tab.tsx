@@ -188,8 +188,12 @@ export function MediaLibraryTab() {
         body: JSON.stringify({ sub_idx: subIdx }),
       })
       const data = await r.json()
-      if (r.ok) toast.success('Translation queued')
-      else toast.error(data.error || 'Failed to queue translation')
+      if (r.ok) {
+        toast.success('Translation queued')
+        fetchMedia(true)
+      } else {
+        toast.error(data.error || 'Failed to queue translation')
+      }
     } catch {
       toast.error('Failed to queue translation')
     }
@@ -239,7 +243,10 @@ export function MediaLibraryTab() {
         skipped++
       }
     }
-    if (queued > 0) toast.success(`Queued ${queued} file(s) for translation`)
+    if (queued > 0) {
+      toast.success(`Queued ${queued} file(s) for translation`)
+      fetchMedia(true)
+    }
     if (skipped > 0) toast.info(`${skipped} file(s) skipped (no translatable subtitle)`)
     setSelectedIds(new Set())
   }
