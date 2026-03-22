@@ -1644,6 +1644,30 @@ def get_media():
     })
 
 
+@app.route('/api/media/recalculate-status', methods=['POST'])
+def recalculate_status():
+    """
+    Re-run determine_status() for every row using already-stored track data.
+    Much faster than a full scan — no ffprobe, no filesystem access.
+    """
+    updated = 0
+    with db() as conn:
+        rows = conn.execute(
+            'SELECT id, size_bytes, audio_tracks, subtitle_tracks FROM media_files'
+        ).fetchall()
+        for row in rows:
+            audio_streams = json.loads(row['audio_tracks']    or '[]')
+            sub_streams   = json.loads(row['subtitle_tracks'] or '[]')
+            new_status    = determine_status(row['size_bytes'] or 0, audio_streams, sub_streams)
+            conn.execute(
+                'UPDATE media_files SET status=? WHERE id=?',
+                (new_status, row['id']),
+            )
+            updated += 1
+    log('info', f'[recalculate] updated status for {updated} files')
+    return jsonify({'updated': updated})
+
+
 @app.route('/api/media/scan', methods=['POST'])
 def trigger_scan():
     return jsonify(scan_library())
