@@ -22,6 +22,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application files
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 COPY app.py .
 COPY templates/ templates/
 
@@ -54,5 +56,7 @@ ENV WATCH_DIR=/watch \
     REENCODE_SIZE_GB=20 \
     PYTHONUNBUFFERED=1
 
-# Run the application (-u = unbuffered stdout/stderr, same as PYTHONUNBUFFERED=1)
+# entrypoint runs ldconfig to pick up NVIDIA libs injected at runtime,
+# then execs the CMD
+ENTRYPOINT ["/entrypoint.sh"]
 CMD ["python", "-u", "app.py"]
