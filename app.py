@@ -617,6 +617,11 @@ def build_ffmpeg_cmd(filepath, output_path, row):
 
     cmd = [
         'ffmpeg', '-y',
+        # Structured progress → stdout (newline-separated key=value).
+        # -nostats suppresses the \r-overwritten stats line on stderr so
+        # stderr carries only warnings/errors (safe to buffer until done).
+        '-progress', 'pipe:1',
+        '-nostats',
         '-hwaccel', 'cuda',
         '-i', filepath,
         '-map', '0:v:0',
@@ -645,19 +650,35 @@ def build_ffmpeg_cmd(filepath, output_path, row):
 
 
 # ── FFmpeg progress parsing ───────────────────────────────────────────────────
-_TIME_RE  = re.compile(r'time=(\d{2}):(\d{2}):(\d{2})\.(\d+)')
-_SPEED_RE = re.compile(r'speed=\s*([\d.]+)x')
+# ffmpeg -progress pipe:1 emits newline-separated key=value pairs, e.g.:
+#   out_time_us=51234567000
+#   speed=1.50x
+#   progress=continue   (or "end" when finished)
+# We accumulate key/value pairs and emit an update on each "progress=" line.
 
-
-def parse_progress_line(line):
-    """Return (elapsed_seconds, speed_str) or (None, None)."""
-    tm = _TIME_RE.search(line)
-    if not tm:
-        return None, None
-    elapsed = int(tm[1]) * 3600 + int(tm[2]) * 60 + int(tm[3]) + int(tm[4]) / 100.0
-    sp      = _SPEED_RE.search(line)
-    speed   = (sp[1] + 'x') if sp else ''
-    return elapsed, speed
+def parse_progress_output(stdout_iter):
+    """Generator that yields (elapsed_seconds, speed_str) for each ffmpeg
+    progress report block (triggered by the "progress=..." sentinel line).
+    Reads from an iterable of stdout lines (newline-terminated).
+    """
+    block = {}
+    for raw in stdout_iter:
+        line = raw.strip()
+        if '=' not in line:
+            continue
+        key, _, val = line.partition('=')
+        block[key] = val
+        if key == 'progress':
+            # Emit one update per complete block
+            try:
+                elapsed = int(block.get('out_time_us', 0)) / 1_000_000
+            except ValueError:
+                elapsed = None
+            speed_raw = block.get('speed', '').strip()
+            speed = speed_raw if speed_raw and speed_raw != 'N/A' else ''
+            if elapsed is not None:
+                yield elapsed, speed
+            block = {}
 
 
 # ── Health verification ───────────────────────────────────────────────────────
@@ -759,23 +780,27 @@ def run_encode_job(job_id):
     duration = mf['duration_seconds'] or 0
     print(f"[encode] job {job_id} starting — {Path(filepath).name}")
 
+    stderr_lines = []
+
     try:
         proc = subprocess.Popen(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            cmd,
+            stdout=subprocess.PIPE,   # -progress pipe:1 → structured key=value
+            stderr=subprocess.PIPE,   # errors only (-nostats suppresses stats)
             text=True, bufsize=1,
         )
         with encode_lock:
             active_proc   = proc
             active_job_id = job_id
 
-        for line in proc.stderr:
-            elapsed, speed = parse_progress_line(line)
-            if elapsed is not None and duration > 0:
+        # Read structured progress from stdout; stderr is buffered for errors.
+        for elapsed, speed in parse_progress_output(proc.stdout):
+            if duration > 0:
                 progress = min(elapsed / duration * 100, 99.0)
                 eta = None
                 try:
                     if speed:
-                        rate = float(speed.replace('x', ''))
+                        rate = float(speed.rstrip('x'))
                         if rate > 0:
                             eta = int((duration - elapsed) / rate)
                 except (ValueError, ZeroDivisionError):
@@ -787,6 +812,7 @@ def run_encode_job(job_id):
                     )
 
         proc.wait()
+        stderr_lines = proc.stderr.read().splitlines()
         retcode = proc.returncode
 
     except Exception as e:
@@ -801,6 +827,8 @@ def run_encode_job(job_id):
             active_job_id = None
 
     if retcode != 0:
+        err_tail = '\n'.join(stderr_lines[-10:]) if stderr_lines else ''
+        print(f"[encode] job {job_id} ffmpeg stderr:\n{err_tail}")
         _fail_job(job_id, filepath, tmp_path, f'ffmpeg exited with code {retcode}')
         return
 
