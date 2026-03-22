@@ -636,10 +636,10 @@ def build_ffmpeg_cmd(filepath, output_path, row):
         # stderr carries only warnings/errors (safe to buffer until done).
         '-progress', 'pipe:1',
         '-nostats',
-        # Keep decoded frames on the GPU to avoid RAM spikes when encoding
-        # large remux files (prevents OOM kills on the container).
-        '-hwaccel', 'cuda',
-        '-hwaccel_output_format', 'cuda',
+        # CPU decode → GPU encode (hevc_nvenc).
+        # Avoids requiring libnvcuvid (NVDEC) which can be missing even
+        # when libnvidia-encode (NVENC) is present. CPU decoding adds
+        # negligible overhead vs. GPU encoding on REMUX sources.
         '-i', filepath,
         '-map', '0:v:0',
     ]
@@ -657,8 +657,7 @@ def build_ffmpeg_cmd(filepath, output_path, row):
     ]
 
     if height > 1080:
-        # scale_cuda filter required when using hwaccel_output_format cuda
-        cmd += ['-vf', 'scale_cuda=-2:1080']
+        cmd += ['-vf', 'scale=-2:1080']
 
     cmd += ['-c:a', 'copy']
     if sel_subs:
