@@ -1866,6 +1866,26 @@ def cancel_translation(job_id):
     return jsonify({'status': 'cancelled'})
 
 
+@app.route('/api/encode/jobs/clear', methods=['POST'])
+def clear_encode_jobs():
+    """Delete encode jobs that are in a terminal state (done/failed/cancelled)."""
+    with db() as conn:
+        result = conn.execute(
+            "DELETE FROM encode_jobs WHERE status IN ('done', 'failed', 'cancelled')"
+        )
+    return jsonify({'deleted': result.rowcount})
+
+
+@app.route('/api/translate/jobs/clear', methods=['POST'])
+def clear_translation_jobs():
+    """Delete translation jobs that are in a terminal state (done/failed/cancelled)."""
+    with db() as conn:
+        result = conn.execute(
+            "DELETE FROM translation_jobs WHERE status IN ('done', 'failed', 'cancelled')"
+        )
+    return jsonify({'deleted': result.rowcount})
+
+
 @app.route('/api/translate/jobs')
 def get_translation_jobs():
     with db() as conn:

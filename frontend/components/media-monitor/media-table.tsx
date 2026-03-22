@@ -94,6 +94,10 @@ export function MediaTable({
       ))
     }
 
+    // Natural sort helper — sorts "Season 2" before "Season 10"
+    const naturalSort = (a: string, b: string) =>
+      a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
+
     // Build tree: showName -> seasonKey -> episodes[]
     const showMap = new Map<string, Map<string, MediaFile[]>>()
     for (const f of files) {
@@ -105,9 +109,24 @@ export function MediaTable({
       seasonMap.get(season)!.push(f)
     }
 
+    // Sort shows alphabetically, seasons naturally, episodes by season_episode
+    const sortedShows = Array.from(showMap.keys()).sort(naturalSort)
+    for (const [, seasonMap] of showMap) {
+      const sortedSeasons = Array.from(seasonMap.keys()).sort(naturalSort)
+      for (const season of sortedSeasons) {
+        const eps = seasonMap.get(season)!
+        eps.sort((a, b) => naturalSort(a.season_episode ?? a.filename, b.season_episode ?? b.filename))
+      }
+      // Rebuild seasonMap in sorted order
+      const sorted = new Map(sortedSeasons.map(s => [s, seasonMap.get(s)!]))
+      seasonMap.clear()
+      for (const [k, v] of sorted) seasonMap.set(k, v)
+    }
+
     const rows: React.ReactNode[] = []
 
-    for (const [showName, seasonMap] of showMap) {
+    for (const showName of sortedShows) {
+      const seasonMap = showMap.get(showName)!
       const isShowExpanded = expandedShows.has(showName)
       const totalEpisodes = Array.from(seasonMap.values()).reduce((s, eps) => s + eps.length, 0)
       const allShowIds = Array.from(seasonMap.values()).flat().map(f => f.id)
@@ -228,10 +247,22 @@ export function MediaTable({
       )}
 
       <div className="flex-1 overflow-auto">
-        <table className="w-full text-sm">
+        <table className="w-full table-fixed text-sm">
+          <colgroup>
+            <col className="w-10" />           {/* checkbox */}
+            <col className="w-[22%]" />         {/* title */}
+            <col className="hidden lg:table-column w-[22%]" /> {/* file */}
+            <col className="w-[10%]" />         {/* size */}
+            <col className="hidden md:table-column w-[9%]" />  {/* res */}
+            <col className="hidden lg:table-column w-[7%]" />  {/* codec */}
+            <col className="hidden xl:table-column w-[6%]" />  {/* audio */}
+            <col className="hidden xl:table-column w-[6%]" />  {/* subs */}
+            <col className="w-[12%]" />         {/* status */}
+            <col className="w-8" />             {/* menu */}
+          </colgroup>
           <thead className="sticky top-0 z-10 bg-secondary/80 backdrop-blur-sm">
             <tr>
-              <th className="w-10 px-3 py-2 text-left">
+              <th className="px-3 py-2 text-left">
                 <Checkbox checked={allSelected} onCheckedChange={onToggleSelectAll} />
               </th>
               <th className="px-3 py-2 text-left text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
@@ -258,7 +289,7 @@ export function MediaTable({
               <th className="px-3 py-2 text-left text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
                 Status
               </th>
-              <th className="w-8 px-2 py-2"></th>
+              <th className="px-2 py-2"></th>
             </tr>
           </thead>
           <tbody className="divide-y divide-border/20">
@@ -293,16 +324,16 @@ function MediaTableRow({ file, isSelected, onToggleSelect, onEnqueue, onTranslat
       <td className={cn("px-3 py-2", isEpisode && "pl-14")}>
         <Checkbox checked={isSelected} onCheckedChange={onToggleSelect} />
       </td>
-      <td className="max-w-[200px] px-3 py-2">
-        <div className="truncate font-medium text-foreground" title={file.folder_name}>
+      <td className="overflow-hidden px-3 py-2">
+        <div className="truncate font-medium text-foreground" title={isEpisode ? (file.season_episode || file.filename) : file.folder_name}>
           {isEpisode
             ? (file.season_episode || file.filename)
             : file.folder_name
           }
         </div>
       </td>
-      <td className="hidden max-w-[200px] px-3 py-2 lg:table-cell">
-        <span className="truncate font-mono text-[11px] text-muted-foreground" title={file.filename}>
+      <td className="hidden overflow-hidden px-3 py-2 lg:table-cell">
+        <span className="block truncate font-mono text-[11px] text-muted-foreground" title={file.filename}>
           {file.filename}
         </span>
       </td>
