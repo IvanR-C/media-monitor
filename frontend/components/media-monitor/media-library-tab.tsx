@@ -25,6 +25,9 @@ export interface MediaFile {
   subtitle_tracks: SubtitleTrack[]
   status: string
   encode_status?: string
+  encode_progress?: number
+  translate_status?: string
+  translate_progress?: number
   poster_url?: string
   media_type: "movie" | "show"
   show_name?: string
@@ -84,6 +87,17 @@ export function MediaLibraryTab() {
   useEffect(() => {
     fetchMedia()
   }, [fetchMedia])
+
+  // Auto-refresh every 3 s while any encode or translation job is active
+  const hasActiveJobs = files.some(f =>
+    f.encode_status === 'encoding' || f.encode_status === 'queued' ||
+    (f.translate_status != null && !['done', 'failed', 'cancelled'].includes(f.translate_status))
+  )
+  useEffect(() => {
+    if (!hasActiveJobs) return
+    const id = setInterval(fetchMedia, 3000)
+    return () => clearInterval(id)
+  }, [hasActiveJobs, fetchMedia])
 
   // Recompute filter counts from current file list (approximate — full counts need separate query)
   const filterCounts = useMemo(() => {
