@@ -54,6 +54,34 @@ LANG_MAP = {
     'ko': 'kor', 'ru': 'rus', 'ar': 'ara', 'hi': 'hin',
 }
 
+SHOW_ROOT_SEGMENTS  = {'series', 'tv', 'shows', 'anime', 'television'}
+MOVIE_ROOT_SEGMENTS = {'movies', 'movie', 'films', 'film'}
+SE_PATTERN          = re.compile(r'[Ss](\d{1,2})[Ee](\d{1,2})')
+
+
+def detect_media_type(filepath):
+    """Return (media_type, show_name, season_episode) for a given filepath."""
+    parts = Path(filepath).parts
+    for i, part in enumerate(parts):
+        low = part.lower()
+        if low in SHOW_ROOT_SEGMENTS and i + 1 < len(parts):
+            show_name = parts[i + 1]
+            m = SE_PATTERN.search(Path(filepath).stem)
+            se = f"S{int(m.group(1)):02d}E{int(m.group(2)):02d}" if m else None
+            return 'show', show_name, se
+        if low in MOVIE_ROOT_SEGMENTS:
+            return 'movie', None, None
+    # Fallback: filename SE pattern suggests an episode
+    m = SE_PATTERN.search(Path(filepath).stem)
+    if m:
+        p = Path(filepath)
+        # parent is likely "Season N", grandparent is show name
+        show_name = p.parent.parent.name if p.parent.parent != p.parent else p.parent.name
+        se = f"S{int(m.group(1)):02d}E{int(m.group(2)):02d}"
+        return 'show', show_name, se
+    return 'movie', None, None
+
+
 config = {
     'ntfy_server':     os.environ.get('NTFY_SERVER', 'https://ntfy.sh'),
     'ntfy_topic':      os.environ.get('NTFY_TOPIC', ''),
@@ -127,7 +155,10 @@ def _migrate_db():
     """Add columns introduced after initial schema creation."""
     with db() as conn:
         for col, definition in [
-            ('poster_url', 'TEXT'),
+            ('poster_url',     'TEXT'),
+            ('media_type',     "TEXT DEFAULT 'movie'"),
+            ('show_name',      'TEXT'),
+            ('season_episode', 'TEXT'),
         ]:
             try:
                 conn.execute(f'ALTER TABLE media_files ADD COLUMN {col} {definition}')
@@ -164,6 +195,9 @@ def init_db():
                 encode_status       TEXT,
                 has_sibling_videos  INTEGER DEFAULT 0,
                 poster_url          TEXT,
+                media_type          TEXT DEFAULT 'movie',
+                show_name           TEXT,
+                season_episode      TEXT,
                 scanned_at          TEXT DEFAULT (datetime('now'))
             );
 
@@ -279,6 +313,8 @@ def parse_media_info(filepath):
     video = video_streams[0] if video_streams else {}
     status = determine_status(size_bytes, audio_streams, subtitle_streams)
 
+    media_type, show_name, season_episode = detect_media_type(filepath)
+
     return {
         'filepath':         filepath,
         'folder_name':      path.parent.name,
@@ -294,6 +330,9 @@ def parse_media_info(filepath):
         'format_name':      fmt.get('format_name', ''),
         'status':           status,
         'has_sibling_videos': 0,  # set by caller
+        'media_type':       media_type,
+        'show_name':        show_name,
+        'season_episode':   season_episode,
     }
 
 
@@ -316,12 +355,16 @@ def upsert_media_file(info):
                 (filepath, folder_name, filename, size_bytes, duration_seconds,
                  video_codec, video_width, video_height, video_bitrate,
                  audio_tracks, subtitle_tracks, format_name, status,
-                 has_sibling_videos, poster_url, scanned_at)
+                 has_sibling_videos, poster_url,
+                 media_type, show_name, season_episode,
+                 scanned_at)
             VALUES
                 (:filepath, :folder_name, :filename, :size_bytes, :duration_seconds,
                  :video_codec, :video_width, :video_height, :video_bitrate,
                  :audio_tracks, :subtitle_tracks, :format_name, :status,
-                 :has_sibling_videos, :poster_url, datetime('now'))
+                 :has_sibling_videos, :poster_url,
+                 :media_type, :show_name, :season_episode,
+                 datetime('now'))
             ON CONFLICT(filepath) DO UPDATE SET
                 folder_name=excluded.folder_name,
                 filename=excluded.filename,
@@ -337,6 +380,9 @@ def upsert_media_file(info):
                 status=excluded.status,
                 has_sibling_videos=excluded.has_sibling_videos,
                 poster_url=COALESCE(excluded.poster_url, media_files.poster_url),
+                media_type=COALESCE(excluded.media_type, media_files.media_type),
+                show_name=excluded.show_name,
+                season_episode=excluded.season_episode,
                 scanned_at=datetime('now')
         ''', row)
 
@@ -435,22 +481,24 @@ def scan_library():
             print(f"[scan] found {len(all_files)} video files")
 
             folder_counts = Counter(str(Path(fp).parent) for fp in all_files)
-            poster_cache  = {}   # folder_name → url|None (fetch once per title)
+            poster_cache  = {}   # cache_key → url|None (fetch once per title/show)
 
             for fp in all_files:
                 info = parse_media_info(fp)
                 if info:
-                    info['has_sibling_videos'] = 1 if folder_counts[str(Path(fp).parent)] > 1 else 0
+                    is_show = info.get('media_type') == 'show'
+                    # For shows, flag sibling videos only if they're in the same season folder
+                    # but don't treat it as an alert — that's normal for shows
+                    info['has_sibling_videos'] = 1 if (
+                        folder_counts[str(Path(fp).parent)] > 1 and not is_show
+                    ) else 0
 
-                    folder_name = info['folder_name']
-                    if folder_name not in poster_cache:
-                        is_ep = any(
-                            x in info['filename'].lower()
-                            for x in ['s0', 'e0', 'season', 'episode']
-                        )
-                        poster_cache[folder_name] = tvdb_search_poster(folder_name, is_ep)
+                    # Use show_name as cache key for shows (avoids searching by "Season 1")
+                    cache_key = info['show_name'] if is_show and info.get('show_name') else info['folder_name']
+                    if cache_key not in poster_cache:
+                        poster_cache[cache_key] = tvdb_search_poster(cache_key, is_show)
 
-                    info['poster_url'] = poster_cache.get(folder_name)
+                    info['poster_url'] = poster_cache.get(cache_key)
                     upsert_media_file(info)
                 scan_status['scanned'] += 1
 
@@ -472,6 +520,7 @@ def get_multi_video_folders():
                    COUNT(*) AS cnt
             FROM media_files
             WHERE has_sibling_videos = 1
+              AND (media_type IS NULL OR media_type = 'movie')
             GROUP BY folder_name
             HAVING cnt > 1
         ''').fetchall()
@@ -1299,13 +1348,15 @@ def analyze_file(filepath):
         if info:
             folder   = str(Path(filepath).parent)
             siblings = [f for f in os.listdir(folder) if f.lower().endswith(VIDEO_EXTENSIONS)]
-            info['has_sibling_videos'] = 1 if len(siblings) > 1 else 0
+            is_show = info.get('media_type') == 'show'
+            info['has_sibling_videos'] = 1 if (len(siblings) > 1 and not is_show) else 0
 
-            is_ep = any(x in info['filename'].lower() for x in ['s0', 'e0', 'season', 'episode'])
-            info['poster_url'] = tvdb_search_poster(info['folder_name'], is_ep)
+            is_show = info.get('media_type') == 'show'
+            cache_key = info['show_name'] if is_show and info.get('show_name') else info['folder_name']
+            info['poster_url'] = tvdb_search_poster(cache_key, is_show)
             upsert_media_file(info)
 
-            if info['has_sibling_videos']:
+            if info['has_sibling_videos'] and info.get('media_type') != 'show':
                 sibling_list = '\n'.join(f'• {f}' for f in siblings)
                 send_ntfy_notification(
                     f"Multiple Videos: {info['folder_name']}",
@@ -1436,26 +1487,31 @@ def get_stats():
 @app.route('/api/media')
 def get_media():
     f = request.args.get('filter', 'all')
+    t = request.args.get('type', 'movie')
+    # Validate type to prevent injection (only allow known values)
+    if t not in ('movie', 'show'):
+        t = 'movie'
+    tc = f" AND (media_type = '{t}' OR media_type IS NULL)" if t == 'movie' else f" AND media_type = '{t}'"
 
     queries = {
         'needs_encoding': (
-            "SELECT * FROM media_files "
-            "WHERE status LIKE '%RE-ENCODE%' "
-            "AND (encode_status IS NULL OR encode_status='failed') "
-            "ORDER BY size_bytes DESC"
+            f"SELECT * FROM media_files "
+            f"WHERE status LIKE '%RE-ENCODE%' "
+            f"AND (encode_status IS NULL OR encode_status='failed'){tc} "
+            f"ORDER BY size_bytes DESC"
         ),
         'queued': (
-            "SELECT * FROM media_files WHERE encode_status IN ('queued','encoding') "
-            "ORDER BY scanned_at DESC"
+            f"SELECT * FROM media_files WHERE encode_status IN ('queued','encoding'){tc} "
+            f"ORDER BY scanned_at DESC"
         ),
         'done': (
-            "SELECT * FROM media_files WHERE encode_status='done' ORDER BY scanned_at DESC"
+            f"SELECT * FROM media_files WHERE encode_status='done'{tc} ORDER BY scanned_at DESC"
         ),
         'alerts': (
-            "SELECT * FROM media_files WHERE has_sibling_videos=1 ORDER BY folder_name"
+            f"SELECT * FROM media_files WHERE has_sibling_videos=1{tc} ORDER BY folder_name"
         ),
         'all': (
-            "SELECT * FROM media_files ORDER BY folder_name, filename"
+            f"SELECT * FROM media_files WHERE 1=1{tc} ORDER BY folder_name, filename"
         ),
     }
 
@@ -1476,9 +1532,9 @@ def get_media():
         )
         result.append(d)
 
-    # Total library stats
+    # Library stats filtered by type
     with db() as conn:
-        totals = conn.execute('''
+        totals = conn.execute(f'''
             SELECT
                 COUNT(*)                                         AS total_files,
                 COALESCE(SUM(size_bytes), 0)                     AS total_bytes,
@@ -1487,6 +1543,7 @@ def get_media():
                            THEN 1 END)                           AS needs_encoding,
                 COUNT(CASE WHEN encode_status IN ('queued','encoding') THEN 1 END) AS encoding_active
             FROM media_files
+            WHERE 1=1{tc}
         ''').fetchone()
 
     return jsonify({
