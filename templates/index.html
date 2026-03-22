@@ -336,6 +336,35 @@
         .queue-panel .collapsible-body { margin-top: 16px; }
         .queue-empty { color: var(--slate-gray); font-size: 0.9rem; padding: 20px 0; }
 
+        /* ── Log panel ───────────────────────────────────────────────────── */
+        .log-panel { margin-top: 24px; }
+        .log-panel .collapsible-header { font-size: 1.1rem; font-weight: 600; }
+        .log-panel .collapsible-body   { margin-top: 12px; }
+        .log-toolbar {
+            display: flex; align-items: center; gap: 10px;
+            margin-bottom: 8px; flex-wrap: wrap;
+        }
+        .log-toolbar-right { margin-left: auto; display: flex; gap: 8px; }
+        .log-level-dot {
+            width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+            margin-top: 5px;
+        }
+        .log-level-dot.info  { background: #6c757d; }
+        .log-level-dot.warn  { background: #ffc107; }
+        .log-level-dot.error { background: #dc3545; }
+        .log-box {
+            background: #0f1117; border-radius: 10px; padding: 12px 14px;
+            font-family: 'Courier New', monospace; font-size: 0.78rem;
+            line-height: 1.55; color: #c9d1d9; max-height: 340px;
+            overflow-y: auto; overflow-x: hidden; word-break: break-word;
+        }
+        .log-entry { display: flex; gap: 8px; padding: 1px 0; }
+        .log-ts    { color: #6e7681; flex-shrink: 0; }
+        .log-msg.info  { color: #c9d1d9; }
+        .log-msg.warn  { color: #e3b341; }
+        .log-msg.error { color: #f85149; }
+        .log-empty { color: #6e7681; font-style: italic; }
+
         .job-card {
             background: white; border: 1px solid var(--antiflash-white);
             border-radius: 12px; padding: 16px 20px; margin-bottom: 10px;
@@ -727,6 +756,28 @@
             </div>
         </div>
 
+        <!-- App Logs -->
+        <div class="log-panel collapsible-section collapsed" id="section-logs">
+            <div class="collapsible-header" onclick="toggleSection('logs')">
+                <span>App Logs <span id="log-badge"></span></span>
+                <span class="collapse-arrow">▼</span>
+            </div>
+            <div class="collapsible-body">
+                <div class="log-toolbar">
+                    <label style="font-size:0.85rem;color:var(--slate-gray);">
+                        <input type="checkbox" id="log-autoscroll" checked style="margin-right:4px;">
+                        Auto-scroll
+                    </label>
+                    <div class="log-toolbar-right">
+                        <button class="button button-secondary button-sm" onclick="clearLogs()">Clear</button>
+                    </div>
+                </div>
+                <div class="log-box" id="log-box">
+                    <span class="log-empty">No log entries yet.</span>
+                </div>
+            </div>
+        </div>
+
     </div><!-- /media -->
 
 </div><!-- /container -->
@@ -930,7 +981,7 @@ let collapsedSections = {};
 try { collapsedSections = JSON.parse(localStorage.getItem(COLLAPSE_KEY) || '{}'); } catch {}
 
 function applyCollapsed() {
-    ['alerts', 'encode-queue', 'translate-queue'].forEach(key => {
+    ['alerts', 'encode-queue', 'translate-queue', 'logs'].forEach(key => {
         const sectionId = key === 'alerts' ? 'alert-banner' : `section-${key}`;
         const el = document.getElementById(sectionId);
         if (!el) return;
@@ -1291,10 +1342,62 @@ function startScanPolling() {
     }, 1000);
 }
 
+// ── App logs ───────────────────────────────────────────────────────────────────
+let logSince      = 0;
+let logEntries    = [];
+let logBadgeCount = 0;
+
+async function loadLogs() {
+    try {
+        const r = await fetch(`/api/logs?since=${logSince}`);
+        const d = await r.json();
+        if (!d.logs || d.logs.length === 0) return;
+        logSince = d.total;
+        logEntries.push(...d.logs);
+        // cap local buffer at 500
+        if (logEntries.length > 500) logEntries = logEntries.slice(-500);
+        logBadgeCount += d.logs.filter(e => e.level === 'error').length;
+        renderLogs();
+    } catch (e) { /* silent */ }
+}
+
+function renderLogs() {
+    const box   = document.getElementById('log-box');
+    const badge = document.getElementById('log-badge');
+    if (!box) return;
+    if (logBadgeCount > 0) {
+        badge.textContent = `(${logBadgeCount} error${logBadgeCount > 1 ? 's' : ''})`;
+        badge.style.cssText = 'color:#dc3545;font-size:0.8rem;font-weight:500;';
+    } else {
+        badge.textContent = '';
+    }
+    if (logEntries.length === 0) {
+        box.innerHTML = '<span class="log-empty">No log entries yet.</span>';
+        return;
+    }
+    const wasAtBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+    box.innerHTML = logEntries.map(e => `
+        <div class="log-entry">
+            <span class="log-ts">${escHtml(e.ts)}</span>
+            <div class="log-level-dot ${e.level}"></div>
+            <span class="log-msg ${e.level}">${escHtml(e.msg)}</span>
+        </div>`).join('');
+    const autoScroll = document.getElementById('log-autoscroll');
+    if (autoScroll && autoScroll.checked && wasAtBottom) {
+        box.scrollTop = box.scrollHeight;
+    }
+}
+
+function clearLogs() {
+    logEntries    = [];
+    logBadgeCount = 0;
+    renderLogs();
+}
+
 // ── Encode jobs ───────────────────────────────────────────────────────────────
 function startJobsPolling() {
     stopJobsPolling();
-    jobsPollTimer = setInterval(() => { loadJobs(); loadTranslateJobs(); }, 2000);
+    jobsPollTimer = setInterval(() => { loadJobs(); loadTranslateJobs(); loadLogs(); }, 2000);
 }
 
 function stopJobsPolling() {
