@@ -1576,6 +1576,12 @@ def get_media():
             f"AND (encode_status IS NULL OR encode_status='failed'){tc} "
             f"ORDER BY size_bytes DESC"
         ),
+        'needs_remux': (
+            f"SELECT * FROM media_files "
+            f"WHERE status LIKE '%REMUX%' "
+            f"AND (encode_status IS NULL OR encode_status='failed'){tc} "
+            f"ORDER BY size_bytes DESC"
+        ),
         'queued': (
             f"SELECT * FROM media_files WHERE encode_status IN ('queued','encoding'){tc} "
             f"ORDER BY scanned_at DESC"
@@ -1841,6 +1847,23 @@ def api_translate_subtitle(file_id):
 
     translation_queue.put(job_id)
     return jsonify({'status': 'queued', 'job_id': job_id})
+
+
+@app.route('/api/translate/cancel/<int:job_id>', methods=['POST'])
+def cancel_translation(job_id):
+    with db() as conn:
+        job = conn.execute(
+            'SELECT * FROM translation_jobs WHERE id=?', (job_id,)
+        ).fetchone()
+        if not job:
+            return jsonify({'error': 'Job not found'}), 404
+        if job['status'] not in ('done', 'failed', 'cancelled'):
+            conn.execute(
+                "UPDATE translation_jobs SET status='cancelled', "
+                "completed_at=datetime('now') WHERE id=?",
+                (job_id,),
+            )
+    return jsonify({'status': 'cancelled'})
 
 
 @app.route('/api/translate/jobs')
