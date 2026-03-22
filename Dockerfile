@@ -2,7 +2,7 @@ FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install Python 3.11, ffmpeg (NVENC support comes from host driver via NVIDIA Container Toolkit), and utilities
+# Install Python 3.11, ffmpeg, and utilities
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11 \
     python3-pip \
@@ -12,6 +12,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     coreutils \
     && ln -sf /usr/bin/python3.11 /usr/bin/python3 \
     && ln -sf /usr/bin/python3 /usr/bin/python \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install libnvidia-encode from NVIDIA's apt repo so hevc_nvenc works
+# without needing the library to be present on the host or injected by
+# the Container Toolkit. Pinned to 550 — update if host driver changes.
+RUN curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb \
+        -o /tmp/cuda-keyring.deb \
+    && dpkg -i /tmp/cuda-keyring.deb \
+    && rm /tmp/cuda-keyring.deb \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends libnvidia-encode-550 \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
