@@ -172,12 +172,26 @@
         .alert-banner {
             background: #fff3cd; border: 1px solid #ffc107;
             border-radius: 12px; padding: 14px 20px; margin-bottom: 16px;
-            display: none; align-items: flex-start; gap: 12px; font-size: 0.9rem;
+            display: none; flex-direction: column; gap: 0; font-size: 0.9rem;
         }
         .alert-banner.show { display: flex; }
-        .alert-banner strong { font-weight: 600; display: block; margin-bottom: 4px; }
-        .alert-list { list-style: none; font-size: 0.85rem; color: var(--outer-space); }
+        .alert-banner strong { font-weight: 600; }
+        .alert-list { list-style: none; font-size: 0.85rem; color: var(--outer-space); margin-top: 8px; }
         .alert-list li::before { content: '→ '; }
+
+        /* ── Collapsible sections ─────────────────────────────────────────── */
+        .collapsible-header {
+            display: flex; justify-content: space-between; align-items: center;
+            cursor: pointer; user-select: none; gap: 8px;
+        }
+        .collapsible-header:hover { opacity: 0.75; }
+        .collapse-arrow {
+            font-size: 0.7rem; color: var(--slate-gray); flex-shrink: 0;
+            transition: transform 0.18s ease; display: inline-block;
+        }
+        .collapsible-section.collapsed .collapse-arrow { transform: rotate(-90deg); }
+        .collapsible-section.collapsed .collapsible-body { display: none; }
+        .collapsible-body { margin-top: 6px; }
 
         /* ── Table toolbar ───────────────────────────────────────────────── */
         .table-toolbar {
@@ -316,10 +330,10 @@
 
         /* ── Encode queue panel ──────────────────────────────────────────── */
         .queue-panel { margin-top: 24px; }
-        .queue-panel h3 {
-            font-size: 1.1rem; font-weight: 600; margin-bottom: 16px;
-            display: flex; align-items: center; gap: 8px;
+        .queue-panel .collapsible-header {
+            font-size: 1.1rem; font-weight: 600; margin-bottom: 0;
         }
+        .queue-panel .collapsible-body { margin-top: 16px; }
         .queue-empty { color: var(--slate-gray); font-size: 0.9rem; padding: 20px 0; }
 
         .job-card {
@@ -623,9 +637,12 @@
         </div>
 
         <!-- Multi-video folder alerts -->
-        <div class="alert-banner" id="alert-banner">
-            <div>
-                <strong>Multiple video files detected in the same folder</strong>
+        <div class="alert-banner collapsible-section" id="alert-banner">
+            <div class="collapsible-header" onclick="toggleSection('alerts')">
+                <strong>⚠ Multiple video files detected in the same folder</strong>
+                <span class="collapse-arrow" id="collapse-arrow-alerts">▼</span>
+            </div>
+            <div class="collapsible-body" id="collapsible-body-alerts">
                 <ul class="alert-list" id="alert-list"></ul>
             </div>
         </div>
@@ -689,15 +706,25 @@
         </div>
 
         <!-- Encode queue -->
-        <div class="queue-panel">
-            <h3>Encode Queue <span id="queue-badge"></span></h3>
-            <div id="jobs-list"><p class="queue-empty">No encode jobs.</p></div>
+        <div class="queue-panel collapsible-section" id="section-encode-queue">
+            <div class="collapsible-header" onclick="toggleSection('encode-queue')">
+                <span>Encode Queue <span id="queue-badge"></span></span>
+                <span class="collapse-arrow">▼</span>
+            </div>
+            <div class="collapsible-body">
+                <div id="jobs-list"><p class="queue-empty">No encode jobs.</p></div>
+            </div>
         </div>
 
         <!-- Translation queue -->
-        <div class="queue-panel" style="margin-top:16px;">
-            <h3>Translation Queue <span id="translate-queue-badge"></span></h3>
-            <div id="translate-jobs-list"><p class="queue-empty">No translation jobs.</p></div>
+        <div class="queue-panel collapsible-section" id="section-translate-queue" style="margin-top:16px;">
+            <div class="collapsible-header" onclick="toggleSection('translate-queue')">
+                <span>Translation Queue <span id="translate-queue-badge"></span></span>
+                <span class="collapse-arrow">▼</span>
+            </div>
+            <div class="collapsible-body">
+                <div id="translate-jobs-list"><p class="queue-empty">No translation jobs.</p></div>
+            </div>
         </div>
 
     </div><!-- /media -->
@@ -785,6 +812,7 @@ function showNotification(msg, type = 'success') {
 
 // ── Dashboard: config + stats ────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', () => {
+    applyCollapsed();
     loadConfig();
     loadStats();
     setInterval(loadStats, 30000);
@@ -894,6 +922,26 @@ async function loadAlerts() {
             `<li><strong>${escHtml(a.folder)}</strong> — ${a.count} files: ${a.files.map(escHtml).join(', ')}</li>`
         ).join('');
     } catch (e) { console.error('alerts error', e); }
+}
+
+// ── Collapsible sections ─────────────────────────────────────────────────────
+const COLLAPSE_KEY = 'mm-collapsed-v1';
+let collapsedSections = {};
+try { collapsedSections = JSON.parse(localStorage.getItem(COLLAPSE_KEY) || '{}'); } catch {}
+
+function applyCollapsed() {
+    ['alerts', 'encode-queue', 'translate-queue'].forEach(key => {
+        const sectionId = key === 'alerts' ? 'alert-banner' : `section-${key}`;
+        const el = document.getElementById(sectionId);
+        if (!el) return;
+        el.classList.toggle('collapsed', !!collapsedSections[key]);
+    });
+}
+
+function toggleSection(key) {
+    collapsedSections[key] = !collapsedSections[key];
+    try { localStorage.setItem(COLLAPSE_KEY, JSON.stringify(collapsedSections)); } catch {}
+    applyCollapsed();
 }
 
 function setType(btn, type) {
