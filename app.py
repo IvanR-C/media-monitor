@@ -938,7 +938,11 @@ def encode_worker_loop():
 
 
 def queue_encode_jobs(file_ids):
-    """Insert encode jobs and push them onto the worker queue."""
+    """Insert encode jobs and push them onto the worker queue.
+
+    encode_queue.put() is called AFTER the transaction commits so the worker
+    never reads a job_id before the INSERT is visible to other connections.
+    """
     queued = []
     with db() as conn:
         for fid in file_ids:
@@ -961,8 +965,10 @@ def queue_encode_jobs(file_ids):
             conn.execute(
                 "UPDATE media_files SET encode_status='queued' WHERE id=?", (fid,)
             )
-            encode_queue.put(job_id)
             queued.append(job_id)
+    # Push onto the queue only after the transaction has committed
+    for job_id in queued:
+        encode_queue.put(job_id)
     return queued
 
 
