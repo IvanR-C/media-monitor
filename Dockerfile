@@ -35,6 +35,12 @@ EXPOSE 5000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
     CMD curl -f http://localhost:5000/api/stats || exit 1
 
+# Expose NVIDIA Container Toolkit's injected driver libs to ffmpeg.
+# The toolkit mounts libnvidia-encode.so.1 and friends into
+# /usr/local/nvidia/lib64 at container startup but doesn't add that
+# path to ldconfig, so ffmpeg can't find them without this.
+ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/lib/x86_64-linux-gnu
+
 # Set environment variables with defaults
 ENV WATCH_DIR=/watch \
     CONFIG_FILE=/config/config.json \
