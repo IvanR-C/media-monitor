@@ -358,6 +358,10 @@ def determine_status(size_bytes, audio_streams, subtitle_streams):
     active = [s for s in audio_streams + subtitle_streams if s.get('action') != 'drop']
     if any(not s.get('lang') for s in active):
         parts.append('REMUX')
+    # Flag if no English or Spanish subtitle is present among active (non-dropped) subtitle tracks
+    active_subs = [s for s in subtitle_streams if s.get('action') != 'drop']
+    if not any(normalize_lang(s.get('lang', '')) in APPROVED_SUB_LANGS for s in active_subs):
+        parts.append('MISSING LANG')
     return ' | '.join(parts) if parts else 'OK'
 
 
@@ -1591,6 +1595,10 @@ def get_media():
         ),
         'alerts': (
             f"SELECT * FROM media_files WHERE has_sibling_videos=1{tc} ORDER BY folder_name"
+        ),
+        'missing_lang': (
+            f"SELECT * FROM media_files WHERE status LIKE '%MISSING LANG%'{tc} "
+            f"ORDER BY folder_name, filename"
         ),
         'all': (
             f"SELECT * FROM media_files WHERE 1=1{tc} ORDER BY folder_name, filename"
