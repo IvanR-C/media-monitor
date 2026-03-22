@@ -1,8 +1,8 @@
-FROM nvidia/cuda:12.3.1-runtime-ubuntu22.04
+FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install Python 3.11, ffmpeg (with NVENC support via CUDA), and utilities
+# Install Python 3.11, ffmpeg (NVENC support comes from host driver via NVIDIA Container Toolkit), and utilities
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11 \
     python3-pip \
