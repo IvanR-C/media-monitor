@@ -1,13 +1,14 @@
 services:
   media-monitor:
     build: .
+    image: media-monitor:1.0.0
     container_name: media-monitor
     restart: unless-stopped
     ports:
       - "5000:5000"
     volumes:
-      # Mount your media directory (read-only recommended)
-      - /path/to/your/media:/watch:ro
+      # Mount your media directory (read/write required for encoding in-place)
+      - /path/to/your/media:/watch
       # Persistent config and database
       - ./config:/config
     environment:
@@ -25,6 +26,8 @@ services:
       # - NTFY_TOPIC=my-media-notifications
       # - DISCORD_WEBHOOK=https://discord.com/api/webhooks/...
       # - TVDB_API_KEY=your-api-key
+      # - OPENAI_API_KEY=your-openai-key
+      # - OPENAI_MODEL=gpt-4o-mini
 
     # NVIDIA GPU access for hevc_nvenc encoding
     # Requires: NVIDIA Container Toolkit installed on the host
