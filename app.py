@@ -358,9 +358,10 @@ def determine_status(size_bytes, audio_streams, subtitle_streams):
     active = [s for s in audio_streams + subtitle_streams if s.get('action') != 'drop']
     if any(not s.get('lang') for s in active):
         parts.append('REMUX')
-    # Flag if no English or Spanish subtitle is present among active (non-dropped) subtitle tracks
+    # Flag if BOTH English and Spanish subtitles are not present — each is required
     active_subs = [s for s in subtitle_streams if s.get('action') != 'drop']
-    if not any(normalize_lang(s.get('lang', '')) in APPROVED_SUB_LANGS for s in active_subs):
+    active_sub_langs = {normalize_lang(s.get('lang', '')) for s in active_subs}
+    if not APPROVED_SUB_LANGS.issubset(active_sub_langs):
         parts.append('MISSING LANG')
     return ' | '.join(parts) if parts else 'OK'
 
