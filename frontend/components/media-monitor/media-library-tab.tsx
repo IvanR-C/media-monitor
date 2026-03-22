@@ -10,7 +10,7 @@ import { AppLogs } from "./app-logs"
 import { toast } from "sonner"
 
 export type MediaType = "movie" | "show"
-export type FilterType = "all" | "needs_encoding" | "needs_remux" | "queued" | "done" | "alerts"
+export type FilterType = "all" | "needs_encoding" | "needs_remux" | "missing_lang" | "queued" | "done" | "alerts"
 
 export interface MediaFile {
   id: number
@@ -37,6 +37,7 @@ export interface AudioTrack {
   lang?: string
   channels?: number
   title?: string
+  action?: 'keep' | 'drop'
 }
 
 export interface SubtitleTrack {
@@ -44,6 +45,7 @@ export interface SubtitleTrack {
   codec: string
   lang?: string
   title?: string
+  action?: 'keep' | 'drop'
 }
 
 interface LibraryStatsData {
@@ -90,6 +92,7 @@ export function MediaLibraryTab() {
       all: all.length,
       needs_encoding: all.filter(f => f.status?.includes('RE-ENCODE')).length,
       needs_remux: all.filter(f => f.status?.includes('REMUX')).length,
+      missing_lang: all.filter(f => f.status?.includes('MISSING LANG')).length,
       queued: all.filter(f => f.encode_status === 'queued' || f.encode_status === 'encoding').length,
       done: all.filter(f => f.encode_status === 'done').length,
       alerts: all.filter(f => f.audio_tracks.some(t => !t.lang) || f.subtitle_tracks.some(t => !t.lang)).length,
@@ -167,6 +170,55 @@ export function MediaLibraryTab() {
     }
   }
 
+  const handleAssignTracks = async (fileId: number, audio: any[], subs: any[]) => {
+    try {
+      const r = await fetch(`/api/media/${fileId}/assign-tracks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ audio, subtitles: subs }),
+      })
+      if (!r.ok) throw new Error('Failed')
+      toast.success('Track languages saved')
+      fetchMedia()
+    } catch {
+      toast.error('Failed to save track languages')
+    }
+  }
+
+  const TEXT_SUB_CODECS_EXCLUDE = new Set([
+    'hdmv_pgs_subtitle','dvd_subtitle','dvb_subtitle','dvb_teletext','eia_608'
+  ])
+
+  const handleTranslateSelected = async () => {
+    if (selectedIds.size === 0) return
+    let queued = 0
+    let skipped = 0
+    for (const id of selectedIds) {
+      const file = files.find(f => f.id === id)
+      if (!file) { skipped++; continue }
+      const textSubs = file.subtitle_tracks.filter(t => !TEXT_SUB_CODECS_EXCLUDE.has(t.codec))
+      if (textSubs.length === 0) { skipped++; continue }
+      // Prefer first non-eng/spa track, fall back to first text track
+      const target =
+        textSubs.find(t => !['eng', 'spa'].includes((t.lang ?? '').toLowerCase())) ??
+        textSubs[0]
+      try {
+        const r = await fetch(`/api/media/${id}/translate-subtitle`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sub_idx: target.sub_idx }),
+        })
+        if (r.ok) queued++
+        else skipped++
+      } catch {
+        skipped++
+      }
+    }
+    if (queued > 0) toast.success(`Queued ${queued} file(s) for translation`)
+    if (skipped > 0) toast.info(`${skipped} file(s) skipped (no translatable subtitle)`)
+    setSelectedIds(new Set())
+  }
+
   const toggleSelect = (id: number) => {
     const newSelected = new Set(selectedIds)
     if (newSelected.has(id)) newSelected.delete(id)
@@ -206,6 +258,8 @@ export function MediaLibraryTab() {
           onEnqueue={handleEnqueueSingle}
           onEnqueueSelected={handleEnqueueSelected}
           onTranslate={handleTranslateSingle}
+          onTranslateSelected={handleTranslateSelected}
+          onAssignTracks={handleAssignTracks}
           mediaType={mediaType}
           loading={loading}
         />

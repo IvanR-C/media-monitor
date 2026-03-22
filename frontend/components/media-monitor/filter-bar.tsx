@@ -20,6 +20,7 @@ const filters: { key: FilterType; label: string }[] = [
   { key: "all", label: "All" },
   { key: "needs_encoding", label: "Re-encode" },
   { key: "needs_remux", label: "Remux" },
+  { key: "missing_lang", label: "Missing Sub" },
   { key: "queued", label: "Queued" },
   { key: "done", label: "Done" },
   { key: "alerts", label: "Alerts" }
