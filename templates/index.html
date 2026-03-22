@@ -884,6 +884,15 @@ window.addEventListener('DOMContentLoaded', () => {
     loadConfig();
     loadStats();
     setInterval(loadStats, 30000);
+
+    // Delegated click for show/season tree rows — avoids inline onclick
+    // with JSON strings that break when names contain quotes or apostrophes.
+    document.getElementById('media-tbody').addEventListener('click', e => {
+        const showRow   = e.target.closest('.show-header-row');
+        const seasonRow = e.target.closest('.season-header-row');
+        if (showRow)   toggleShow(showRow.dataset.showName);
+        else if (seasonRow) toggleSeason(seasonRow.dataset.seasonKey);
+    });
 });
 
 async function loadConfig() {
@@ -1092,7 +1101,7 @@ function renderShowTree(files) {
             ? `<img class="poster-thumb" src="${escHtml(poster)}" alt="" loading="lazy" onerror="this.parentElement.innerHTML='<div class=\\'poster-placeholder\\'></div>'">`
             : `<div class="poster-placeholder"></div>`;
 
-        html += `<tr class="show-header-row" onclick="toggleShow(${JSON.stringify(showName)})">
+        html += `<tr class="show-header-row" data-show-name="${escHtml(showName)}">
             <td></td>
             <td class="col-title">
                 <div class="cell-title-wrap">
@@ -1126,7 +1135,7 @@ function renderShowTree(files) {
                 sHasRemux    ? '<span class="badge badge-remux">REMUX</span>'        : '',
             ].filter(Boolean).join(' ');
 
-            html += `<tr class="season-header-row" onclick="toggleSeason(${JSON.stringify(seasonKey)})">
+            html += `<tr class="season-header-row" data-season-key="${escHtml(seasonKey)}">
                 <td></td>
                 <td class="col-title">
                     <div class="season-title-wrap">
