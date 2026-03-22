@@ -43,7 +43,8 @@ ENV WATCH_DIR=/watch \
     MAX_WORKERS=4 \
     STABILIZE_INTERVAL=10 \
     STABILIZE_CHECKS=3 \
-    REENCODE_SIZE_GB=20
+    REENCODE_SIZE_GB=20 \
+    PYTHONUNBUFFERED=1
 
-# Run the application
-CMD ["python", "app.py"]
+# Run the application (-u = unbuffered stdout/stderr, same as PYTHONUNBUFFERED=1)
+CMD ["python", "-u", "app.py"]
