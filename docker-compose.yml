@@ -1,6 +1,6 @@
 services:
   backend:
-    image: ivanchelo/media-monitor:3.22.26
+    image: ivanchelo/media-monitor:3.22.26.2
     container_name: media-monitor-backend
     restart: unless-stopped
     volumes:
@@ -37,7 +37,7 @@ services:
                 - video
 
   frontend:
-    image: ivanchelo/media-monitor-frontend:latest
+    image: ivanchelo/media-monitor-frontend:3.22.26.2
     container_name: media-monitor-frontend
     restart: unless-stopped
     ports:
