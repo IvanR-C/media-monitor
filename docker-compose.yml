@@ -35,6 +35,6 @@ services:
       resources:
         reservations:
           devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+            - count: all
+              capabilities:
+                - gpu
