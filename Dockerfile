@@ -1,12 +1,18 @@
-FROM python:3.11-alpine
+FROM nvidia/cuda:12.3.1-runtime-ubuntu22.04
 
-# Install system dependencies
-RUN apk add --no-cache \
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install Python 3.11, ffmpeg (with NVENC support via CUDA), and utilities
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3-pip \
     ffmpeg \
     curl \
     jq \
     coreutils \
-    bash
+    && ln -sf /usr/bin/python3.11 /usr/bin/python3 \
+    && ln -sf /usr/bin/python3 /usr/bin/python \
+    && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
 WORKDIR /app
@@ -25,6 +31,10 @@ RUN mkdir -p /config /watch
 # Expose web UI port
 EXPOSE 5000
 
+# Health check — hits the stats API endpoint
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD curl -f http://localhost:5000/api/stats || exit 1
+
 # Set environment variables with defaults
 ENV WATCH_DIR=/watch \
     CONFIG_FILE=/config/config.json \
@@ -32,7 +42,8 @@ ENV WATCH_DIR=/watch \
     PORT=5000 \
     MAX_WORKERS=4 \
     STABILIZE_INTERVAL=10 \
-    STABILIZE_CHECKS=3
+    STABILIZE_CHECKS=3 \
+    REENCODE_SIZE_GB=20
 
 # Run the application
 CMD ["python", "app.py"]
