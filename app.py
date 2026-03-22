@@ -660,6 +660,14 @@ def _fail_job(job_id, filepath, tmp_path, error):
             (filepath,),
         )
     print(f"[encode] job {job_id} failed: {error}")
+    folder_name = Path(filepath).parent.name
+    filename    = Path(filepath).name
+    send_ntfy_notification(
+        f"Encode Failed: {folder_name}",
+        f"File: {filename}\nError: {error}",
+        tags='rotating_light,x',
+        priority='high',
+    )
 
 
 def run_encode_job(job_id):
@@ -789,16 +797,21 @@ def run_encode_job(job_id):
 
     orig_size    = mf['size_bytes'] or encoded_size
     savings_pct  = (1 - encoded_size / orig_size) * 100 if orig_size > 0 else 0
+    orig_h       = mf['video_height'] or 0
+    new_h        = new_info['video_height'] if new_info else orig_h
+    res_str      = f"{orig_h}p → {new_h}p" if new_h and new_h != orig_h else f"{new_h or orig_h}p"
     print(
         f"[encode] job {job_id} done — "
         f"{orig_size/1e9:.2f} GB → {encoded_size/1e9:.2f} GB "
         f"(saved {savings_pct:.0f}%)"
     )
     send_ntfy_notification(
-        mf['folder_name'],
-        f"Encode complete: {mf['filename']}\n"
-        f"{orig_size/1e9:.2f} GB → {encoded_size/1e9:.2f} GB  ({savings_pct:.0f}% saved)",
-        'white_check_mark',
+        f"Encode Complete: {mf['folder_name']}",
+        f"File: {mf['filename']}\n"
+        f"Size: {orig_size/1e9:.2f} GB → {encoded_size/1e9:.2f} GB  ({savings_pct:.0f}% saved)\n"
+        f"Resolution: {res_str}",
+        tags='white_check_mark,movie_camera',
+        attach_url=mf['poster_url'] if mf['poster_url'] else None,
     )
 
 
@@ -998,7 +1011,19 @@ def _fail_translation_job(job_id, error):
             "completed_at=datetime('now') WHERE id=?",
             (error, job_id),
         )
+        job = conn.execute(
+            'SELECT filepath FROM translation_jobs WHERE id=?', (job_id,)
+        ).fetchone()
     print(f"[translate] job {job_id} failed: {error}")
+    if job:
+        folder_name = Path(job['filepath']).parent.name
+        filename    = Path(job['filepath']).name
+        send_ntfy_notification(
+            f"Translation Failed: {folder_name}",
+            f"File: {filename}\nError: {error}",
+            tags='rotating_light,x',
+            priority='high',
+        )
 
 
 def run_translation_job(job_id):
@@ -1100,11 +1125,14 @@ def run_translation_job(job_id):
             )
 
         print(f"[translate] job {job_id} done → {srt_path}")
+        src_label = source_lang.upper() if source_lang else 'unknown'
         send_ntfy_notification(
-            mf['folder_name'],
-            f"Spanish subtitle ready: {mf['filename']}\n"
+            f"Subtitle Ready: {mf['folder_name']}",
+            f"File: {mf['filename']}\n"
+            f"Translated: {src_label} → Spanish\n"
             f"Saved as: {Path(srt_path).name}",
-            'white_check_mark',
+            tags='white_check_mark,speech_balloon',
+            attach_url=mf['poster_url'] if mf['poster_url'] else None,
         )
 
     except Exception as e:
@@ -1130,7 +1158,7 @@ def translation_worker_loop():
 
 
 # ── Notifications ─────────────────────────────────────────────────────────────
-def send_ntfy_notification(title, message, tags=None):
+def send_ntfy_notification(title, message, tags=None, priority=None, attach_url=None):
     if not config.get('enable_ntfy') or not config.get('ntfy_topic'):
         return
     try:
@@ -1138,6 +1166,10 @@ def send_ntfy_notification(title, message, tags=None):
         headers = {'Title': title}
         if tags:
             headers['Tags'] = tags
+        if priority:
+            headers['Priority'] = priority
+        if attach_url:
+            headers['Attach'] = attach_url
         requests.post(url, data=message, headers=headers, timeout=10)
     except Exception as e:
         print(f"[ntfy] error: {e}")
@@ -1274,19 +1306,41 @@ def analyze_file(filepath):
             upsert_media_file(info)
 
             if info['has_sibling_videos']:
+                sibling_list = '\n'.join(f'• {f}' for f in siblings)
                 send_ntfy_notification(
-                    info['folder_name'],
-                    f"Warning: multiple video files in folder '{info['folder_name']}'",
-                    'warning',
+                    f"Multiple Videos: {info['folder_name']}",
+                    f"Multiple video files detected:\n{sibling_list}",
+                    tags='warning,rotating_light',
+                    priority='high',
                 )
 
         audio_streams = json.loads(info['audio_tracks'])    if info else []
         sub_streams   = json.loads(info['subtitle_tracks']) if info else []
         status_str    = determine_status(size, audio_streams, sub_streams)
 
+        # Rich new-file notification
+        codec_str  = (f"{info['video_codec'].upper()} "
+                      f"{info['video_width']}×{info['video_height']}") if info else '?'
+        dur_min    = int((info['duration_seconds'] or 0) // 60) if info else 0
+        size_gb    = size / 1e9
+        lang_list  = ', '.join(t.get('lang', '?') for t in audio_streams) or 'unknown'
+        body = (
+            f"File: {os.path.basename(filepath)}\n"
+            f"Status: {status_str}\n"
+            f"Video: {codec_str}  •  {size_gb:.2f} GB  •  {dur_min} min\n"
+            f"Audio: {lang_list}"
+        )
+        if 'RE-ENCODE' in status_str or 'REMUX' in status_str:
+            ntfy_tags, ntfy_priority = 'rotating_light,movie_camera', 'high'
+        else:
+            ntfy_tags, ntfy_priority = 'white_check_mark,movie_camera', 'default'
+        poster = info.get('poster_url') if info else None
         send_ntfy_notification(
             Path(filepath).parent.name,
-            f"File: {os.path.basename(filepath)}\nStatus: {status_str}",
+            body,
+            tags=ntfy_tags,
+            priority=ntfy_priority,
+            attach_url=poster,
         )
         send_discord_notification(filepath, status_str, size, ffprobe_data)
         mark_as_processed(filepath, status_str, size)
@@ -1343,7 +1397,7 @@ def update_config_route():
 
 @app.route('/api/test/ntfy', methods=['POST'])
 def test_ntfy():
-    send_ntfy_notification('Test Notification', 'This is a test from Media Monitor!', 'test')
+    send_ntfy_notification('Test Notification', 'This is a test from Media Monitor!', tags='test_tube')
     return jsonify({'status': 'success', 'message': 'Test notification sent'})
 
 
