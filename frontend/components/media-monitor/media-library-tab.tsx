@@ -69,8 +69,8 @@ export function MediaLibraryTab() {
   const [stats, setStats] = useState<LibraryStatsData>({ total_files: 0, total_bytes: 0, needs_encoding: 0, encoding_active: 0 })
   const [loading, setLoading] = useState(false)
 
-  const fetchMedia = useCallback(async () => {
-    setLoading(true)
+  const fetchMedia = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true)
     try {
       const params = new URLSearchParams({ type: mediaType, filter })
       if (searchQuery) params.set('search', searchQuery)
@@ -78,9 +78,9 @@ export function MediaLibraryTab() {
       setFiles(data.files ?? [])
       if (data.stats) setStats(data.stats)
     } catch {
-      toast.error('Failed to load media library')
+      if (!silent) toast.error('Failed to load media library')
     } finally {
-      setLoading(false)
+      if (!silent) setLoading(false)
     }
   }, [mediaType, filter, searchQuery])
 
@@ -88,14 +88,14 @@ export function MediaLibraryTab() {
     fetchMedia()
   }, [fetchMedia])
 
-  // Auto-refresh every 3 s while any encode or translation job is active
+  // Auto-refresh every 3 s while any encode or translation job is active — silent so the table never blinks
   const hasActiveJobs = files.some(f =>
     f.encode_status === 'encoding' || f.encode_status === 'queued' ||
     (f.translate_status != null && !['done', 'failed', 'cancelled'].includes(f.translate_status))
   )
   useEffect(() => {
     if (!hasActiveJobs) return
-    const id = setInterval(fetchMedia, 3000)
+    const id = setInterval(() => fetchMedia(true), 3000)
     return () => clearInterval(id)
   }, [hasActiveJobs, fetchMedia])
 
