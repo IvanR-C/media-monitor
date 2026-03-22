@@ -14,17 +14,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf /usr/bin/python3 /usr/bin/python \
     && rm -rf /var/lib/apt/lists/*
 
-# Install libnvidia-encode from NVIDIA's apt repo so hevc_nvenc works
-# without needing the library to be present on the host or injected by
-# the Container Toolkit. Pinned to 550 — update if host driver changes.
-RUN curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb \
-        -o /tmp/cuda-keyring.deb \
-    && dpkg -i /tmp/cuda-keyring.deb \
-    && rm /tmp/cuda-keyring.deb \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends libnvidia-encode-550 \
-    && rm -rf /var/lib/apt/lists/*
-
 # Set working directory
 WORKDIR /app
 
@@ -46,11 +35,13 @@ EXPOSE 5000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
     CMD curl -f http://localhost:5000/api/stats || exit 1
 
-# Expose NVIDIA Container Toolkit's injected driver libs to ffmpeg.
-# The toolkit mounts libnvidia-encode.so.1 and friends into
-# /usr/local/nvidia/lib64 at container startup but doesn't add that
-# path to ldconfig, so ffmpeg can't find them without this.
-ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/lib/x86_64-linux-gnu
+# The NVIDIA Container Toolkit injects libnvidia-encode.so.1 and
+# libnvcuvid.so.1 from the host driver into /usr/lib/x86_64-linux-gnu
+# at container startup. That path is already in ldconfig's default
+# search, so no extra LD_LIBRARY_PATH is needed.
+# DO NOT install libnvidia-encode from the CUDA apt repo — it pulls in
+# cuda-compat which breaks cuInit on Pascal GPUs (GTX 10xx and older)
+# with CUDA_ERROR_COMPAT_NOT_SUPPORTED_ON_DEVICE.
 
 # Set environment variables with defaults
 ENV WATCH_DIR=/watch \
