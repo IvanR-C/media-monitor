@@ -99,6 +99,17 @@ export function MediaLibraryTab() {
     }
   }, [files])
 
+  const handleRecalculate = async () => {
+    try {
+      const r = await fetch('/api/media/recalculate-status', { method: 'POST' })
+      const data = await r.json()
+      toast.success(`Status recalculated for ${data.updated} files`)
+      fetchMedia()
+    } catch {
+      toast.error('Recalculate failed')
+    }
+  }
+
   const handleScan = async () => {
     setIsScanning(true)
     try {
@@ -243,6 +254,7 @@ export function MediaLibraryTab() {
           counts={filterCounts}
           isScanning={isScanning}
           onScan={handleScan}
+          onRecalculate={handleRecalculate}
           searchQuery={searchQuery}
           onSearchChange={setSearchQuery}
         />

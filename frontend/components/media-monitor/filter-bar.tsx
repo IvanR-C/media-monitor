@@ -3,7 +3,7 @@
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
-import { Loader2, RefreshCw, Search } from "lucide-react"
+import { Loader2, RefreshCw, Search, RotateCcw } from "lucide-react"
 import type { FilterType } from "./media-library-tab"
 
 interface FilterBarProps {
@@ -12,6 +12,7 @@ interface FilterBarProps {
   counts: Record<FilterType, number>
   isScanning: boolean
   onScan: () => void
+  onRecalculate: () => void
   searchQuery: string
   onSearchChange: (query: string) => void
 }
@@ -26,7 +27,7 @@ const filters: { key: FilterType; label: string }[] = [
   { key: "alerts", label: "Alerts" }
 ]
 
-export function FilterBar({ value, onChange, counts, isScanning, onScan, searchQuery, onSearchChange }: FilterBarProps) {
+export function FilterBar({ value, onChange, counts, isScanning, onScan, onRecalculate, searchQuery, onSearchChange }: FilterBarProps) {
   return (
     <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-4">
       <div className="relative flex-1 sm:max-w-xs">
@@ -80,6 +81,17 @@ export function FilterBar({ value, onChange, counts, isScanning, onScan, searchQ
         >
           <RefreshCw className={cn("mr-1 h-3 w-3", isScanning && "animate-spin")} />
           Scan
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={onRecalculate}
+          disabled={isScanning}
+          className="h-7 px-2 text-xs"
+          title="Recalculate status from stored track data (fast — no ffprobe)"
+        >
+          <RotateCcw className="mr-1 h-3 w-3" />
+          Recalc
         </Button>
       </div>
     </div>
