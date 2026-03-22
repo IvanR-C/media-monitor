@@ -1661,8 +1661,17 @@ def get_media():
     }
 
     sql = queries.get(f, queries['all'])
+    search = request.args.get('search', '').strip()
+    params: list = []
+    if search:
+        sql = (
+            f"SELECT * FROM ({sql}) WHERE "
+            f"folder_name LIKE ? OR filename LIKE ? OR show_name LIKE ?"
+        )
+        params = [f'%{search}%', f'%{search}%', f'%{search}%']
+
     with db() as conn:
-        rows = conn.execute(sql).fetchall()
+        rows = conn.execute(sql, params).fetchall()
 
     result = []
     for r in rows:
