@@ -12,6 +12,7 @@ interface EncodeJob {
   folder_name: string
   filename: string
   status: "queued" | "encoding" | "done" | "failed" | "cancelled"
+  job_type?: "encode" | "remux"
   progress?: number
   speed?: string
   eta_seconds?: number
@@ -254,9 +255,10 @@ function EncodeJobRow({
 
       <div className="min-w-0 flex-1 overflow-hidden">
         <div className="truncate font-medium text-foreground/90">{job.folder_name}</div>
-        {job.status === "encoding" && job.speed && (
+        {job.status === "encoding" && (
           <div className="text-[10px] text-muted-foreground">
-            {job.speed} · ETA {formatEta(job.eta_seconds)}
+            {job.job_type === "remux" ? "Remuxing" : "Encoding"}
+            {job.speed ? ` · ${job.speed} · ETA ${formatEta(job.eta_seconds)}` : ""}
           </div>
         )}
         {job.status === "failed" && job.error_text && (

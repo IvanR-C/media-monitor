@@ -178,6 +178,14 @@ def _migrate_db():
                 conn.execute(f'ALTER TABLE media_files ADD COLUMN {col} {definition}')
             except Exception:
                 pass  # column already exists
+        # encode_jobs additions
+        for col, definition in [
+            ('job_type', "TEXT DEFAULT 'encode'"),
+        ]:
+            try:
+                conn.execute(f'ALTER TABLE encode_jobs ADD COLUMN {col} {definition}')
+            except Exception:
+                pass
 
 
 def init_db():
@@ -673,6 +681,42 @@ def build_ffmpeg_cmd(filepath, output_path, row):
     return cmd
 
 
+def build_remux_cmd(filepath, output_path, audio_tracks, subtitle_tracks):
+    """
+    Build an ffmpeg remux command: copy every stream bit-for-bit, drop tracks
+    whose action=='drop', and stamp the language tags from assignments.
+    No re-encode — only the container/metadata is rewritten.
+    """
+    cmd = ['ffmpeg', '-y', '-progress', 'pipe:1', '-nostats', '-i', filepath]
+
+    # Always keep the primary video stream
+    cmd += ['-map', '0:v:0']
+
+    kept_audio = [t for t in audio_tracks if t.get('action') != 'drop']
+    kept_subs  = [t for t in subtitle_tracks if t.get('action') != 'drop']
+
+    # Map by absolute stream_idx so drops work correctly
+    for t in kept_audio:
+        si = t.get('stream_idx')
+        cmd += ['-map', f'0:{si}'] if si is not None else ['-map', f'0:a:{t["audio_idx"]}']
+    for t in kept_subs:
+        si = t.get('stream_idx')
+        cmd += ['-map', f'0:{si}'] if si is not None else ['-map', f'0:s:{t["sub_idx"]}']
+
+    cmd += ['-c', 'copy']
+
+    # Stamp language metadata on the re-ordered output streams
+    for i, t in enumerate(kept_audio):
+        if t.get('lang'):
+            cmd += [f'-metadata:s:a:{i}', f'language={t["lang"]}']
+    for i, t in enumerate(kept_subs):
+        if t.get('lang'):
+            cmd += [f'-metadata:s:s:{i}', f'language={t["lang"]}']
+
+    cmd += ['-f', 'matroska', output_path]
+    return cmd
+
+
 # ── FFmpeg progress parsing ───────────────────────────────────────────────────
 # ffmpeg -progress pipe:1 emits newline-separated key=value pairs, e.g.:
 #   out_time_us=51234567000
@@ -784,10 +828,13 @@ def run_encode_job(job_id):
     if not mf:
         _fail_job(job_id, job['filepath'], None, 'Media record not found in DB')
         return
-    log('info', f"[encode] job {job_id} picked up — {Path(job['filepath']).name}")
+
+    job_type = (job['job_type'] or 'encode') if 'job_type' in job.keys() else 'encode'
+    tag      = '[remux]' if job_type == 'remux' else '[encode]'
+    log('info', f"{tag} job {job_id} picked up — {Path(job['filepath']).name}")
 
     filepath = job['filepath']
-    tmp_path = filepath + '.encoding.tmp'
+    tmp_path = filepath + ('.remux.tmp' if job_type == 'remux' else '.encoding.tmp')
 
     if os.path.exists(tmp_path):
         try:
@@ -809,9 +856,16 @@ def run_encode_job(job_id):
         _fail_job(job_id, filepath, tmp_path, f'DB error before encode start: {e}')
         return
 
-    cmd      = build_ffmpeg_cmd(filepath, tmp_path, dict(mf))
+    if job_type == 'remux':
+        cmd = build_remux_cmd(
+            filepath, tmp_path,
+            json.loads(mf['audio_tracks']    or '[]'),
+            json.loads(mf['subtitle_tracks'] or '[]'),
+        )
+    else:
+        cmd = build_ffmpeg_cmd(filepath, tmp_path, dict(mf))
     duration = mf['duration_seconds'] or 0
-    log('info', f"[encode] job {job_id} starting — {Path(filepath).name}")
+    log('info', f"{tag} job {job_id} starting — {Path(filepath).name}")
     log('info', f"[encode] cmd: {' '.join(cmd)}")
 
     stderr_lines = []
@@ -1719,6 +1773,29 @@ def get_alerts():
 
 
 # ── Flask routes — track assignment ──────────────────────────────────────────
+def queue_remux_job(file_id, filepath):
+    """Create an encode_job of type 'remux' and push it onto the encode queue."""
+    try:
+        size = os.path.getsize(filepath)
+    except OSError:
+        size = 0
+    with db() as conn:
+        cursor = conn.execute(
+            "INSERT INTO encode_jobs "
+            "(media_file_id, filepath, status, original_size, job_type) "
+            "VALUES (?,?,'queued',?,'remux')",
+            (file_id, filepath, size),
+        )
+        job_id = cursor.lastrowid
+        conn.execute(
+            "UPDATE media_files SET encode_status='queued' WHERE id=?",
+            (file_id,),
+        )
+    encode_queue.put(job_id)
+    log('info', f"[remux] job {job_id} queued — {Path(filepath).name}")
+    return job_id
+
+
 @app.route('/api/media/<int:file_id>/assign-tracks', methods=['POST'])
 def assign_tracks(file_id):
     """
@@ -1767,9 +1844,13 @@ def assign_tracks(file_id):
             (json.dumps(audio_tracks), json.dumps(subtitle_tracks), new_status, file_id),
         )
 
+    # Queue a remux job so the changes are actually written to the file
+    remux_job_id = queue_remux_job(file_id, row['filepath'])
+
     return jsonify({
-        'status':     'ok',
-        'new_status': new_status,
+        'status':        'ok',
+        'new_status':    new_status,
+        'remux_job_id':  remux_job_id,
         'audio_tracks':    audio_tracks,
         'subtitle_tracks': subtitle_tracks,
     })
