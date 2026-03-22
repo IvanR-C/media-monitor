@@ -236,6 +236,7 @@ def init_db():
                 original_size   INTEGER,
                 encoded_size    INTEGER,
                 error_text      TEXT,
+                job_type        TEXT DEFAULT 'encode',
                 created_at      TEXT DEFAULT (datetime('now'))
             );
 
@@ -1685,6 +1686,7 @@ def get_media():
             else None
         )
         d['encode_progress']    = None
+        d['encode_job_type']    = None
         d['translate_status']   = None
         d['translate_progress'] = None
         result.append(d)
@@ -1692,11 +1694,20 @@ def get_media():
     # Merge active encode / translation progress into result rows
     id_index = {d['id']: d for d in result}
     with db() as conn:
+        # Include both 'queued' and 'encoding' so job_type is known from the moment
+        # the job is created (not just when the worker picks it up).
+        # ORDER BY id DESC ensures the most recent job wins if duplicates exist.
         for enc_row in conn.execute(
-            "SELECT media_file_id, progress FROM encode_jobs WHERE status='encoding'"
+            "SELECT media_file_id, progress, job_type FROM encode_jobs "
+            "WHERE status IN ('queued','encoding') ORDER BY id DESC"
         ).fetchall():
-            if enc_row['media_file_id'] in id_index:
-                id_index[enc_row['media_file_id']]['encode_progress'] = enc_row['progress']
+            mid = enc_row['media_file_id']
+            if mid in id_index:
+                # Only set once (most-recent job wins due to ORDER BY id DESC)
+                if id_index[mid]['encode_job_type'] is None:
+                    id_index[mid]['encode_job_type'] = enc_row['job_type'] or 'encode'
+                if enc_row['progress']:
+                    id_index[mid]['encode_progress'] = enc_row['progress']
         for tr_row in conn.execute(
             "SELECT media_file_id, status, progress FROM translation_jobs "
             "WHERE status IN ('pending','extracting','translating','muxing')"
@@ -1854,7 +1865,22 @@ def assign_tracks(file_id):
         )
 
     # Queue a remux job so the changes are actually written to the file
-    remux_job_id = queue_remux_job(file_id, row['filepath'])
+    remux_job_id = None
+    remux_error  = None
+    try:
+        remux_job_id = queue_remux_job(file_id, row['filepath'])
+    except Exception as e:
+        remux_error = str(e)
+        log('error', f"[remux] failed to queue remux job for file {file_id}: {e}")
+
+    if remux_error:
+        return jsonify({
+            'status':        'saved_no_remux',
+            'new_status':    new_status,
+            'error':         f'Track assignments saved but remux could not be queued: {remux_error}',
+            'audio_tracks':    audio_tracks,
+            'subtitle_tracks': subtitle_tracks,
+        }), 207  # 207 Multi-Status: partial success (assignments saved, remux failed)
 
     return jsonify({
         'status':        'ok',
