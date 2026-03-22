@@ -17,16 +17,22 @@ services:
       - MAX_WORKERS=4
       - STABILIZE_INTERVAL=10
       - STABILIZE_CHECKS=3
-      
+      # Size threshold in GB above which a file is flagged RE-ENCODE (default: 20)
+      - REENCODE_SIZE_GB=20
+
       # Optional: Set via environment instead of web UI
       # - NTFY_SERVER=https://ntfy.sh
       # - NTFY_TOPIC=my-media-notifications
       # - DISCORD_WEBHOOK=https://discord.com/api/webhooks/...
       # - TVDB_API_KEY=your-api-key
-    
-    # Optional: Resource limits
-    # deploy:
-    #   resources:
-    #     limits:
-    #       cpus: '2'
-    #       memory: 1G
+
+    # NVIDIA GPU access for hevc_nvenc encoding
+    # Requires: NVIDIA Container Toolkit installed on the host
+    #   https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
