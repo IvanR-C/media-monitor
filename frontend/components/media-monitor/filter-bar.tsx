@@ -11,6 +11,7 @@ interface FilterBarProps {
   onChange: (filter: FilterType) => void
   counts: Record<FilterType, number>
   isScanning: boolean
+  scanProgress?: { scanned: number; total: number }
   onScan: () => void
   onRecalculate: () => void
   searchQuery: string
@@ -27,7 +28,7 @@ const filters: { key: FilterType; label: string }[] = [
   { key: "alerts", label: "Alerts" }
 ]
 
-export function FilterBar({ value, onChange, counts, isScanning, onScan, onRecalculate, searchQuery, onSearchChange }: FilterBarProps) {
+export function FilterBar({ value, onChange, counts, isScanning, scanProgress, onScan, onRecalculate, searchQuery, onSearchChange }: FilterBarProps) {
   return (
     <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-4">
       <div className="relative flex-1 sm:max-w-xs">
@@ -68,7 +69,11 @@ export function FilterBar({ value, onChange, counts, isScanning, onScan, onRecal
         {isScanning && (
           <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
             <Loader2 className="h-3 w-3 animate-spin" />
-            <span>Scanning</span>
+            <span>
+              {scanProgress && scanProgress.total > 0
+                ? `Scanning ${scanProgress.scanned}/${scanProgress.total}`
+                : 'Scanning…'}
+            </span>
           </div>
         )}
 

@@ -495,9 +495,12 @@ def scan_library():
     if scan_status['running']:
         return {'error': 'Scan already in progress'}
 
+    # Set running=True HERE (before the thread starts) so any status poll
+    # that fires in the first few milliseconds already sees running=True.
+    scan_status = {'running': True, 'scanned': 0, 'total': 0}
+
     def _run():
         global scan_status
-        scan_status = {'running': True, 'scanned': 0, 'total': 0}
         try:
             all_files = []
             for root, _, files in os.walk(WATCH_DIR):
@@ -506,7 +509,7 @@ def scan_library():
                         all_files.append(os.path.join(root, f))
 
             scan_status['total'] = len(all_files)
-            print(f"[scan] found {len(all_files)} video files")
+            log('info', f"[scan] found {len(all_files)} video files in {WATCH_DIR}")
 
             folder_counts = Counter(str(Path(fp).parent) for fp in all_files)
             poster_cache  = {}   # cache_key → url|None (fetch once per title/show)
@@ -515,24 +518,22 @@ def scan_library():
                 info = parse_media_info(fp)
                 if info:
                     is_show = info.get('media_type') == 'show'
-                    # For shows, flag sibling videos only if they're in the same season folder
-                    # but don't treat it as an alert — that's normal for shows
                     info['has_sibling_videos'] = 1 if (
                         folder_counts[str(Path(fp).parent)] > 1 and not is_show
                     ) else 0
 
-                    # Use show_name as cache key for shows (avoids searching by "Season 1")
                     cache_key = info['show_name'] if is_show and info.get('show_name') else info['folder_name']
                     if cache_key not in poster_cache:
                         poster_cache[cache_key] = tvdb_search_poster(cache_key, is_show)
 
                     info['poster_url'] = poster_cache.get(cache_key)
                     upsert_media_file(info)
+                    log('info', f"[scan] ({scan_status['scanned'] + 1}/{scan_status['total']}) {Path(fp).name}")
                 scan_status['scanned'] += 1
 
-            print(f"[scan] complete — {scan_status['scanned']} files processed")
+            log('info', f"[scan] complete — {scan_status['scanned']} files processed")
         except Exception as e:
-            print(f"[scan] error: {e}")
+            log('error', f"[scan] error: {e}")
         finally:
             scan_status['running'] = False
 
