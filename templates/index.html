@@ -232,8 +232,8 @@
         .col-size    { min-width: 120px; white-space: nowrap; }
         .col-res     { min-width: 110px; white-space: nowrap; }
         .col-codec   { min-width: 80px; white-space: nowrap; }
-        .col-audio   { min-width: 140px; }
-        .col-subs    { min-width: 100px; }
+        .col-audio   { min-width: 60px; white-space: nowrap; }
+        .col-subs    { min-width: 60px; white-space: nowrap; }
         .col-status  { min-width: 110px; white-space: nowrap; }
         .col-actions { min-width: 110px; white-space: nowrap; }
 
@@ -286,6 +286,33 @@
         .track-badge-jpn  { background: var(--outer-space); color: white; }
         .track-badge-other { background: var(--antiflash-white); color: var(--outer-space); }
         .track-codec { opacity: 0.65; font-weight: 500; }
+
+        /* ── Track count pills (audio / sub summary) ─────────────────────── */
+        .track-count-pill {
+            display: inline-flex; align-items: center; gap: 5px;
+            padding: 3px 10px; border-radius: 980px;
+            font-size: 0.78rem; font-weight: 600;
+            background: var(--antiflash-white); color: var(--outer-space);
+            cursor: default; white-space: nowrap;
+        }
+
+        /* ── Movies / Shows type switch ──────────────────────────────────── */
+        .type-switch {
+            display: flex; gap: 4px; margin-bottom: 16px;
+            background: var(--antiflash-white); border-radius: 12px;
+            padding: 4px; width: fit-content;
+        }
+        .type-btn {
+            background: transparent; border: none; border-radius: 8px;
+            padding: 7px 22px; font-weight: 600; font-size: 0.9rem;
+            cursor: pointer; color: var(--slate-gray);
+            transition: background 0.18s, color 0.18s, box-shadow 0.18s;
+        }
+        .type-btn.active {
+            background: white; color: var(--eerie-black);
+            box-shadow: 0 1px 4px rgba(0,0,0,0.10);
+        }
+        .type-btn:hover:not(.active) { color: var(--eerie-black); }
 
         /* ── Encode queue panel ──────────────────────────────────────────── */
         .queue-panel { margin-top: 24px; }
@@ -603,6 +630,12 @@
             </div>
         </div>
 
+        <!-- Movies / Shows switch -->
+        <div class="type-switch">
+            <button class="type-btn active" id="type-btn-movie" onclick="setType(this, 'movie')">🎬 Movies</button>
+            <button class="type-btn"        id="type-btn-show"  onclick="setType(this, 'show')">📺 Shows</button>
+        </div>
+
         <!-- Filter bar -->
         <div class="filter-bar">
             <button class="filter-btn active" data-filter="all"            onclick="setFilter(this, 'all')">All <span class="count" id="fc-all">0</span></button>
@@ -633,7 +666,7 @@
                 <thead>
                     <tr>
                         <th><input type="checkbox" id="select-all" onchange="toggleSelectAll(this)"></th>
-                        <th class="col-title"  data-col="folder_name" onclick="sortBy('folder_name')">Movie / Folder <span class="sort-arrow"></span></th>
+                        <th class="col-title"  data-col="folder_name" onclick="sortBy('folder_name')" id="th-title">Title <span class="sort-arrow"></span></th>
                         <th class="col-file"   data-col="filename"    onclick="sortBy('filename')">File <span class="sort-arrow"></span></th>
                         <th class="col-size"   data-col="size_bytes"  onclick="sortBy('size_bytes')">Size <span class="sort-arrow"></span></th>
                         <th class="col-res"    data-col="video_height" onclick="sortBy('video_height')">Resolution <span class="sort-arrow"></span></th>
@@ -717,6 +750,7 @@
 // ── State ────────────────────────────────────────────────────────────────────
 let allFiles      = [];
 let currentFilter = 'all';
+let currentType   = 'movie';
 let sortCol       = 'size_bytes';
 let sortDir       = 'desc';
 let selected      = new Set();
@@ -822,7 +856,7 @@ async function loadStats() {
 async function loadMedia(filter) {
     if (filter) currentFilter = filter;
     try {
-        const r = await fetch('/api/media?filter=' + currentFilter);
+        const r = await fetch(`/api/media?filter=${currentFilter}&type=${currentType}`);
         const d = await r.json();
         allFiles = d.files || [];
 
@@ -860,6 +894,19 @@ async function loadAlerts() {
             `<li><strong>${escHtml(a.folder)}</strong> — ${a.count} files: ${a.files.map(escHtml).join(', ')}</li>`
         ).join('');
     } catch (e) { console.error('alerts error', e); }
+}
+
+function setType(btn, type) {
+    document.querySelectorAll('.type-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentType   = type;
+    currentFilter = 'all';
+    selected.clear();
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    document.querySelector('.filter-btn[data-filter="all"]').classList.add('active');
+    const th = document.getElementById('th-title');
+    if (th) th.innerHTML = (type === 'show' ? 'Show / Episode' : 'Movie / Folder') + ' <span class="sort-arrow"></span>';
+    loadMedia('all');
 }
 
 function setFilter(btn, filter) {
@@ -924,12 +971,16 @@ function renderRow(f) {
         ? `<img class="poster-thumb" src="${escHtml(f.poster_url)}" alt="" loading="lazy" onerror="this.parentElement.innerHTML='<div class=\\'poster-placeholder\\'></div>'">`
         : `<div class="poster-placeholder"></div>`;
 
+    const displayTitle = (f.media_type === 'show' && f.show_name)
+        ? (f.show_name + (f.season_episode ? ' ' + f.season_episode : ''))
+        : f.folder_name;
+
     return `<tr class="${selClass}" data-id="${f.id}">
         <td><input type="checkbox" ${checked} onchange="toggleSelect(${f.id}, this)"></td>
         <td class="col-title">
             <div class="cell-title-wrap">
                 <div class="poster-wrap">${posterHtml}</div>
-                <div class="cell-title" title="${escHtml(f.folder_name)}">${escHtml(f.folder_name)}</div>
+                <div class="cell-title" title="${escHtml(f.filename)}">${escHtml(displayTitle)}</div>
             </div>
         </td>
         <td class="col-file"><div class="cell-file"  title="${escHtml(f.filename)}">${escHtml(f.filename)}</div></td>
@@ -945,13 +996,13 @@ function renderRow(f) {
 
 function renderAudioBadges(tracks) {
     if (!tracks.length) return '<span style="color:var(--french-gray-2)">—</span>';
-    return tracks.map(t => {
-        const lang  = (t.lang  || '').toUpperCase() || '?';
-        const codec = (t.codec || '').toLowerCase();
+    const tooltip = tracks.map(t => {
+        const lang  = (t.lang  || '?').toUpperCase();
+        const codec = (t.codec || '').toUpperCase();
         const ch    = t.channels ? ` ${t.channels}ch` : '';
-        const cls   = audioBadgeClass(lang.toLowerCase());
-        return `<span class="track-badge ${cls}">${lang} <span class="track-codec">${codec.toUpperCase()}${ch}</span></span>`;
-    }).join('');
+        return `${lang} ${codec}${ch}`;
+    }).join('\n');
+    return `<span class="track-count-pill" title="${escHtml(tooltip)}">🔊 ${tracks.length}</span>`;
 }
 
 function audioBadgeClass(lang) {
@@ -963,14 +1014,12 @@ function audioBadgeClass(lang) {
 
 function renderSubBadges(tracks) {
     if (!tracks.length) return '<span style="color:var(--french-gray-2)">—</span>';
-    const seen = new Set();
-    return tracks.map(t => {
-        const lang = (t.lang || '?').toUpperCase();
-        if (seen.has(lang)) return '';
-        seen.add(lang);
-        const cls = audioBadgeClass((t.lang || '').toLowerCase());
-        return `<span class="track-badge ${cls}">${lang}</span>`;
-    }).filter(Boolean).join('');
+    const tooltip = tracks.map(t => {
+        const lang  = (t.lang  || '?').toUpperCase();
+        const codec = (t.codec || '').toUpperCase();
+        return `${lang} ${codec}`;
+    }).join('\n');
+    return `<span class="track-count-pill" title="${escHtml(tooltip)}">💬 ${tracks.length}</span>`;
 }
 
 function renderStatusBadge(status, encStatus) {
