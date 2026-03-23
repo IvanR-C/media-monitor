@@ -1,4 +1,4 @@
-import { HardDrive, FileVideo, AlertCircle, Loader2 } from "lucide-react"
+import { HardDrive, FileVideo, AlertCircle, Loader2, ListVideo } from "lucide-react"
 import { cn } from "@/lib/utils"
 
 interface LibraryStatsProps {
@@ -36,7 +36,7 @@ export function LibraryStats({ stats }: LibraryStatsProps) {
         variant="warning"
       />
       <StatItem
-        icon={Loader2}
+        icon={stats.encoding_active > 0 ? Loader2 : ListVideo}
         value={stats.encoding_active.toString()}
         label="In Queue / Active"
         variant="active"
