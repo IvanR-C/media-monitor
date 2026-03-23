@@ -59,14 +59,21 @@ interface LibraryStatsData {
   encoding_active: number
 }
 
-export function MediaLibraryTab() {
+interface MediaLibraryTabProps {
+  scan: {
+    isScanning: boolean
+    scanProgress?: { scanned: number; total: number }
+    lastScanResult?: { scanned: number; total: number }
+    onScan: () => void
+  }
+}
+
+export function MediaLibraryTab({ scan }: MediaLibraryTabProps) {
+  const { isScanning, scanProgress, lastScanResult, onScan } = scan
   const [mediaType, setMediaType] = useState<MediaType>("movie")
   const [filter, setFilter] = useState<FilterType>("all")
   const [searchQuery, setSearchQuery] = useState("")
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
-  const [isScanning, setIsScanning] = useState(false)
-  const [scanProgress, setScanProgress] = useState<{ scanned: number; total: number } | undefined>()
-  const [lastScanResult, setLastScanResult] = useState<{ scanned: number; total: number } | undefined>()
   const [showLogs, setShowLogs] = useState(false)
   const [files, setFiles] = useState<MediaFile[]>([])
   const [stats, setStats] = useState<LibraryStatsData>({ total_files: 0, total_bytes: 0, needs_encoding: 0, encoding_active: 0 })
@@ -123,50 +130,13 @@ export function MediaLibraryTab() {
     }
   }, [files])
 
-  // Ref so the poll interval can be cleared on unmount or early completion
-  const scanPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  useEffect(() => () => { if (scanPollRef.current) clearInterval(scanPollRef.current) }, [])
-
-  const handleScan = async () => {
-    if (isScanning) return
-    setIsScanning(true)
-    try {
-      const r   = await fetch('/api/media/scan', { method: 'POST' })
-      const data = await r.json()
-      if (data.error) {
-        // Already running — attach to the existing scan instead of starting a new one
-        toast.info(data.error)
-      } else {
-        toast.success('Scan started')
-      }
-
-      const stopPoll = (finalStatus?: { scanned: number; total: number }) => {
-        if (scanPollRef.current) { clearInterval(scanPollRef.current); scanPollRef.current = null }
-        setIsScanning(false)
-        setScanProgress(undefined)
-        if (finalStatus && finalStatus.total > 0) setLastScanResult(finalStatus)
-        fetchMedia()
-      }
-
-      const doPoll = async () => {
-        try {
-          const st = await fetch('/api/media/scan/status').then(r => r.json())
-          if (st.total > 0) setScanProgress({ scanned: st.scanned, total: st.total })
-          if (!st.running) stopPoll({ scanned: st.scanned, total: st.total })
-        } catch {
-          // ignore transient poll errors — don't stop the interval
-        }
-      }
-
-      // Check once quickly (catches very fast scans), then every 2 s
-      setTimeout(doPoll, 300)
-      if (scanPollRef.current) clearInterval(scanPollRef.current)
-      scanPollRef.current = setInterval(doPoll, 2000)
-    } catch {
-      toast.error('Scan failed to start')
-      setIsScanning(false)
-    }
-  }
+  // When the scan finishes (isScanning flips true→false) reload the table so
+  // the clean-rescan results are immediately visible.
+  const prevScanningRef = useRef(false)
+  useEffect(() => {
+    if (prevScanningRef.current && !isScanning) fetchMedia()
+    prevScanningRef.current = isScanning
+  }, [isScanning, fetchMedia])
 
   const handleEnqueueSelected = async () => {
     if (selectedIds.size === 0) return
@@ -310,7 +280,7 @@ export function MediaLibraryTab() {
           isScanning={isScanning}
           scanProgress={scanProgress}
           lastScanResult={lastScanResult}
-          onScan={handleScan}
+          onScan={onScan}
           searchQuery={searchQuery}
           onSearchChange={setSearchQuery}
         />

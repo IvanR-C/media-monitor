@@ -502,6 +502,12 @@ def scan_library():
     def _run():
         global scan_status
         try:
+            # Wipe all existing records so reorganised folders / renamed files
+            # don't leave ghost entries (e.g. duplicate seasons after restructuring).
+            log('info', '[scan] clearing existing media records for a clean rescan…')
+            with db() as conn:
+                conn.execute("DELETE FROM media_files")
+
             all_files = []
             for root, _, files in os.walk(WATCH_DIR):
                 for f in files:

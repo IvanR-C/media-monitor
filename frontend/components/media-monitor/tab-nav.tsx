@@ -6,9 +6,10 @@ import { LayoutDashboard, Library } from "lucide-react"
 interface TabNavProps {
   activeTab: "dashboard" | "media"
   onTabChange: (tab: "dashboard" | "media") => void
+  isScanning?: boolean
 }
 
-export function TabNav({ activeTab, onTabChange }: TabNavProps) {
+export function TabNav({ activeTab, onTabChange, isScanning }: TabNavProps) {
   return (
     <nav className="mb-8 flex gap-1 rounded-lg bg-secondary/50 p-1">
       <button
@@ -34,6 +35,9 @@ export function TabNav({ activeTab, onTabChange }: TabNavProps) {
       >
         <Library className="h-4 w-4" />
         Media Library
+        {isScanning && (
+          <span className="h-2 w-2 rounded-full bg-accent animate-pulse" title="Scan in progress" />
+        )}
       </button>
     </nav>
   )
