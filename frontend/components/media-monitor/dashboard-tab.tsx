@@ -37,13 +37,33 @@ export function DashboardTab() {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    Promise.all([
-      fetch('/api/config').then(r => r.json()),
-      fetch('/api/stats').then(r => r.json()),
-    ]).then(([cfg, st]) => {
-      setConfig(prev => ({ ...prev, ...cfg }))
-      setStats(st)
-    }).catch(e => toast.error('Failed to load config')).finally(() => setLoading(false))
+    let cancelled = false
+
+    const load = async (attempt = 1) => {
+      try {
+        const [cfg, st] = await Promise.all([
+          fetch('/api/config').then(r => { if (!r.ok) throw new Error(`config ${r.status}`); return r.json() }),
+          fetch('/api/stats').then(r =>   { if (!r.ok) throw new Error(`stats ${r.status}`);  return r.json() }),
+        ])
+        if (cancelled) return
+        setConfig(prev => ({ ...prev, ...cfg }))
+        setStats(st)
+        setLoading(false)
+      } catch {
+        if (cancelled) return
+        // Retry up to 5 times with increasing delay (handles Docker startup ordering
+        // where the frontend container comes up before the backend is fully ready).
+        if (attempt < 5) {
+          setTimeout(() => load(attempt + 1), attempt * 1500)
+        } else {
+          setLoading(false)
+          toast.error('Failed to load config — is the backend reachable?')
+        }
+      }
+    }
+
+    load()
+    return () => { cancelled = true }
   }, [])
 
   const handleSave = async () => {
