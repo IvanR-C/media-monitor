@@ -66,16 +66,24 @@ export function MediaLibraryTab() {
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const [isScanning, setIsScanning] = useState(false)
   const [scanProgress, setScanProgress] = useState<{ scanned: number; total: number } | undefined>()
+  const [lastScanResult, setLastScanResult] = useState<{ scanned: number; total: number } | undefined>()
   const [showLogs, setShowLogs] = useState(false)
   const [files, setFiles] = useState<MediaFile[]>([])
   const [stats, setStats] = useState<LibraryStatsData>({ total_files: 0, total_bytes: 0, needs_encoding: 0, encoding_active: 0 })
   const [loading, setLoading] = useState(false)
+  const [debouncedSearch, setDebouncedSearch] = useState("")
+
+  // Debounce search input — only trigger fetchMedia 300 ms after the user stops typing
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(searchQuery), 300)
+    return () => clearTimeout(t)
+  }, [searchQuery])
 
   const fetchMedia = useCallback(async (silent = false) => {
     if (!silent) setLoading(true)
     try {
       const params = new URLSearchParams({ type: mediaType, filter })
-      if (searchQuery) params.set('search', searchQuery)
+      if (debouncedSearch) params.set('search', debouncedSearch)
       const data = await fetch(`/api/media?${params}`).then(r => r.json())
       setFiles(data.files ?? [])
       if (data.stats) setStats(data.stats)
@@ -84,7 +92,7 @@ export function MediaLibraryTab() {
     } finally {
       if (!silent) setLoading(false)
     }
-  }, [mediaType, filter, searchQuery])
+  }, [mediaType, filter, debouncedSearch])
 
   useEffect(() => {
     fetchMedia()
@@ -115,17 +123,6 @@ export function MediaLibraryTab() {
     }
   }, [files])
 
-  const handleRecalculate = async () => {
-    try {
-      const r = await fetch('/api/media/recalculate-status', { method: 'POST' })
-      const data = await r.json()
-      toast.success(`Status recalculated for ${data.updated} files`)
-      fetchMedia()
-    } catch {
-      toast.error('Recalculate failed')
-    }
-  }
-
   // Ref so the poll interval can be cleared on unmount or early completion
   const scanPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   useEffect(() => () => { if (scanPollRef.current) clearInterval(scanPollRef.current) }, [])
@@ -143,10 +140,11 @@ export function MediaLibraryTab() {
         toast.success('Scan started')
       }
 
-      const stopPoll = () => {
+      const stopPoll = (finalStatus?: { scanned: number; total: number }) => {
         if (scanPollRef.current) { clearInterval(scanPollRef.current); scanPollRef.current = null }
         setIsScanning(false)
         setScanProgress(undefined)
+        if (finalStatus && finalStatus.total > 0) setLastScanResult(finalStatus)
         fetchMedia()
       }
 
@@ -154,7 +152,7 @@ export function MediaLibraryTab() {
         try {
           const st = await fetch('/api/media/scan/status').then(r => r.json())
           if (st.total > 0) setScanProgress({ scanned: st.scanned, total: st.total })
-          if (!st.running) stopPoll()
+          if (!st.running) stopPoll({ scanned: st.scanned, total: st.total })
         } catch {
           // ignore transient poll errors — don't stop the interval
         }
@@ -240,14 +238,11 @@ export function MediaLibraryTab() {
       } else {
         toast.success('Languages saved — remux queued to apply changes to file')
       }
-      // Optimistically mark this file as remux-queued so the row shows feedback
-      // immediately, even if the current filter would remove it from view.
-      setFiles(prev => prev.map(f =>
-        f.id === fileId
-          ? { ...f, encode_status: 'queued', encode_job_type: 'remux' }
-          : f
-      ))
-      fetchMedia(true)
+      // Switch to the "queued" filter — it includes encode_status='queued' rows,
+      // so the newly remuxed file will be visible there. This avoids the race
+      // where fetchMedia(true) fetches the current filter (e.g. missing_lang)
+      // and overwrites our optimistic update because the file no longer matches.
+      setFilter('queued')
     } catch {
       toast.error('Failed to save track languages')
     }
@@ -314,8 +309,8 @@ export function MediaLibraryTab() {
           counts={filterCounts}
           isScanning={isScanning}
           scanProgress={scanProgress}
+          lastScanResult={lastScanResult}
           onScan={handleScan}
-          onRecalculate={handleRecalculate}
           searchQuery={searchQuery}
           onSearchChange={setSearchQuery}
         />

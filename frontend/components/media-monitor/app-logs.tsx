@@ -19,26 +19,28 @@ interface LogEntry {
 
 export function AppLogs({ show, onToggle }: AppLogsProps) {
   const [logs, setLogs] = useState<LogEntry[]>([])
-  const [lastSeq, setLastSeq] = useState(0)
+  // Ref (not state) for the poll position — changing it never triggers a re-render
+  // or re-mounts the interval, so clearing the display won't re-fetch old entries.
+  const pollSinceRef = useRef(0)
   const bottomRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     const fetchLogs = async () => {
       try {
-        const data = await fetch(`/api/logs?since=${lastSeq}`).then(r => r.json())
+        const data = await fetch(`/api/logs?since=${pollSinceRef.current}`).then(r => r.json())
         if (data.logs?.length > 0) {
           setLogs(prev => [...prev, ...data.logs].slice(-500))
-          setLastSeq(data.total)
+          pollSinceRef.current = data.total
         }
       } catch {
-        // silently ignore
+        // silently ignore transient poll errors
       }
     }
 
     fetchLogs()
-    const interval = setInterval(fetchLogs, 2000)
-    return () => clearInterval(interval)
-  }, [lastSeq])
+    const id = setInterval(fetchLogs, 2000)
+    return () => clearInterval(id)
+  }, []) // mount once — stable interval, no re-creation on every log batch
 
   useEffect(() => {
     if (show) {
@@ -64,7 +66,12 @@ export function AppLogs({ show, onToggle }: AppLogsProps) {
             variant="ghost"
             size="sm"
             className="ml-auto h-5 px-1.5 text-[10px]"
-            onClick={(e) => { e.stopPropagation(); setLogs([]); setLastSeq(0) }}
+            onClick={(e) => {
+              e.stopPropagation()
+              // Only wipe the display — pollSinceRef keeps its position so the
+              // next poll only fetches *new* entries, never re-loading old ones.
+              setLogs([])
+            }}
           >
             <Trash2 className="mr-1 h-2.5 w-2.5" />
             Clear
@@ -73,7 +80,7 @@ export function AppLogs({ show, onToggle }: AppLogsProps) {
       </button>
 
       {show && (
-        <div className="max-h-32 overflow-y-auto border-t border-border/30 bg-[#0a0a0c] font-mono text-[11px]">
+        <div className="max-h-48 overflow-y-auto border-t border-border/30 bg-[#0a0a0c] font-mono text-[11px]">
           {logs.length === 0 ? (
             <p className="px-3 py-2 italic text-muted-foreground">No log entries</p>
           ) : (

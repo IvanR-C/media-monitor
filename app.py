@@ -967,11 +967,17 @@ def run_encode_job(job_id):
     orig_h       = mf['video_height'] or 0
     new_h        = new_info['video_height'] if new_info else orig_h
     res_str      = f"{orig_h}p → {new_h}p" if new_h and new_h != orig_h else f"{new_h or orig_h}p"
-    log('info',
-        f"[encode] job {job_id} done — "
-        f"{orig_size/1e9:.2f} GB → {encoded_size/1e9:.2f} GB "
-        f"(saved {savings_pct:.0f}%, {res_str})"
-    )
+    if job_type == 'remux':
+        log('info',
+            f"[remux] job {job_id} done — "
+            f"{orig_size/1e9:.2f} GB (tracks rewritten, no re-encode)"
+        )
+    else:
+        log('info',
+            f"[encode] job {job_id} done — "
+            f"{orig_size/1e9:.2f} GB → {encoded_size/1e9:.2f} GB "
+            f"(saved {savings_pct:.0f}%, {res_str})"
+        )
     send_ntfy_notification(
         f"Encode Complete: {mf['folder_name']}",
         f"File: {mf['filename']}\n"
@@ -1242,6 +1248,9 @@ def run_translation_job(job_id):
                 (round(pct, 1), detail, job_id),
             )
 
+    log('info', f"[translate] job {job_id} started — {Path(filepath).name}"
+                f" (track {sub_idx}, lang={source_lang or 'unknown'})")
+
     try:
         # 1 ── Extract
         with db() as conn:
@@ -1250,6 +1259,7 @@ def run_translation_job(job_id):
                 (job_id,),
             )
         set_progress(5, 'Extracting subtitle track…')
+        log('info', f"[translate] job {job_id} extracting subtitle track {sub_idx}…")
 
         if not extract_subtitle_to_srt(filepath, sub_idx, tmp_srt) or not os.path.exists(tmp_srt):
             _fail_translation_job(job_id, 'ffmpeg could not extract subtitle track as SRT')
@@ -1260,6 +1270,7 @@ def run_translation_job(job_id):
             conn.execute(
                 "UPDATE translation_jobs SET status='translating' WHERE id=?", (job_id,)
             )
+        log('info', f"[translate] job {job_id} translating subtitles ({source_lang or '?'} → spa)…")
 
         translated = translate_subtitle_file(
             tmp_srt, source_lang,
@@ -1278,6 +1289,7 @@ def run_translation_job(job_id):
                 (srt_path, job_id),
             )
         set_progress(90, 'Muxing subtitle into video file…')
+        log('info', f"[translate] job {job_id} muxing subtitle into video file…")
 
         ok, msg = mux_subtitle_into_video(filepath, srt_path)
         if not ok:

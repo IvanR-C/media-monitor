@@ -207,12 +207,17 @@ export function MediaTable({
         >
           <td className="px-3 py-2" onClick={e => e.stopPropagation()}>
             <Checkbox
-              checked={anySelected && allShowIds.every(id => selectedIds.has(id))}
-              onCheckedChange={checked => {
+              checked={
+                anySelected
+                  ? allShowIds.every(id => selectedIds.has(id)) ? true : "indeterminate"
+                  : false
+              }
+              onCheckedChange={() => {
+                const allChecked = allShowIds.every(id => selectedIds.has(id))
                 allShowIds.forEach(id => {
                   const has = selectedIds.has(id)
-                  if (checked && !has) onToggleSelect(id)
-                  if (!checked && has) onToggleSelect(id)
+                  if (!allChecked && !has) onToggleSelect(id)
+                  if (allChecked && has) onToggleSelect(id)
                 })
               }}
             />
@@ -248,12 +253,17 @@ export function MediaTable({
           >
             <td className="px-3 py-2 pl-8" onClick={e => e.stopPropagation()}>
               <Checkbox
-                checked={anySeasonSel && allSeasonIds.every(id => selectedIds.has(id))}
-                onCheckedChange={checked => {
+                checked={
+                  anySeasonSel
+                    ? allSeasonIds.every(id => selectedIds.has(id)) ? true : "indeterminate"
+                    : false
+                }
+                onCheckedChange={() => {
+                  const allChecked = allSeasonIds.every(id => selectedIds.has(id))
                   allSeasonIds.forEach(id => {
                     const has = selectedIds.has(id)
-                    if (checked && !has) onToggleSelect(id)
-                    if (!checked && has) onToggleSelect(id)
+                    if (!allChecked && !has) onToggleSelect(id)
+                    if (allChecked && has) onToggleSelect(id)
                   })
                 }}
               />

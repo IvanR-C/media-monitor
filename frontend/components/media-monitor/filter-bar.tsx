@@ -3,7 +3,7 @@
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
-import { Loader2, RefreshCw, Search, RotateCcw } from "lucide-react"
+import { Loader2, RefreshCw, Search } from "lucide-react"
 import type { FilterType } from "./media-library-tab"
 
 interface FilterBarProps {
@@ -12,8 +12,8 @@ interface FilterBarProps {
   counts: Record<FilterType, number>
   isScanning: boolean
   scanProgress?: { scanned: number; total: number }
+  lastScanResult?: { scanned: number; total: number }
   onScan: () => void
-  onRecalculate: () => void
   searchQuery: string
   onSearchChange: (query: string) => void
 }
@@ -28,7 +28,7 @@ const filters: { key: FilterType; label: string }[] = [
   { key: "alerts", label: "Alerts" }
 ]
 
-export function FilterBar({ value, onChange, counts, isScanning, scanProgress, onScan, onRecalculate, searchQuery, onSearchChange }: FilterBarProps) {
+export function FilterBar({ value, onChange, counts, isScanning, scanProgress, lastScanResult, onScan, searchQuery, onSearchChange }: FilterBarProps) {
   return (
     <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-4">
       <div className="relative flex-1 sm:max-w-xs">
@@ -41,7 +41,7 @@ export function FilterBar({ value, onChange, counts, isScanning, scanProgress, o
           className="h-8 pl-8 text-sm"
         />
       </div>
-      
+
       <div className="flex flex-wrap items-center gap-2">
         <div className="flex flex-wrap gap-1">
           {filters.map(filter => (
@@ -66,38 +66,36 @@ export function FilterBar({ value, onChange, counts, isScanning, scanProgress, o
           ))}
         </div>
 
-        {isScanning && (
-          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <Loader2 className="h-3 w-3 animate-spin" />
-            <span>
-              {scanProgress && scanProgress.total > 0
-                ? `Scanning ${scanProgress.scanned}/${scanProgress.total}`
-                : 'Scanning…'}
-            </span>
-          </div>
-        )}
+        {/* Scan button + live/static scan info */}
+        <div className="flex items-center gap-2">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={onScan}
+            disabled={isScanning}
+            className="h-7 px-2 text-xs"
+          >
+            <RefreshCw className={cn("mr-1 h-3 w-3", isScanning && "animate-spin")} />
+            Scan
+          </Button>
 
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={onScan}
-          disabled={isScanning}
-          className="h-7 px-2 text-xs"
-        >
-          <RefreshCw className={cn("mr-1 h-3 w-3", isScanning && "animate-spin")} />
-          Scan
-        </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={onRecalculate}
-          disabled={isScanning}
-          className="h-7 px-2 text-xs"
-          title="Recalculate status from stored track data (fast — no ffprobe)"
-        >
-          <RotateCcw className="mr-1 h-3 w-3" />
-          Recalc
-        </Button>
+          {isScanning ? (
+            /* Live counter while a scan is running */
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              <span className="tabular-nums">
+                {scanProgress && scanProgress.total > 0
+                  ? `${scanProgress.scanned} / ${scanProgress.total} files`
+                  : 'Scanning…'}
+              </span>
+            </div>
+          ) : lastScanResult ? (
+            /* Static result from the most-recent completed scan */
+            <span className="text-xs tabular-nums text-muted-foreground">
+              {lastScanResult.total.toLocaleString()} files found
+            </span>
+          ) : null}
+        </div>
       </div>
     </div>
   )
