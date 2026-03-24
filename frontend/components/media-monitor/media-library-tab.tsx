@@ -256,16 +256,32 @@ export function MediaLibraryTab({ scan }: MediaLibraryTabProps) {
   }
 
   const toggleSelect = (id: number) => {
-    const newSelected = new Set(selectedIds)
-    if (newSelected.has(id)) newSelected.delete(id)
-    else newSelected.add(id)
-    setSelectedIds(newSelected)
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  // Bulk select/deselect without stale-closure issues
+  const selectMany = (ids: number[], select: boolean) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      for (const id of ids) {
+        if (select) next.add(id)
+        else next.delete(id)
+      }
+      return next
+    })
   }
 
   const toggleSelectAll = () => {
     if (selectedIds.size === files.length) setSelectedIds(new Set())
     else setSelectedIds(new Set(files.map(f => f.id)))
   }
+
+  const clearSelection = () => setSelectedIds(new Set())
 
   return (
     <div className="flex h-[calc(100vh-220px)] flex-col">
@@ -292,7 +308,9 @@ export function MediaLibraryTab({ scan }: MediaLibraryTabProps) {
           files={files}
           selectedIds={selectedIds}
           onToggleSelect={toggleSelect}
+          onSelectMany={selectMany}
           onToggleSelectAll={toggleSelectAll}
+          onClearSelection={clearSelection}
           onEnqueue={handleEnqueueSingle}
           onEnqueueSelected={handleEnqueueSelected}
           onTranslate={handleTranslateSingle}
