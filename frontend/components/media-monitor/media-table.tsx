@@ -59,7 +59,9 @@ interface MediaTableProps {
   files: MediaFile[]
   selectedIds: Set<number>
   onToggleSelect: (id: number) => void
+  onSelectMany: (ids: number[], select: boolean) => void
   onToggleSelectAll: () => void
+  onClearSelection: () => void
   onEnqueue: (id: number) => void
   onEnqueueSelected: () => void
   onTranslate: (id: number, subIdx: number) => void
@@ -73,7 +75,9 @@ export function MediaTable({
   files,
   selectedIds,
   onToggleSelect,
+  onSelectMany,
   onToggleSelectAll,
+  onClearSelection,
   onEnqueue,
   onEnqueueSelected,
   onTranslate,
@@ -182,12 +186,15 @@ export function MediaTable({
       sm.get(season)!.push(f)
     }
 
-    // Sort seasons naturally within each show; episodes already sorted by sortedFiles
+    // Sort seasons naturally within each show; sort episodes by season_episode naturally
     for (const [, sm] of showMap) {
       const sortedSeasons = Array.from(sm.keys()).sort(naturalSort)
       const sorted = new Map(sortedSeasons.map(s => [s, sm.get(s)!]))
       sm.clear()
-      for (const [k, v] of sorted) sm.set(k, v)
+      for (const [k, v] of sorted) {
+        v.sort((a, b) => naturalSort(a.season_episode || a.filename || '', b.season_episode || b.filename || ''))
+        sm.set(k, v)
+      }
     }
 
     const rows: React.ReactNode[] = []
@@ -214,11 +221,7 @@ export function MediaTable({
               }
               onCheckedChange={() => {
                 const allChecked = allShowIds.every(id => selectedIds.has(id))
-                allShowIds.forEach(id => {
-                  const has = selectedIds.has(id)
-                  if (!allChecked && !has) onToggleSelect(id)
-                  if (allChecked && has) onToggleSelect(id)
-                })
+                onSelectMany(allShowIds, !allChecked)
               }}
             />
           </td>
@@ -260,11 +263,7 @@ export function MediaTable({
                 }
                 onCheckedChange={() => {
                   const allChecked = allSeasonIds.every(id => selectedIds.has(id))
-                  allSeasonIds.forEach(id => {
-                    const has = selectedIds.has(id)
-                    if (!allChecked && !has) onToggleSelect(id)
-                    if (allChecked && has) onToggleSelect(id)
-                  })
+                  onSelectMany(allSeasonIds, !allChecked)
                 }}
               />
             </td>
@@ -318,7 +317,7 @@ export function MediaTable({
                 Translate{translatableSelectedCount > 1 ? ` ${translatableSelectedCount}` : ''}
               </Button>
             )}
-            <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => onToggleSelectAll()}>
+            <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={onClearSelection}>
               Clear
             </Button>
           </div>
