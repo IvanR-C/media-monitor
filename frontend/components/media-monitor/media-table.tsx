@@ -162,6 +162,31 @@ export function MediaTable({
   const naturalSort = (a: string, b: string) =>
     a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
 
+  // Build the show→season→episodes tree once; shared by desktop table and mobile cards
+  const showMap = useMemo(() => {
+    if (mediaType !== 'show') return new Map<string, Map<string, MediaFile[]>>()
+    const map = new Map<string, Map<string, MediaFile[]>>()
+    for (const f of sortedFiles) {
+      const show   = f.show_name || f.folder_name || 'Unknown'
+      const season = f.folder_name || 'Unknown Season'
+      if (!map.has(show)) map.set(show, new Map())
+      const sm = map.get(show)!
+      if (!sm.has(season)) sm.set(season, [])
+      sm.get(season)!.push(f)
+    }
+    for (const [, sm] of map) {
+      const sortedSeasons = Array.from(sm.keys()).sort(naturalSort)
+      const sorted = new Map(sortedSeasons.map(s => [s, sm.get(s)!]))
+      sm.clear()
+      for (const [k, v] of sorted) {
+        v.sort((a, b) => naturalSort(a.season_episode || a.filename || '', b.season_episode || b.filename || ''))
+        sm.set(k, v)
+      }
+    }
+    return map
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sortedFiles, mediaType])
+
   const renderRows = () => {
     if (mediaType !== "show") {
       return sortedFiles.map(file => (
@@ -175,28 +200,6 @@ export function MediaTable({
           onOpenAssignDialog={setAssignDialogFile}
         />
       ))
-    }
-
-    // Build tree from sortedFiles so show order follows the sort
-    const showMap = new Map<string, Map<string, MediaFile[]>>()
-    for (const f of sortedFiles) {
-      const show   = f.show_name || f.folder_name || 'Unknown'
-      const season = f.folder_name || 'Unknown Season'
-      if (!showMap.has(show)) showMap.set(show, new Map())
-      const sm = showMap.get(show)!
-      if (!sm.has(season)) sm.set(season, [])
-      sm.get(season)!.push(f)
-    }
-
-    // Sort seasons naturally within each show; sort episodes by season_episode naturally
-    for (const [, sm] of showMap) {
-      const sortedSeasons = Array.from(sm.keys()).sort(naturalSort)
-      const sorted = new Map(sortedSeasons.map(s => [s, sm.get(s)!]))
-      sm.clear()
-      for (const [k, v] of sorted) {
-        v.sort((a, b) => naturalSort(a.season_episode || a.filename || '', b.season_episode || b.filename || ''))
-        sm.set(k, v)
-      }
     }
 
     const rows: React.ReactNode[] = []
@@ -340,7 +343,8 @@ export function MediaTable({
         </div>
       )}
 
-      <div className="flex-1 overflow-auto">
+      {/* ── Desktop table (sm+) ───────────────────────────────────────────────── */}
+      <div className="hidden flex-1 overflow-auto sm:block">
         <table className="w-full table-fixed text-sm">
           <colgroup>
             <col className="w-10" />
@@ -376,6 +380,111 @@ export function MediaTable({
         </table>
       </div>
 
+      {/* ── Mobile card list (<sm) ────────────────────────────────────────────── */}
+      <div className="flex-1 overflow-auto sm:hidden">
+        {mediaType !== 'show'
+          ? sortedFiles.map(file => (
+              <MobileFileCard
+                key={file.id}
+                file={file}
+                isSelected={selectedIds.has(file.id)}
+                onToggleSelect={() => onToggleSelect(file.id)}
+                onEnqueue={() => onEnqueue(file.id)}
+                onTranslate={onTranslate}
+                onOpenAssignDialog={setAssignDialogFile}
+              />
+            ))
+          : Array.from(showMap.keys()).map(showName => {
+              const seasonMap  = showMap.get(showName)!
+              const isExpanded = expandedShows.has(showName)
+              const totalEps   = Array.from(seasonMap.values()).reduce((s, e) => s + e.length, 0)
+              const allShowIds = Array.from(seasonMap.values()).flat().map(f => f.id)
+              const anySelected  = allShowIds.some(id => selectedIds.has(id))
+              const allChecked   = allShowIds.every(id => selectedIds.has(id))
+
+              return (
+                <div key={`m-show-${showName}`} className="border-b border-border/20">
+                  {/* Show header */}
+                  <div className="flex items-center gap-2 bg-secondary/30 px-3 py-2.5">
+                    <span onClick={e => e.stopPropagation()}>
+                      <Checkbox
+                        checked={anySelected ? (allChecked ? true : 'indeterminate') : false}
+                        onCheckedChange={() => onSelectMany(allShowIds, !allChecked)}
+                      />
+                    </span>
+                    <button className="flex min-w-0 flex-1 items-center gap-1.5" onClick={() => toggleShow(showName)}>
+                      {isExpanded
+                        ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
+                      <span className="truncate font-medium text-foreground">{showName}</span>
+                    </button>
+                    <span className="shrink-0 text-xs text-muted-foreground">
+                      {seasonMap.size}s · {totalEps}ep
+                    </span>
+                    <button
+                      title="Re-scan show"
+                      onClick={() => onFolderScan(allShowIds)}
+                      className="rounded p-1 text-muted-foreground/50 hover:bg-secondary/60 hover:text-foreground"
+                    >
+                      <FolderSync className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+
+                  {isExpanded && Array.from(seasonMap.entries()).map(([seasonName, episodes]) => {
+                    const seasonKey      = `${showName}::${seasonName}`
+                    const isSeasonExpanded = expandedSeasons.has(seasonKey)
+                    const allSeasonIds   = episodes.map(f => f.id)
+                    const anySeasonSel   = allSeasonIds.some(id => selectedIds.has(id))
+                    const allSeasonChk   = allSeasonIds.every(id => selectedIds.has(id))
+
+                    return (
+                      <div key={`m-season-${seasonKey}`}>
+                        {/* Season header */}
+                        <div className="flex items-center gap-2 border-t border-border/20 bg-secondary/10 py-2 pl-8 pr-3">
+                          <span onClick={e => e.stopPropagation()}>
+                            <Checkbox
+                              checked={anySeasonSel ? (allSeasonChk ? true : 'indeterminate') : false}
+                              onCheckedChange={() => onSelectMany(allSeasonIds, !allSeasonChk)}
+                            />
+                          </span>
+                          <button className="flex min-w-0 flex-1 items-center gap-1.5" onClick={() => toggleSeason(seasonKey)}>
+                            {isSeasonExpanded
+                              ? <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
+                              : <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground" />}
+                            <span className="truncate text-sm font-medium text-foreground/80">{seasonName}</span>
+                          </button>
+                          <span className="shrink-0 text-xs text-muted-foreground">{episodes.length}ep</span>
+                          <button
+                            title="Re-scan season"
+                            onClick={() => onFolderScan(allSeasonIds)}
+                            className="rounded p-1 text-muted-foreground/50 hover:bg-secondary/60 hover:text-foreground"
+                          >
+                            <FolderSync className="h-3 w-3" />
+                          </button>
+                        </div>
+
+                        {isSeasonExpanded && episodes.map(ep => (
+                          <MobileFileCard
+                            key={ep.id}
+                            file={ep}
+                            isSelected={selectedIds.has(ep.id)}
+                            onToggleSelect={() => onToggleSelect(ep.id)}
+                            onEnqueue={() => onEnqueue(ep.id)}
+                            onTranslate={onTranslate}
+                            onOpenAssignDialog={setAssignDialogFile}
+                            indent
+                            isEpisode
+                          />
+                        ))}
+                      </div>
+                    )
+                  })}
+                </div>
+              )
+            })
+        }
+      </div>
+
       <TrackAssignDialog
         file={assignDialogFile}
         open={assignDialogFile !== null}
@@ -385,6 +494,90 @@ export function MediaTable({
           setAssignDialogFile(null)
         }}
       />
+    </div>
+  )
+}
+
+// ── Mobile file card ───────────────────────────────────────────────────────────
+
+function MobileFileCard({
+  file, isSelected, onToggleSelect, onEnqueue, onTranslate, onOpenAssignDialog, indent, isEpisode,
+}: {
+  file: MediaFile
+  isSelected: boolean
+  onToggleSelect: () => void
+  onEnqueue: () => void
+  onTranslate: (id: number, subIdx: number) => void
+  onOpenAssignDialog: (file: MediaFile) => void
+  indent?: boolean
+  isEpisode?: boolean
+}) {
+  const textSubTracks = file.subtitle_tracks.filter(t => !IMAGE_CODECS.has(t.codec))
+  const title = isEpisode ? (file.season_episode || file.filename) : file.folder_name
+
+  return (
+    <div className={cn(
+      "border-t border-border/20 transition-colors",
+      isSelected && "bg-accent/5",
+    )}>
+      <div className={cn("flex items-start gap-2 px-3 py-2.5", indent && "pl-10")}>
+        {/* Checkbox */}
+        <span className="mt-0.5 shrink-0" onClick={e => e.stopPropagation()}>
+          <Checkbox checked={isSelected} onCheckedChange={onToggleSelect} />
+        </span>
+
+        {/* Main info */}
+        <div className="min-w-0 flex-1">
+          <div className="flex items-start justify-between gap-2">
+            <span className="truncate text-sm font-medium leading-tight text-foreground" title={title}>
+              {title}
+            </span>
+            <span className="shrink-0 tabular-nums text-xs text-muted-foreground">
+              {formatSize(file.size_gb)}
+            </span>
+          </div>
+          <div className="mt-1 flex flex-wrap items-center gap-1.5">
+            {file.video_codec && (
+              <span className="text-[10px] uppercase text-muted-foreground">{file.video_codec}</span>
+            )}
+            {file.video_height && (
+              <span className="text-[10px] text-muted-foreground">{file.video_height}p</span>
+            )}
+            <RowStatus file={file} />
+          </div>
+        </div>
+
+        {/* Action menu */}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0">
+              <MoreHorizontal className="h-3.5 w-3.5" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem onClick={onEnqueue}>
+              <Play className="mr-2 h-3.5 w-3.5" />
+              Queue Encode
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => onOpenAssignDialog(file)}>
+              <Tag className="mr-2 h-3.5 w-3.5" />
+              Assign Languages
+            </DropdownMenuItem>
+            {textSubTracks.length > 0 && (
+              <>
+                <DropdownMenuSeparator />
+                {textSubTracks.map(t => (
+                  <DropdownMenuItem key={t.sub_idx} onClick={() => onTranslate(file.id, t.sub_idx)}>
+                    <Languages className="mr-2 h-3.5 w-3.5" />
+                    Translate #{t.sub_idx}{t.lang ? ` (${t.lang.toUpperCase()})` : ''}
+                  </DropdownMenuItem>
+                ))}
+              </>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
     </div>
   )
 }
