@@ -20,6 +20,9 @@ interface EncodeJob {
   encoded_size_gb?: number
   savings_pct?: number
   error_text?: string
+  media_type?: "movie" | "show"
+  show_name?: string
+  season_episode?: string
 }
 
 interface TranslationJob {
@@ -254,7 +257,14 @@ function EncodeJobRow({
       <JobStatusDot status={job.status as any} />
 
       <div className="min-w-0 flex-1 overflow-hidden">
-        <div className="truncate font-medium text-foreground/90">{job.folder_name}</div>
+        <div className="truncate font-medium text-foreground/90">
+          {job.media_type === "show" && job.show_name
+            ? job.show_name
+            : job.folder_name}
+        </div>
+        {job.media_type === "show" && job.season_episode && (
+          <div className="text-[10px] text-muted-foreground">{job.season_episode}</div>
+        )}
         {job.status === "encoding" && (
           <div className="text-[10px] text-muted-foreground">
             {job.job_type === "remux" ? "Remuxing" : "Encoding"}
