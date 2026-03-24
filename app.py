@@ -152,9 +152,10 @@ def save_config():
 # ── Database ──────────────────────────────────────────────────────────────────
 @contextmanager
 def db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA journal_mode=WAL')
+    conn.execute('PRAGMA busy_timeout=30000')
     try:
         yield conn
         conn.commit()
@@ -538,6 +539,76 @@ def scan_library():
                 scan_status['scanned'] += 1
 
             log('info', f"[scan] complete — {scan_status['scanned']} files processed")
+        except Exception as e:
+            log('error', f"[scan] error: {e}")
+        finally:
+            scan_status['running'] = False
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {'status': 'started'}
+
+
+def scan_library_folder(folder_path):
+    """Scan a specific folder subtree, replacing only the DB records for files within it.
+
+    This is much faster than a full rescan when you've reorganised a single show
+    or added episodes to one season — the rest of the library is untouched.
+    """
+    global scan_status
+    if scan_status['running']:
+        return {'error': 'Scan already in progress'}
+
+    scan_status = {'running': True, 'scanned': 0, 'total': 0}
+    folder = Path(folder_path)
+
+    def _run():
+        global scan_status
+        try:
+            log('info', f"[scan] folder scan: {folder}")
+
+            # Delete only records for files that live inside this folder subtree
+            with db() as conn:
+                existing = conn.execute(
+                    "SELECT id, filepath FROM media_files"
+                ).fetchall()
+                to_delete = [
+                    r['id'] for r in existing
+                    if Path(r['filepath']).is_relative_to(folder)
+                ]
+                if to_delete:
+                    conn.execute(
+                        f"DELETE FROM media_files WHERE id IN ({','.join('?'*len(to_delete))})",
+                        to_delete,
+                    )
+
+            all_files = []
+            for root, _, files in os.walk(folder_path):
+                for f in files:
+                    if f.lower().endswith(VIDEO_EXTENSIONS):
+                        all_files.append(os.path.join(root, f))
+
+            scan_status['total'] = len(all_files)
+            log('info', f"[scan] found {len(all_files)} files in {folder}")
+
+            folder_counts = Counter(str(Path(fp).parent) for fp in all_files)
+            poster_cache  = {}
+
+            for fp in all_files:
+                info = parse_media_info(fp)
+                if info:
+                    is_show = info.get('media_type') == 'show'
+                    info['has_sibling_videos'] = 1 if (
+                        folder_counts[str(Path(fp).parent)] > 1 and not is_show
+                    ) else 0
+                    cache_key = info['show_name'] if is_show and info.get('show_name') else info['folder_name']
+                    if cache_key not in poster_cache:
+                        poster_cache[cache_key] = tvdb_search_poster(cache_key, is_show)
+                    info['poster_url'] = poster_cache.get(cache_key)
+                    upsert_media_file(info)
+                    log('info', f"[scan] ({scan_status['scanned'] + 1}/{scan_status['total']}) {Path(fp).name}")
+                scan_status['scanned'] += 1
+
+            log('info', f"[scan] folder scan complete — {scan_status['scanned']} files processed")
         except Exception as e:
             log('error', f"[scan] error: {e}")
         finally:
@@ -1790,6 +1861,45 @@ def scan_status_route():
     return jsonify(scan_status)
 
 
+@app.route('/api/media/scan/folder', methods=['POST'])
+def trigger_folder_scan():
+    data     = request.get_json(force=True) or {}
+    file_ids = [int(i) for i in data.get('file_ids', [])]
+    if not file_ids:
+        return jsonify({'error': 'file_ids required'}), 400
+
+    with db() as conn:
+        rows = conn.execute(
+            f"SELECT filepath FROM media_files WHERE id IN ({','.join('?'*len(file_ids))})",
+            file_ids,
+        ).fetchall()
+
+    if not rows:
+        return jsonify({'error': 'No files found for given IDs'}), 404
+
+    # Derive the deepest common ancestor folder from all the file paths
+    parent_dirs  = [str(Path(r['filepath']).parent) for r in rows]
+    common       = os.path.commonpath(parent_dirs)
+    common_resolved = str(Path(common).resolve())
+
+    # Security: must sit inside the configured watch directory
+    watch_resolved = str(Path(WATCH_DIR).resolve())
+    if not common_resolved.startswith(watch_resolved):
+        return jsonify({'error': 'Path outside watch directory'}), 403
+
+    return jsonify(scan_library_folder(common_resolved))
+
+
+@app.route('/api/health')
+def health():
+    try:
+        with db() as conn:
+            conn.execute('SELECT 1')
+        return jsonify({'status': 'ok'})
+    except Exception as e:
+        return jsonify({'status': 'error', 'detail': str(e)}), 503
+
+
 @app.route('/api/media/<int:file_id>/refresh', methods=['POST'])
 def refresh_file(file_id):
     with db() as conn:
@@ -1963,7 +2073,8 @@ def get_encode_jobs():
         rows = conn.execute('''
             SELECT ej.*,
                    mf.folder_name, mf.filename,
-                   mf.video_codec, mf.video_height
+                   mf.video_codec, mf.video_height,
+                   mf.show_name, mf.season_episode, mf.media_type
             FROM encode_jobs ej
             LEFT JOIN media_files mf ON ej.media_file_id = mf.id
             ORDER BY ej.created_at DESC

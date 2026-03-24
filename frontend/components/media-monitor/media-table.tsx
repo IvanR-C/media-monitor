@@ -28,7 +28,7 @@ import {
 import { cn } from "@/lib/utils"
 import {
   MoreHorizontal, Play, Languages, ChevronRight, ChevronDown,
-  Tag, Loader2, ArrowUp, ArrowDown, ArrowUpDown,
+  Tag, Loader2, ArrowUp, ArrowDown, ArrowUpDown, FolderSync,
 } from "lucide-react"
 import type { MediaFile, MediaType, AudioTrack, SubtitleTrack } from "./media-library-tab"
 
@@ -67,6 +67,7 @@ interface MediaTableProps {
   onTranslate: (id: number, subIdx: number) => void
   onTranslateSelected: () => void
   onAssignTracks: (id: number, audio: any[], subs: any[]) => Promise<void>
+  onFolderScan: (fileIds: number[]) => void
   mediaType: MediaType
   loading?: boolean
 }
@@ -83,6 +84,7 @@ export function MediaTable({
   onTranslate,
   onTranslateSelected,
   onAssignTracks,
+  onFolderScan,
   mediaType,
   loading,
 }: MediaTableProps) {
@@ -234,6 +236,13 @@ export function MediaTable({
               <span className="ml-1 text-xs text-muted-foreground">
                 {seasonMap.size} season{seasonMap.size !== 1 ? 's' : ''} · {totalEps} ep{totalEps !== 1 ? 's' : ''}
               </span>
+              <button
+                title="Re-scan this show"
+                onClick={e => { e.stopPropagation(); onFolderScan(allShowIds) }}
+                className="ml-auto rounded p-1 text-muted-foreground/50 hover:bg-secondary/60 hover:text-foreground"
+              >
+                <FolderSync className="h-3 w-3" />
+              </button>
             </div>
           </td>
           <td className="w-8 px-2 py-2" />
@@ -274,6 +283,13 @@ export function MediaTable({
                   : <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground" />}
                 <span className="text-sm font-medium text-foreground/80">{seasonName}</span>
                 <span className="text-xs text-muted-foreground">{episodes.length} ep{episodes.length !== 1 ? 's' : ''}</span>
+                <button
+                  title="Re-scan this season"
+                  onClick={e => { e.stopPropagation(); onFolderScan(allSeasonIds) }}
+                  className="ml-auto rounded p-1 text-muted-foreground/50 hover:bg-secondary/60 hover:text-foreground"
+                >
+                  <FolderSync className="h-3 w-3" />
+                </button>
               </div>
             </td>
             <td className="w-8 px-2 py-2" />

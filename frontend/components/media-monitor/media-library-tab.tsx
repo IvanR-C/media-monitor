@@ -138,6 +138,37 @@ export function MediaLibraryTab({ scan }: MediaLibraryTabProps) {
     prevScanningRef.current = isScanning
   }, [isScanning, fetchMedia])
 
+  const handleFolderScan = async (fileIds: number[]) => {
+    if (isScanning) { toast.info('A scan is already in progress'); return }
+    try {
+      const r = await fetch('/api/media/scan/folder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file_ids: fileIds }),
+      })
+      const data = await r.json()
+      if (data.error) { toast.info(data.error); return }
+      toast.success('Folder scan started')
+      setIsScanning(true)
+      const stopPoll = () => {
+        if (scanPollRef.current) { clearInterval(scanPollRef.current); scanPollRef.current = null }
+        setIsScanning(false); setScanProgress(undefined); fetchMedia()
+      }
+      const doPoll = async () => {
+        try {
+          const st = await fetch('/api/media/scan/status').then(r => r.json())
+          if (st.total > 0) setScanProgress({ scanned: st.scanned, total: st.total })
+          if (!st.running) stopPoll()
+        } catch { /* ignore */ }
+      }
+      setTimeout(doPoll, 300)
+      if (scanPollRef.current) clearInterval(scanPollRef.current)
+      scanPollRef.current = setInterval(doPoll, 2000)
+    } catch {
+      toast.error('Folder scan failed to start')
+    }
+  }
+
   const handleEnqueueSelected = async () => {
     if (selectedIds.size === 0) return
     try {
@@ -316,6 +347,7 @@ export function MediaLibraryTab({ scan }: MediaLibraryTabProps) {
           onTranslate={handleTranslateSingle}
           onTranslateSelected={handleTranslateSelected}
           onAssignTracks={handleAssignTracks}
+          onFolderScan={handleFolderScan}
           mediaType={mediaType}
           loading={loading}
         />
