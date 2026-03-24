@@ -315,7 +315,7 @@ export function MediaLibraryTab({ scan }: MediaLibraryTabProps) {
   const clearSelection = () => setSelectedIds(new Set())
 
   return (
-    <div className="flex h-[calc(100vh-220px)] flex-col">
+    <div className="flex h-[calc(100vh-200px)] min-h-[420px] flex-col">
       <LibraryStats stats={stats} />
 
       <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
