@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect, useCallback } from "react"
 import { Loader2 } from "lucide-react"
 import { toast } from "sonner"
+
 import { Header } from "@/components/media-monitor/header"
 import { TabNav } from "@/components/media-monitor/tab-nav"
 import { DashboardTab } from "@/components/media-monitor/dashboard-tab"
@@ -14,6 +15,7 @@ export type ScanState = {
   scanProgress?: { scanned: number; total: number }
   lastScanResult?: { scanned: number; total: number }
   onScan: () => void
+  onFolderScan: (fileIds: number[]) => void
 }
 
 export default function MediaMonitor() {
@@ -62,7 +64,42 @@ export default function MediaMonitor() {
     }
   }, [isScanning])
 
-  const scanState: ScanState = { isScanning, scanProgress, lastScanResult, onScan: handleScan }
+  const handleFolderScan = useCallback(async (fileIds: number[]) => {
+    if (isScanning) { toast.info('A scan is already in progress'); return }
+    setIsScanning(true)
+    try {
+      const r = await fetch('/api/media/scan/folder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file_ids: fileIds }),
+      })
+      const data = await r.json()
+      if (data.error) { toast.info(data.error); setIsScanning(false); return }
+      toast.success('Folder scan started')
+
+      const stopPoll = (finalStatus?: { scanned: number; total: number }) => {
+        if (scanPollRef.current) { clearInterval(scanPollRef.current); scanPollRef.current = null }
+        setIsScanning(false)
+        setScanProgress(undefined)
+        if (finalStatus && finalStatus.total > 0) setLastScanResult(finalStatus)
+      }
+      const doPoll = async () => {
+        try {
+          const st = await fetch('/api/media/scan/status').then(r => r.json())
+          if (st.total > 0) setScanProgress({ scanned: st.scanned, total: st.total })
+          if (!st.running) stopPoll({ scanned: st.scanned, total: st.total })
+        } catch { /* ignore */ }
+      }
+      setTimeout(doPoll, 300)
+      if (scanPollRef.current) clearInterval(scanPollRef.current)
+      scanPollRef.current = setInterval(doPoll, 2000)
+    } catch {
+      toast.error('Folder scan failed to start')
+      setIsScanning(false)
+    }
+  }, [isScanning])
+
+  const scanState: ScanState = { isScanning, scanProgress, lastScanResult, onScan: handleScan, onFolderScan: handleFolderScan }
 
   return (
     <div className="min-h-screen bg-background">
