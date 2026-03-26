@@ -7,9 +7,12 @@ import re
 import json
 import time
 import shutil
+import select
+import struct
 import threading
 import sqlite3
 import subprocess
+import tempfile
 from collections import Counter, deque
 from contextlib import contextmanager
 from pathlib import Path
@@ -38,6 +41,22 @@ VIDEO_EXTENSIONS = ('.mkv', '.mp4', '.avi', '.mov', '.m4v')
 IMAGE_BASED_SUB_CODECS = {
     'hdmv_pgs_subtitle', 'dvd_subtitle', 'dvb_subtitle',
     'dvb_teletext', 'eia_608', 'eia_708',
+}
+
+# Codecs we can OCR (PGS only for now; VOBSUB uses a different binary format)
+OCR_CAPABLE_CODECS = {'hdmv_pgs_subtitle'}
+
+# MKV ISO 639-2 → Tesseract language code
+TESS_LANG_MAP = {
+    'eng': 'eng', 'spa': 'spa', 'jpn': 'jpn', 'fra': 'fra', 'deu': 'deu',
+    'ita': 'ita', 'por': 'por', 'rus': 'rus', 'kor': 'kor', 'ara': 'ara',
+    'hin': 'hin', 'chi': 'chi_sim', 'zho': 'chi_sim', 'zht': 'chi_tra',
+    'dut': 'nld', 'nld': 'nld', 'pol': 'pol', 'swe': 'swe', 'nor': 'nor',
+    'dan': 'dan', 'fin': 'fin', 'cze': 'ces', 'ces': 'ces', 'hun': 'hun',
+    'rum': 'ron', 'ron': 'ron', 'gre': 'ell', 'ell': 'ell', 'tur': 'tur',
+    'heb': 'heb', 'ukr': 'ukr', 'vie': 'vie', 'tha': 'tha', 'ind': 'ind',
+    'may': 'msa', 'bul': 'bul', 'hrv': 'hrv', 'slk': 'slk', 'slv': 'slv',
+    'est': 'est', 'lat': 'lav', 'lav': 'lav', 'lit': 'lit',
 }
 
 APPROVED_AUDIO_LANGS = {'eng', 'spa', 'jpn'}
@@ -247,6 +266,7 @@ def init_db():
                 filepath        TEXT NOT NULL,
                 source_sub_idx  INTEGER,
                 source_lang     TEXT,
+                source_codec    TEXT,
                 status          TEXT DEFAULT 'pending',
                 progress        REAL DEFAULT 0.0,
                 progress_detail TEXT,
@@ -257,6 +277,11 @@ def init_db():
                 created_at      TEXT DEFAULT (datetime('now'))
             );
         ''')
+        # Migration: add source_codec to existing databases
+        try:
+            conn.execute('ALTER TABLE translation_jobs ADD COLUMN source_codec TEXT')
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
 
 # ── Language helpers ──────────────────────────────────────────────────────────
@@ -803,13 +828,23 @@ def build_remux_cmd(filepath, output_path, audio_tracks, subtitle_tracks):
 #   progress=continue   (or "end" when finished)
 # We accumulate key/value pairs and emit an update on each "progress=" line.
 
-def parse_progress_output(stdout_iter):
+_FFMPEG_PROGRESS_TIMEOUT = 300  # seconds of no output before declaring a hang
+
+def parse_progress_output(stdout_pipe):
     """Generator that yields (elapsed_seconds, speed_str) for each ffmpeg
     progress report block (triggered by the "progress=..." sentinel line).
-    Reads from an iterable of stdout lines (newline-terminated).
+    Returns early (without raising) if no output arrives within
+    _FFMPEG_PROGRESS_TIMEOUT seconds — caller should check proc.poll() to
+    distinguish a normal EOF from a timeout/hang.
     """
     block = {}
-    for raw in stdout_iter:
+    while True:
+        ready, _, _ = select.select([stdout_pipe], [], [], _FFMPEG_PROGRESS_TIMEOUT)
+        if not ready:
+            return  # timeout — ffmpeg produced no output for too long
+        raw = stdout_pipe.readline()
+        if not raw:
+            break  # EOF — process exited normally
         line = raw.strip()
         if '=' not in line:
             continue
@@ -960,7 +995,20 @@ def run_encode_job(job_id):
             active_proc   = proc
             active_job_id = job_id
 
-        # Read structured progress from stdout; stderr is buffered for errors.
+        # Drain stderr in a background thread so a full pipe buffer never
+        # causes ffmpeg to stall waiting on us to read it.
+        # Log each line immediately so warnings appear even if the job succeeds.
+        def _read_stderr():
+            for line in proc.stderr:
+                stripped = line.rstrip()
+                if stripped:
+                    stderr_lines.append(stripped)
+                    log('warn', f"{tag} stderr: {stripped}")
+
+        stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
+        stderr_thread.start()
+
+        # Read structured progress from stdout.
         for elapsed, speed in parse_progress_output(proc.stdout):
             if duration > 0:
                 progress = min(elapsed / duration * 100, 99.0)
@@ -978,8 +1026,24 @@ def run_encode_job(job_id):
                         (round(progress, 1), speed, eta, job_id),
                     )
 
+        # If the process is still alive after the loop exits, parse_progress_output
+        # timed out (no output for _FFMPEG_PROGRESS_TIMEOUT seconds) — kill it.
+        if proc.poll() is None:
+            log('error',
+                f"{tag} job {job_id} — ffmpeg unresponsive for "
+                f"{_FFMPEG_PROGRESS_TIMEOUT}s, killing process")
+            proc.kill()
+            try:
+                proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                pass
+            stderr_thread.join(timeout=5)
+            _fail_job(job_id, filepath, tmp_path,
+                      f'ffmpeg timed out (no output for {_FFMPEG_PROGRESS_TIMEOUT}s)')
+            return
+
         proc.wait()
-        stderr_lines = proc.stderr.read().splitlines()
+        stderr_thread.join(timeout=5)
         retcode = proc.returncode
 
     except Exception as e:
@@ -994,15 +1058,20 @@ def run_encode_job(job_id):
             active_job_id = None
 
     if retcode != 0:
-        err_tail = '\n'.join(stderr_lines[-10:]) if stderr_lines else ''
-        log('error', f"[encode] job {job_id} ffmpeg stderr:\n{err_tail}")
+        # stderr lines were already logged in real-time by _read_stderr;
+        # repeat the tail here for a single-place failure summary.
+        err_tail = '\n'.join(stderr_lines[-10:]) if stderr_lines else '(no stderr)'
+        log('error', f"{tag} job {job_id} ffmpeg exited {retcode}; last stderr:\n{err_tail}")
         _fail_job(job_id, filepath, tmp_path, f'ffmpeg exited with code {retcode}')
         return
 
+    log('info', f"{tag} job {job_id} ffmpeg finished — verifying output file…")
     ok, msg = verify_encoded_file(filepath, tmp_path)
     if not ok:
+        log('error', f"{tag} job {job_id} verification failed: {msg}")
         _fail_job(job_id, filepath, tmp_path, f'Health check failed: {msg}')
         return
+    log('info', f"{tag} job {job_id} verification passed")
 
     encoded_size = os.path.getsize(tmp_path)
     try:
@@ -1093,12 +1162,14 @@ def queue_encode_jobs(file_ids):
                 'SELECT * FROM media_files WHERE id=?', (fid,)
             ).fetchone()
             if not mf:
+                log('warn', f"[encode] queue: file_id {fid} not found in DB — skipping")
                 continue
             existing = conn.execute(
                 "SELECT id FROM encode_jobs WHERE filepath=? AND status IN ('queued','encoding')",
                 (mf['filepath'],),
             ).fetchone()
             if existing:
+                log('info', f"[encode] queue: {Path(mf['filepath']).name} already queued/encoding (job {existing['id']}) — skipping")
                 continue
             cursor = conn.execute(
                 'INSERT INTO encode_jobs (media_file_id, filepath, original_size) VALUES (?,?,?)',
@@ -1109,9 +1180,11 @@ def queue_encode_jobs(file_ids):
                 "UPDATE media_files SET encode_status='queued' WHERE id=?", (fid,)
             )
             queued.append(job_id)
+            log('info', f"[encode] queue: job {job_id} — {Path(mf['filepath']).name} ({(mf['size_bytes'] or 0)/1e9:.2f} GB)")
     # Push onto the queue only after the transaction has committed
     for job_id in queued:
         encode_queue.put(job_id)
+    log('info', f"[encode] queue: {len(queued)} job(s) added, {len(file_ids) - len(queued)} skipped")
     return queued
 
 
@@ -1189,7 +1262,7 @@ def translate_srt_chunk(content, source_lang=''):
     return translated.strip()
 
 
-def translate_subtitle_file(srt_path, source_lang='', progress_cb=None):
+def translate_subtitle_file(srt_path, source_lang='', progress_cb=None, job_id=None):
     """
     Translate a full SRT file to Cuban Spanish, chunking if needed.
     progress_cb(pct: float, detail: str) is called periodically.
@@ -1205,11 +1278,17 @@ def translate_subtitle_file(srt_path, source_lang='', progress_cb=None):
     if not chunks:
         raise ValueError('Could not parse subtitle content into blocks')
 
+    _tag = f"[translate] job {job_id}" if job_id is not None else "[translate]"
+    total_blocks = len(re.split(r'\n\n+', content.strip()))
+    log('info', f"{_tag} {total_blocks} subtitle block(s) → {len(chunks)} chunk(s) to translate")
+
     translated_parts = []
     for i, chunk in enumerate(chunks):
+        log('info', f"{_tag} translating chunk {i + 1}/{len(chunks)}…")
         if progress_cb:
             progress_cb((i / len(chunks)) * 100, f'Translating part {i + 1}/{len(chunks)}…')
         translated_parts.append(translate_srt_chunk(chunk, source_lang))
+        log('info', f"{_tag} chunk {i + 1}/{len(chunks)} done")
 
     if progress_cb:
         progress_cb(95, 'Assembling translated file…')
@@ -1295,6 +1374,318 @@ def _fail_translation_job(job_id, error):
         )
 
 
+# ── PGS OCR pipeline ──────────────────────────────────────────────────────────
+
+def _decode_rle(rle: bytes, width: int, height: int) -> list:
+    """Decode PGS run-length encoded bitmap to a flat list of palette indices."""
+    pixels: list = []
+    line:   list = []
+    i, n = 0, len(rle)
+
+    while i < n:
+        b = rle[i]; i += 1
+        if b != 0:
+            line.append(b)
+            continue
+
+        # Escape byte — next byte describes the run
+        if i >= n:
+            break
+        b2 = rle[i]; i += 1
+
+        if b2 == 0:
+            # End of line — pad to width and flush
+            if len(line) < width:
+                line.extend([0] * (width - len(line)))
+            pixels.extend(line[:width])
+            line = []
+        elif b2 >> 6 == 0:           # 0x01–0x3F: short run of color 0
+            line.extend([0] * b2)
+        elif b2 >> 6 == 1:           # 0x40–0x7F: long run of color 0
+            if i >= n: break
+            count = ((b2 & 0x3F) << 8) | rle[i]; i += 1
+            line.extend([0] * count)
+        elif b2 >> 6 == 2:           # 0x80–0xBF: short run of color C
+            count = b2 & 0x3F
+            if i >= n: break
+            color = rle[i]; i += 1
+            line.extend([color] * count)
+        else:                        # 0xC0–0xFF: long run of color C
+            if i + 1 >= n: break
+            count = ((b2 & 0x3F) << 8) | rle[i]; i += 1
+            color = rle[i]; i += 1
+            line.extend([color] * count)
+
+    # Flush any partial last line
+    if line:
+        if len(line) < width:
+            line.extend([0] * (width - len(line)))
+        pixels.extend(line[:width])
+
+    expected = width * height
+    if len(pixels) < expected:
+        pixels.extend([0] * (expected - len(pixels)))
+    return pixels[:expected]
+
+
+def _parse_pgs(sup_bytes: bytes):
+    """
+    Parse a raw PGS (.sup) bytestring.
+    Yields (start_ms: int, end_ms: int, image: PIL.Image.Image) for each
+    subtitle event.  The caller owns the Image objects.
+    """
+    from PIL import Image as PilImage
+
+    SEG_PDS, SEG_ODS, SEG_PCS, SEG_END = 0x14, 0x15, 0x16, 0x80
+    MAGIC = b'PG'
+
+    data = sup_bytes
+    pos, n = 0, len(data)
+
+    # Persistent state (palette survives display-set boundaries)
+    palette: dict = {}   # entry_id -> (R, G, B, A)
+    # Per-display-set state
+    objects: dict = {}   # object_id -> {'w', 'h', 'rle'}
+    pcs_pts: int  = 0
+    pcs_objs: list = []
+
+    pending = None  # (start_ms, PilImage) – currently displayed subtitle
+
+    def pts_ms(pts: int) -> int:
+        return pts * 1000 // 90000
+
+    while pos + 13 <= n:
+        if data[pos:pos + 2] != MAGIC:
+            pos += 1
+            continue
+
+        pts      = struct.unpack_from('>I', data, pos + 2)[0]
+        seg_type = data[pos + 10]
+        seg_size = struct.unpack_from('>H', data, pos + 11)[0]
+
+        if pos + 13 + seg_size > n:
+            break
+        seg = data[pos + 13: pos + 13 + seg_size]
+        pos += 13 + seg_size
+
+        # ── PDS: palette definition ───────────────────────────────────────────
+        if seg_type == SEG_PDS and len(seg) >= 2:
+            i = 2   # skip palette_id, version
+            while i + 4 < len(seg):
+                eid = seg[i]
+                Y, Cr, Cb, T = seg[i+1], seg[i+2], seg[i+3], seg[i+4]
+                r = max(0, min(255, round(Y + 1.402   * (Cr - 128))))
+                g = max(0, min(255, round(Y - 0.34414 * (Cb - 128) - 0.71414 * (Cr - 128))))
+                b = max(0, min(255, round(Y + 1.772   * (Cb - 128))))
+                palette[eid] = (r, g, b, T)
+                i += 5
+
+        # ── ODS: object (bitmap) data ─────────────────────────────────────────
+        elif seg_type == SEG_ODS and len(seg) >= 4:
+            obj_id   = struct.unpack_from('>H', seg, 0)[0]
+            seq_flag = seg[3]
+            if seq_flag & 0x80:          # first (or only) fragment
+                if len(seg) < 11:
+                    continue
+                width  = struct.unpack_from('>H', seg, 7)[0]
+                height = struct.unpack_from('>H', seg, 9)[0]
+                objects[obj_id] = {'w': width, 'h': height, 'rle': bytearray(seg[11:])}
+            elif obj_id in objects:      # continuation fragment
+                objects[obj_id]['rle'].extend(seg[4:])
+
+        # ── PCS: presentation composition ────────────────────────────────────
+        elif seg_type == SEG_PCS and len(seg) >= 11:
+            pcs_pts  = pts_ms(pts)
+            n_objs   = seg[10]
+            pcs_objs = []
+            if n_objs > 0:
+                off = 11
+                for _ in range(n_objs):
+                    if off + 7 >= len(seg):
+                        break
+                    oid     = struct.unpack_from('>H', seg, off)[0]
+                    cropped = bool(seg[off + 3] & 0x80)
+                    pcs_objs.append(oid)
+                    off += 8 + (8 if cropped else 0)
+
+        # ── END: display-set boundary ─────────────────────────────────────────
+        elif seg_type == SEG_END:
+            if pcs_objs:
+                # Render the first object in this display set
+                for oid in pcs_objs:
+                    if oid not in objects:
+                        continue
+                    obj = objects[oid]
+                    w, h = obj['w'], obj['h']
+                    if w == 0 or h == 0:
+                        continue
+
+                    pix_indices = _decode_rle(bytes(obj['rle']), w, h)
+
+                    raw = bytearray(w * h * 4)
+                    for idx, ci in enumerate(pix_indices):
+                        r, g, b, a = palette.get(ci, (0, 0, 0, 0))
+                        off = idx * 4
+                        raw[off], raw[off+1], raw[off+2], raw[off+3] = r, g, b, a
+
+                    img = PilImage.frombytes('RGBA', (w, h), bytes(raw))
+
+                    # Close any previous pending subtitle (overridden by new one)
+                    if pending:
+                        s_ms, s_img = pending
+                        yield s_ms, pcs_pts, s_img
+
+                    pending = (pcs_pts, img)
+                    break   # only first object; multi-object sets are very rare
+
+            else:
+                # PCS had no objects → "clear" event ends the current subtitle
+                if pending:
+                    s_ms, s_img = pending
+                    yield s_ms, pcs_pts, s_img
+                    pending = None
+
+            # Reset per-display-set state; palette is intentionally kept
+            objects  = {}
+            pcs_objs = []
+
+    # Flush a subtitle that was never explicitly cleared
+    if pending:
+        s_ms, s_img = pending
+        yield s_ms, s_ms + 3000, s_img
+
+
+def _preprocess_for_ocr(img):
+    """
+    Return a high-contrast grayscale PIL image optimised for Tesseract.
+    Applies transformations only when the source warrants it:
+      1. Composites RGBA on black (typical PGS: sparse text on transparent bg).
+      2. Inverts when text is light on dark (Tesseract wants dark-on-light).
+      3. Applies autocontrast when the dynamic range is poor (std-dev < 55).
+      4. Upscales when text is too small for reliable OCR (height < 50 px).
+    """
+    from PIL import Image as PilImage, ImageOps
+
+    # Composite on black to preserve colour information before greyscale
+    bg = PilImage.new('RGB', img.size, (0, 0, 0))
+    if img.mode == 'RGBA':
+        bg.paste(img, mask=img.split()[3])
+    else:
+        bg.paste(img.convert('RGB'))
+    gray = bg.convert('L')
+
+    pixels = list(gray.getdata())
+    total  = len(pixels)
+    if total == 0:
+        return gray
+
+    mean = sum(pixels) / total
+
+    # Invert if the background is dark (light text on dark bg is the PGS norm)
+    if mean < 128:
+        gray   = ImageOps.invert(gray)
+        pixels = list(gray.getdata())
+        mean   = sum(pixels) / total
+
+    # Enhance contrast if the dynamic range is narrow
+    variance = sum((p - mean) ** 2 for p in pixels) / total
+    if variance ** 0.5 < 55:
+        gray = ImageOps.autocontrast(gray, cutoff=2)
+
+    # Upscale tiny text — Tesseract accuracy drops sharply below ~30 px cap height
+    w, h = gray.size
+    if 0 < h < 50:
+        scale = max(2, 60 // h)
+        from PIL import Image as PilImage
+        gray = gray.resize((w * scale, h * scale), PilImage.LANCZOS)
+
+    return gray
+
+
+def _ms_to_srt_ts(ms: int) -> str:
+    h   =  ms // 3_600_000
+    m   = (ms %  3_600_000) // 60_000
+    s   = (ms %     60_000) // 1_000
+    ms_ =  ms %      1_000
+    return f'{h:02d}:{m:02d}:{s:02d},{ms_:03d}'
+
+
+def pgs_ocr(filepath: str, sub_stream_idx: int, source_lang: str,
+            job_id=None, progress_cb=None) -> str:
+    """
+    Extract the PGS subtitle track at sub_stream_idx from filepath,
+    OCR every frame with Tesseract, and return a complete SRT string.
+
+    progress_cb(pct: float, detail: str) is called periodically during OCR.
+    Raises RuntimeError on unrecoverable failures.
+    """
+    import pytesseract
+
+    tag      = f'[ocr] job {job_id}' if job_id is not None else '[ocr]'
+    tess_lang = TESS_LANG_MAP.get((source_lang or '').lower(), 'eng')
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sup_path = os.path.join(tmpdir, 'subtitle.sup')
+
+        # 1 ── Extract PGS track to a raw .sup file
+        log('info', f'{tag} extracting PGS track {sub_stream_idx} → {sup_path}')
+        result = subprocess.run(
+            ['ffmpeg', '-y', '-fflags', '+genpts',
+             '-i', filepath,
+             '-map', f'0:s:{sub_stream_idx}',
+             '-c:s', 'copy', sup_path],
+            capture_output=True, text=True, timeout=None,
+        )
+        if result.returncode != 0 or not os.path.exists(sup_path):
+            raise RuntimeError(
+                f'PGS extraction failed (rc={result.returncode}): '
+                f'{result.stderr[-400:]}'
+            )
+        log('info', f'{tag} .sup extracted ({os.path.getsize(sup_path) / 1024:.1f} KB)')
+
+        # 2 ── Parse binary PGS
+        with open(sup_path, 'rb') as fh:
+            sup_bytes = fh.read()
+
+    frames = list(_parse_pgs(sup_bytes))
+    log('info', f'{tag} parsed {len(frames)} subtitle frame(s) — OCR lang={tess_lang}')
+
+    if not frames:
+        raise RuntimeError('No subtitle frames found in PGS track')
+
+    # 3 ── OCR each frame
+    srt_blocks: list = []
+    for i, (start_ms, end_ms, img) in enumerate(frames):
+        if progress_cb and i % max(1, len(frames) // 20) == 0:
+            progress_cb(i / len(frames) * 100, f'OCR frame {i + 1}/{len(frames)}…')
+
+        gray = _preprocess_for_ocr(img)
+
+        try:
+            # PSM 6: assume a single uniform block of text (clean subtitle image)
+            text = pytesseract.image_to_string(
+                gray, lang=tess_lang, config='--psm 6',
+            ).strip()
+        except Exception as exc:
+            log('warn', f'{tag} OCR error on frame {i + 1}: {exc}')
+            text = ''
+
+        if not text:
+            continue
+
+        srt_blocks.append(
+            f'{len(srt_blocks) + 1}\n'
+            f'{_ms_to_srt_ts(start_ms)} --> {_ms_to_srt_ts(end_ms)}\n'
+            f'{text}'
+        )
+
+    if not srt_blocks:
+        raise RuntimeError('OCR produced no readable text from subtitle images')
+
+    log('info', f'{tag} OCR complete — {len(srt_blocks)}/{len(frames)} frame(s) yielded text')
+    return '\n\n'.join(srt_blocks)
+
+
 def run_translation_job(job_id):
     with db() as conn:
         job = conn.execute(
@@ -1310,13 +1701,15 @@ def run_translation_job(job_id):
         _fail_translation_job(job_id, 'Media record not found in DB')
         return
 
-    filepath    = job['filepath']
-    sub_idx     = job['source_sub_idx']
-    source_lang = job['source_lang'] or ''
+    filepath     = job['filepath']
+    sub_idx      = job['source_sub_idx']
+    source_lang  = job['source_lang']  or ''
+    source_codec = job['source_codec'] or ''
+    is_image     = is_image_based_subtitle(source_codec)
 
-    path        = Path(filepath)
-    srt_path    = str(path.parent / (path.stem + '.es.srt'))
-    tmp_srt     = filepath + f'.sub{sub_idx}.extracting.srt'
+    path     = Path(filepath)
+    srt_path = str(path.parent / (path.stem + '.es.srt'))
+    tmp_srt  = filepath + f'.sub{sub_idx}.extracting.srt'
 
     def set_progress(pct, detail=''):
         with db() as conn:
@@ -1325,24 +1718,52 @@ def run_translation_job(job_id):
                 (round(pct, 1), detail, job_id),
             )
 
+    mode_label = f'OCR+translate ({source_codec})' if is_image else 'translate'
     log('info', f"[translate] job {job_id} started — {Path(filepath).name}"
-                f" (track {sub_idx}, lang={source_lang or 'unknown'})")
+                f" (track {sub_idx}, lang={source_lang or 'unknown'}, {mode_label})")
 
     try:
-        # 1 ── Extract
+        # 1 ── Extract / OCR
         with db() as conn:
             conn.execute(
                 "UPDATE translation_jobs SET status='extracting', started_at=datetime('now') WHERE id=?",
                 (job_id,),
             )
-        set_progress(5, 'Extracting subtitle track…')
-        log('info', f"[translate] job {job_id} extracting subtitle track {sub_idx}…")
 
-        if not extract_subtitle_to_srt(filepath, sub_idx, tmp_srt) or not os.path.exists(tmp_srt):
-            _fail_translation_job(job_id, 'ffmpeg could not extract subtitle track as SRT')
-            return
+        if is_image:
+            # 1a ── OCR path: extract .sup → parse bitmaps → Tesseract → SRT
+            with db() as conn:
+                conn.execute(
+                    "UPDATE translation_jobs SET status='ocr' WHERE id=?", (job_id,)
+                )
+            set_progress(5, 'Extracting subtitle images…')
+            log('info', f"[translate] job {job_id} running OCR on PGS track {sub_idx}…")
+
+            ocr_content = pgs_ocr(
+                filepath, sub_idx, source_lang, job_id=job_id,
+                progress_cb=lambda pct, detail: set_progress(5 + pct * 0.15, detail),
+            )
+            with open(tmp_srt, 'w', encoding='utf-8') as fh:
+                fh.write(ocr_content)
+            log('info', f"[translate] job {job_id} OCR complete — "
+                        f"{len(ocr_content)} chars written to temp SRT")
+        else:
+            # 1b ── Text path: ffmpeg extract SRT directly
+            set_progress(5, 'Extracting subtitle track…')
+            log('info', f"[translate] job {job_id} extracting subtitle track {sub_idx}…")
+
+            if not extract_subtitle_to_srt(filepath, sub_idx, tmp_srt) or not os.path.exists(tmp_srt):
+                _fail_translation_job(job_id, 'ffmpeg could not extract subtitle track as SRT')
+                return
+            extracted_size  = os.path.getsize(tmp_srt)
+            with open(tmp_srt, encoding='utf-8', errors='replace') as _f:
+                extracted_lines = sum(1 for _ in _f)
+            log('info', f"[translate] job {job_id} subtitle extracted — "
+                        f"{extracted_lines} lines, {extracted_size / 1024:.1f} KB")
 
         # 2 ── Translate
+        # Progress range: text=10–85 %, image=20–85 % (OCR already used 5–20 %)
+        translate_start = 20 if is_image else 10
         with db() as conn:
             conn.execute(
                 "UPDATE translation_jobs SET status='translating' WHERE id=?", (job_id,)
@@ -1351,13 +1772,18 @@ def run_translation_job(job_id):
 
         translated = translate_subtitle_file(
             tmp_srt, source_lang,
-            progress_cb=lambda pct, detail: set_progress(10 + pct * 0.75, detail),
+            progress_cb=lambda pct, detail: set_progress(
+                translate_start + pct * ((87 - translate_start) / 100), detail
+            ),
+            job_id=job_id,
         )
 
         # 3 ── Save .srt alongside video
         set_progress(87, 'Saving .srt file…')
+        log('info', f"[translate] job {job_id} saving .srt → {Path(srt_path).name}…")
         with open(srt_path, 'w', encoding='utf-8') as f:
             f.write(translated)
+        log('info', f"[translate] job {job_id} .srt saved ({os.path.getsize(srt_path)/1024:.1f} KB)")
 
         # 4 ── Mux into video
         with db() as conn:
@@ -1370,8 +1796,10 @@ def run_translation_job(job_id):
 
         ok, msg = mux_subtitle_into_video(filepath, srt_path)
         if not ok:
+            log('error', f"[translate] job {job_id} mux failed: {msg}")
             _fail_translation_job(job_id, f'Mux failed: {msg}')
             return
+        log('info', f"[translate] job {job_id} mux successful")
 
         # 5 ── Refresh media record
         set_progress(97, 'Updating media record…')
@@ -1420,6 +1848,7 @@ def run_translation_job(job_id):
 
 def translation_worker_loop():
     """Translation runs independently of encoding (API/IO-bound, not GPU-bound)."""
+    log('info', '[translate] worker thread started')
     while True:
         try:
             job_id = translation_queue.get(timeout=2)
@@ -2039,7 +2468,7 @@ def cancel_encode(job_id):
 
     with encode_lock:
         if active_job_id == job_id and active_proc:
-            active_proc.terminate()
+            active_proc.kill()   # SIGKILL — guarantees process dies even if hung
 
     with db() as conn:
         job = conn.execute(
@@ -2057,12 +2486,13 @@ def cancel_encode(job_id):
                 "UPDATE media_files SET encode_status=NULL WHERE filepath=?",
                 (job['filepath'],),
             )
-            tmp = job['filepath'] + '.encoding.tmp'
-            if os.path.exists(tmp):
-                try:
-                    os.remove(tmp)
-                except OSError:
-                    pass
+            for suffix in ('.encoding.tmp', '.remux.tmp'):
+                tmp = job['filepath'] + suffix
+                if os.path.exists(tmp):
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
 
     return jsonify({'status': 'cancelled'})
 
@@ -2121,16 +2551,16 @@ def api_translate_subtitle(file_id):
         if not track:
             return jsonify({'error': f'Subtitle track {sub_idx} not found'}), 404
 
-        if is_image_based_subtitle(track.get('codec', '')):
+        codec = track.get('codec', '')
+        if is_image_based_subtitle(codec) and codec not in OCR_CAPABLE_CODECS:
             return jsonify({
-                'error': f"Track #{sub_idx} is image-based ({track.get('codec')}) "
-                         f"and cannot be translated. Only text-based tracks (SRT, ASS, SSA) "
-                         f"are supported."
+                'error': f"Track #{sub_idx} ({codec}) cannot be OCR'd. "
+                         f"Only PGS (hdmv_pgs_subtitle) image tracks are supported."
             }), 400
 
         active = conn.execute(
             "SELECT id FROM translation_jobs WHERE filepath=? "
-            "AND status IN ('pending','extracting','translating','muxing')",
+            "AND status IN ('pending','extracting','ocr','translating','muxing')",
             (mf['filepath'],),
         ).fetchone()
         if active:
@@ -2138,8 +2568,9 @@ def api_translate_subtitle(file_id):
 
         cursor = conn.execute(
             'INSERT INTO translation_jobs '
-            '(media_file_id, filepath, source_sub_idx, source_lang) VALUES (?,?,?,?)',
-            (file_id, mf['filepath'], sub_idx, track.get('lang', '')),
+            '(media_file_id, filepath, source_sub_idx, source_lang, source_codec) '
+            'VALUES (?,?,?,?,?)',
+            (file_id, mf['filepath'], sub_idx, track.get('lang', ''), codec),
         )
         job_id = cursor.lastrowid
 
