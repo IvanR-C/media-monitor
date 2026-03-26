@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cp -r \"/c/Users/Ivan/Downloads/zip_extract/.\" \"/c/Users/Ivan/Docs/Projects/media-monitor/.claude/worktrees/infallible-goldwasser/frontend/\")",
+      "Bash(echo \"Exit: $?\")",
+      "Bash(docker push:*)",
+      "Bash(docker build:*)"
+    ]
+  }
+}
