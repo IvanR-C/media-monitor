@@ -172,12 +172,26 @@
         .alert-banner {
             background: #fff3cd; border: 1px solid #ffc107;
             border-radius: 12px; padding: 14px 20px; margin-bottom: 16px;
-            display: none; align-items: flex-start; gap: 12px; font-size: 0.9rem;
+            display: none; flex-direction: column; gap: 0; font-size: 0.9rem;
         }
         .alert-banner.show { display: flex; }
-        .alert-banner strong { font-weight: 600; display: block; margin-bottom: 4px; }
-        .alert-list { list-style: none; font-size: 0.85rem; color: var(--outer-space); }
+        .alert-banner strong { font-weight: 600; }
+        .alert-list { list-style: none; font-size: 0.85rem; color: var(--outer-space); margin-top: 8px; }
         .alert-list li::before { content: '→ '; }
+
+        /* ── Collapsible sections ─────────────────────────────────────────── */
+        .collapsible-header {
+            display: flex; justify-content: space-between; align-items: center;
+            cursor: pointer; user-select: none; gap: 8px;
+        }
+        .collapsible-header:hover { opacity: 0.75; }
+        .collapse-arrow {
+            font-size: 0.7rem; color: var(--slate-gray); flex-shrink: 0;
+            transition: transform 0.18s ease; display: inline-block;
+        }
+        .collapsible-section.collapsed .collapse-arrow { transform: rotate(-90deg); }
+        .collapsible-section.collapsed .collapsible-body { display: none; }
+        .collapsible-body { margin-top: 6px; }
 
         /* ── Table toolbar ───────────────────────────────────────────────── */
         .table-toolbar {
@@ -227,13 +241,30 @@
         .media-table td { padding: 12px 16px; vertical-align: middle; }
         .media-table td:first-child { padding: 12px; }
 
+        /* ── Show tree rows ──────────────────────────────────────────────── */
+        .show-header-row td { background: var(--antiflash-white); cursor: pointer; user-select: none; }
+        .show-header-row:hover td { background: #e4e6e8; }
+        .season-header-row td { background: #f5f6f7; cursor: pointer; user-select: none; }
+        .season-header-row:hover td { background: #ecedee; }
+        .episode-row td.col-title { padding-left: 36px; }
+        .show-name-main { font-weight: 600; font-size: 0.9rem; }
+        .show-name-meta { font-size: 0.75rem; color: var(--slate-gray); margin-top: 2px; }
+        .season-title-wrap { display: flex; align-items: center; gap: 8px; padding-left: 20px; }
+        .season-name { font-weight: 500; font-size: 0.875rem; }
+        .season-ep-count { font-size: 0.75rem; color: var(--slate-gray); }
+        .tree-expand-arrow {
+            display: inline-block; font-size: 0.6rem; color: var(--slate-gray);
+            transition: transform 0.15s ease; margin-right: 4px;
+        }
+        .tree-expand-arrow.open { transform: rotate(90deg); }
+
         .col-title   { min-width: 160px; max-width: 220px; }
         .col-file    { min-width: 140px; max-width: 200px; font-family: monospace; font-size: 0.8rem; }
         .col-size    { min-width: 120px; white-space: nowrap; }
         .col-res     { min-width: 110px; white-space: nowrap; }
         .col-codec   { min-width: 80px; white-space: nowrap; }
-        .col-audio   { min-width: 140px; }
-        .col-subs    { min-width: 100px; }
+        .col-audio   { min-width: 60px; white-space: nowrap; }
+        .col-subs    { min-width: 60px; white-space: nowrap; }
         .col-status  { min-width: 110px; white-space: nowrap; }
         .col-actions { min-width: 110px; white-space: nowrap; }
 
@@ -287,13 +318,69 @@
         .track-badge-other { background: var(--antiflash-white); color: var(--outer-space); }
         .track-codec { opacity: 0.65; font-weight: 500; }
 
+        /* ── Track count pills (audio / sub summary) ─────────────────────── */
+        .track-count-pill {
+            display: inline-flex; align-items: center; gap: 5px;
+            padding: 3px 10px; border-radius: 980px;
+            font-size: 0.78rem; font-weight: 600;
+            background: var(--antiflash-white); color: var(--outer-space);
+            cursor: default; white-space: nowrap;
+        }
+
+        /* ── Movies / Shows type switch ──────────────────────────────────── */
+        .type-switch {
+            display: flex; gap: 4px; margin-bottom: 16px;
+            background: var(--antiflash-white); border-radius: 12px;
+            padding: 4px; width: fit-content;
+        }
+        .type-btn {
+            background: transparent; border: none; border-radius: 8px;
+            padding: 7px 22px; font-weight: 600; font-size: 0.9rem;
+            cursor: pointer; color: var(--slate-gray);
+            transition: background 0.18s, color 0.18s, box-shadow 0.18s;
+        }
+        .type-btn.active {
+            background: white; color: var(--eerie-black);
+            box-shadow: 0 1px 4px rgba(0,0,0,0.10);
+        }
+        .type-btn:hover:not(.active) { color: var(--eerie-black); }
+
         /* ── Encode queue panel ──────────────────────────────────────────── */
         .queue-panel { margin-top: 24px; }
-        .queue-panel h3 {
-            font-size: 1.1rem; font-weight: 600; margin-bottom: 16px;
-            display: flex; align-items: center; gap: 8px;
+        .queue-panel .collapsible-header {
+            font-size: 1.1rem; font-weight: 600; margin-bottom: 0;
         }
+        .queue-panel .collapsible-body { margin-top: 16px; }
         .queue-empty { color: var(--slate-gray); font-size: 0.9rem; padding: 20px 0; }
+
+        /* ── Log panel ───────────────────────────────────────────────────── */
+        .log-panel { margin-top: 24px; }
+        .log-panel .collapsible-header { font-size: 1.1rem; font-weight: 600; }
+        .log-panel .collapsible-body   { margin-top: 12px; }
+        .log-toolbar {
+            display: flex; align-items: center; gap: 10px;
+            margin-bottom: 8px; flex-wrap: wrap;
+        }
+        .log-toolbar-right { margin-left: auto; display: flex; gap: 8px; }
+        .log-level-dot {
+            width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+            margin-top: 5px;
+        }
+        .log-level-dot.info  { background: #6c757d; }
+        .log-level-dot.warn  { background: #ffc107; }
+        .log-level-dot.error { background: #dc3545; }
+        .log-box {
+            background: #0f1117; border-radius: 10px; padding: 12px 14px;
+            font-family: 'Courier New', monospace; font-size: 0.78rem;
+            line-height: 1.55; color: #c9d1d9; max-height: 340px;
+            overflow-y: auto; overflow-x: hidden; word-break: break-word;
+        }
+        .log-entry { display: flex; gap: 8px; padding: 1px 0; }
+        .log-ts    { color: #6e7681; flex-shrink: 0; }
+        .log-msg.info  { color: #c9d1d9; }
+        .log-msg.warn  { color: #e3b341; }
+        .log-msg.error { color: #f85149; }
+        .log-empty { color: #6e7681; font-style: italic; }
 
         .job-card {
             background: white; border: 1px solid var(--antiflash-white);
@@ -596,11 +683,20 @@
         </div>
 
         <!-- Multi-video folder alerts -->
-        <div class="alert-banner" id="alert-banner">
-            <div>
-                <strong>Multiple video files detected in the same folder</strong>
+        <div class="alert-banner collapsible-section" id="alert-banner">
+            <div class="collapsible-header" onclick="toggleSection('alerts')">
+                <strong>⚠ Multiple video files detected in the same folder</strong>
+                <span class="collapse-arrow" id="collapse-arrow-alerts">▼</span>
+            </div>
+            <div class="collapsible-body" id="collapsible-body-alerts">
                 <ul class="alert-list" id="alert-list"></ul>
             </div>
+        </div>
+
+        <!-- Movies / Shows switch -->
+        <div class="type-switch">
+            <button class="type-btn active" id="type-btn-movie" onclick="setType(this, 'movie')">🎬 Movies</button>
+            <button class="type-btn"        id="type-btn-show"  onclick="setType(this, 'show')">📺 Shows</button>
         </div>
 
         <!-- Filter bar -->
@@ -633,7 +729,7 @@
                 <thead>
                     <tr>
                         <th><input type="checkbox" id="select-all" onchange="toggleSelectAll(this)"></th>
-                        <th class="col-title"  data-col="folder_name" onclick="sortBy('folder_name')">Movie / Folder <span class="sort-arrow"></span></th>
+                        <th class="col-title"  data-col="folder_name" onclick="sortBy('folder_name')" id="th-title">Title <span class="sort-arrow"></span></th>
                         <th class="col-file"   data-col="filename"    onclick="sortBy('filename')">File <span class="sort-arrow"></span></th>
                         <th class="col-size"   data-col="size_bytes"  onclick="sortBy('size_bytes')">Size <span class="sort-arrow"></span></th>
                         <th class="col-res"    data-col="video_height" onclick="sortBy('video_height')">Resolution <span class="sort-arrow"></span></th>
@@ -656,15 +752,47 @@
         </div>
 
         <!-- Encode queue -->
-        <div class="queue-panel">
-            <h3>Encode Queue <span id="queue-badge"></span></h3>
-            <div id="jobs-list"><p class="queue-empty">No encode jobs.</p></div>
+        <div class="queue-panel collapsible-section" id="section-encode-queue">
+            <div class="collapsible-header" onclick="toggleSection('encode-queue')">
+                <span>Encode Queue <span id="queue-badge"></span></span>
+                <span class="collapse-arrow">▼</span>
+            </div>
+            <div class="collapsible-body">
+                <div id="jobs-list"><p class="queue-empty">No encode jobs.</p></div>
+            </div>
         </div>
 
         <!-- Translation queue -->
-        <div class="queue-panel" style="margin-top:16px;">
-            <h3>Translation Queue <span id="translate-queue-badge"></span></h3>
-            <div id="translate-jobs-list"><p class="queue-empty">No translation jobs.</p></div>
+        <div class="queue-panel collapsible-section" id="section-translate-queue" style="margin-top:16px;">
+            <div class="collapsible-header" onclick="toggleSection('translate-queue')">
+                <span>Translation Queue <span id="translate-queue-badge"></span></span>
+                <span class="collapse-arrow">▼</span>
+            </div>
+            <div class="collapsible-body">
+                <div id="translate-jobs-list"><p class="queue-empty">No translation jobs.</p></div>
+            </div>
+        </div>
+
+        <!-- App Logs -->
+        <div class="log-panel collapsible-section collapsed" id="section-logs">
+            <div class="collapsible-header" onclick="toggleSection('logs')">
+                <span>App Logs <span id="log-badge"></span></span>
+                <span class="collapse-arrow">▼</span>
+            </div>
+            <div class="collapsible-body">
+                <div class="log-toolbar">
+                    <label style="font-size:0.85rem;color:var(--slate-gray);">
+                        <input type="checkbox" id="log-autoscroll" checked style="margin-right:4px;">
+                        Auto-scroll
+                    </label>
+                    <div class="log-toolbar-right">
+                        <button class="button button-secondary button-sm" onclick="clearLogs()">Clear</button>
+                    </div>
+                </div>
+                <div class="log-box" id="log-box">
+                    <span class="log-empty">No log entries yet.</span>
+                </div>
+            </div>
         </div>
 
     </div><!-- /media -->
@@ -717,6 +845,7 @@
 // ── State ────────────────────────────────────────────────────────────────────
 let allFiles      = [];
 let currentFilter = 'all';
+let currentType   = 'movie';
 let sortCol       = 'size_bytes';
 let sortDir       = 'desc';
 let selected      = new Set();
@@ -751,9 +880,19 @@ function showNotification(msg, type = 'success') {
 
 // ── Dashboard: config + stats ────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', () => {
+    applyCollapsed();
     loadConfig();
     loadStats();
     setInterval(loadStats, 30000);
+
+    // Delegated click for show/season tree rows — avoids inline onclick
+    // with JSON strings that break when names contain quotes or apostrophes.
+    document.getElementById('media-tbody').addEventListener('click', e => {
+        const showRow   = e.target.closest('.show-header-row');
+        const seasonRow = e.target.closest('.season-header-row');
+        if (showRow)   toggleShow(showRow.dataset.showName);
+        else if (seasonRow) toggleSeason(seasonRow.dataset.seasonKey);
+    });
 });
 
 async function loadConfig() {
@@ -822,7 +961,7 @@ async function loadStats() {
 async function loadMedia(filter) {
     if (filter) currentFilter = filter;
     try {
-        const r = await fetch('/api/media?filter=' + currentFilter);
+        const r = await fetch(`/api/media?filter=${currentFilter}&type=${currentType}`);
         const d = await r.json();
         allFiles = d.files || [];
 
@@ -862,6 +1001,39 @@ async function loadAlerts() {
     } catch (e) { console.error('alerts error', e); }
 }
 
+// ── Collapsible sections ─────────────────────────────────────────────────────
+const COLLAPSE_KEY = 'mm-collapsed-v1';
+let collapsedSections = {};
+try { collapsedSections = JSON.parse(localStorage.getItem(COLLAPSE_KEY) || '{}'); } catch {}
+
+function applyCollapsed() {
+    ['alerts', 'encode-queue', 'translate-queue', 'logs'].forEach(key => {
+        const sectionId = key === 'alerts' ? 'alert-banner' : `section-${key}`;
+        const el = document.getElementById(sectionId);
+        if (!el) return;
+        el.classList.toggle('collapsed', !!collapsedSections[key]);
+    });
+}
+
+function toggleSection(key) {
+    collapsedSections[key] = !collapsedSections[key];
+    try { localStorage.setItem(COLLAPSE_KEY, JSON.stringify(collapsedSections)); } catch {}
+    applyCollapsed();
+}
+
+function setType(btn, type) {
+    document.querySelectorAll('.type-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentType   = type;
+    currentFilter = 'all';
+    selected.clear();
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    document.querySelector('.filter-btn[data-filter="all"]').classList.add('active');
+    const th = document.getElementById('th-title');
+    if (th) th.innerHTML = (type === 'show' ? 'Show / Episode' : 'Movie / Folder') + ' <span class="sort-arrow"></span>';
+    loadMedia('all');
+}
+
 function setFilter(btn, filter) {
     document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
@@ -871,6 +1043,123 @@ function setFilter(btn, filter) {
 }
 
 // ── Table rendering ───────────────────────────────────────────────────────────
+// ── Show tree expand/collapse ─────────────────────────────────────────────────
+const SHOW_TREE_KEY = 'mm-show-tree-v1';
+let expandedShows   = {};
+let expandedSeasons = {};
+try {
+    const s = JSON.parse(localStorage.getItem(SHOW_TREE_KEY) || '{}');
+    expandedShows   = s.shows   || {};
+    expandedSeasons = s.seasons || {};
+} catch {}
+
+function saveShowTree() {
+    try { localStorage.setItem(SHOW_TREE_KEY, JSON.stringify({ shows: expandedShows, seasons: expandedSeasons })); } catch {}
+}
+
+function toggleShow(showName) {
+    expandedShows[showName] = !expandedShows[showName];
+    saveShowTree();
+    renderTable();
+}
+
+function toggleSeason(key) {
+    expandedSeasons[key] = !expandedSeasons[key];
+    saveShowTree();
+    renderTable();
+}
+
+function renderShowTree(files) {
+    // Group: showName → seasonName → episodes[]
+    const shows = {};
+    for (const f of files) {
+        const show   = f.show_name   || f.folder_name || 'Unknown';
+        const season = f.folder_name || 'Unknown Season';
+        if (!shows[show]) shows[show] = { seasons: {}, allFiles: [] };
+        if (!shows[show].seasons[season]) shows[show].seasons[season] = [];
+        shows[show].seasons[season].push(f);
+        shows[show].allFiles.push(f);
+    }
+
+    let html = '';
+    for (const [showName, showData] of Object.entries(shows).sort(([a],[b]) => a.localeCompare(b))) {
+        const isOpen      = !!expandedShows[showName];
+        const seasonCount = Object.keys(showData.seasons).length;
+        const epCount     = showData.allFiles.length;
+        const poster      = showData.allFiles.find(f => f.poster_url)?.poster_url || '';
+
+        const hasEncodeFail = showData.allFiles.some(f => f.encode_status === 'failed');
+        const hasReencode   = showData.allFiles.some(f => (f.status || '').includes('RE-ENCODE'));
+        const hasRemux      = showData.allFiles.some(f => (f.status || '').includes('REMUX'));
+        const statusBadges  = [
+            hasEncodeFail ? '<span class="badge badge-failed">Failed</span>'     : '',
+            hasReencode   ? '<span class="badge badge-reencode">RE-ENCODE</span>': '',
+            hasRemux      ? '<span class="badge badge-remux">REMUX</span>'        : '',
+        ].filter(Boolean).join(' ');
+
+        const posterHtml = poster
+            ? `<img class="poster-thumb" src="${escHtml(poster)}" alt="" loading="lazy" onerror="this.parentElement.innerHTML='<div class=\\'poster-placeholder\\'></div>'">`
+            : `<div class="poster-placeholder"></div>`;
+
+        html += `<tr class="show-header-row" data-show-name="${escHtml(showName)}">
+            <td></td>
+            <td class="col-title">
+                <div class="cell-title-wrap">
+                    <div class="poster-wrap">${posterHtml}</div>
+                    <div>
+                        <div class="show-name-main">${escHtml(showName)}</div>
+                        <div class="show-name-meta">${seasonCount} season${seasonCount!==1?'s':''} · ${epCount} episode${epCount!==1?'s':''}</div>
+                    </div>
+                </div>
+            </td>
+            <td class="col-file"></td><td class="col-size"></td><td class="col-res"></td>
+            <td class="col-codec"></td><td class="col-audio"></td><td class="col-subs"></td>
+            <td class="col-status">${statusBadges}</td>
+            <td class="col-actions" style="text-align:right">
+                <span class="tree-expand-arrow ${isOpen?'open':''}">▶</span>
+            </td>
+        </tr>`;
+
+        if (!isOpen) continue;
+
+        for (const [seasonName, episodes] of Object.entries(showData.seasons).sort(([a],[b]) => a.localeCompare(b))) {
+            const seasonKey    = showName + '||' + seasonName;
+            const isSeasonOpen = !!expandedSeasons[seasonKey];
+
+            const sHasReencode  = episodes.some(f => (f.status || '').includes('RE-ENCODE'));
+            const sHasRemux     = episodes.some(f => (f.status || '').includes('REMUX'));
+            const sHasFailed    = episodes.some(f => f.encode_status === 'failed');
+            const sStatusBadges = [
+                sHasFailed   ? '<span class="badge badge-failed">Failed</span>'      : '',
+                sHasReencode ? '<span class="badge badge-reencode">RE-ENCODE</span>' : '',
+                sHasRemux    ? '<span class="badge badge-remux">REMUX</span>'        : '',
+            ].filter(Boolean).join(' ');
+
+            html += `<tr class="season-header-row" data-season-key="${escHtml(seasonKey)}">
+                <td></td>
+                <td class="col-title">
+                    <div class="season-title-wrap">
+                        <span class="tree-expand-arrow ${isSeasonOpen?'open':''}">▶</span>
+                        <span class="season-name">${escHtml(seasonName)}</span>
+                        <span class="season-ep-count">${episodes.length} ep${episodes.length!==1?'s':''}</span>
+                    </div>
+                </td>
+                <td class="col-file"></td><td class="col-size"></td><td class="col-res"></td>
+                <td class="col-codec"></td><td class="col-audio"></td><td class="col-subs"></td>
+                <td class="col-status">${sStatusBadges}</td>
+                <td class="col-actions"></td>
+            </tr>`;
+
+            if (!isSeasonOpen) continue;
+
+            const sorted = [...episodes].sort((a, b) => (a.season_episode || '').localeCompare(b.season_episode || ''));
+            for (const ep of sorted) html += renderRow(ep, true);
+        }
+    }
+
+    return html || `<tr><td colspan="10"><div class="table-empty"><strong>No shows found.</strong></div></td></tr>`;
+}
+
 function renderTable() {
     const tbody = document.getElementById('media-tbody');
     const files = getSortedFiles();
@@ -884,14 +1173,16 @@ function renderTable() {
         return;
     }
 
-    tbody.innerHTML = files.map(f => renderRow(f)).join('');
+    tbody.innerHTML = currentType === 'show'
+        ? renderShowTree(files)
+        : files.map(f => renderRow(f)).join('');
     updateSelectInfo();
 }
 
-function renderRow(f) {
+function renderRow(f, isEpisode = false) {
     const encStatus = f.encode_status;
     const checked   = selected.has(f.id) ? 'checked' : '';
-    const selClass  = selected.has(f.id) ? 'selected' : '';
+    const selClass  = [selected.has(f.id) ? 'selected' : '', isEpisode ? 'episode-row' : ''].filter(Boolean).join(' ');
 
     // Size cell
     let sizeHtml = `<div class="cell-size-main">${fmtGb(f.size_gb)}</div>`;
@@ -924,12 +1215,18 @@ function renderRow(f) {
         ? `<img class="poster-thumb" src="${escHtml(f.poster_url)}" alt="" loading="lazy" onerror="this.parentElement.innerHTML='<div class=\\'poster-placeholder\\'></div>'">`
         : `<div class="poster-placeholder"></div>`;
 
+    const displayTitle = isEpisode
+        ? (f.season_episode || f.folder_name)
+        : (f.media_type === 'show' && f.show_name)
+            ? (f.show_name + (f.season_episode ? ' ' + f.season_episode : ''))
+            : f.folder_name;
+
     return `<tr class="${selClass}" data-id="${f.id}">
         <td><input type="checkbox" ${checked} onchange="toggleSelect(${f.id}, this)"></td>
         <td class="col-title">
             <div class="cell-title-wrap">
                 <div class="poster-wrap">${posterHtml}</div>
-                <div class="cell-title" title="${escHtml(f.folder_name)}">${escHtml(f.folder_name)}</div>
+                <div class="cell-title" title="${escHtml(f.filename)}">${escHtml(displayTitle)}</div>
             </div>
         </td>
         <td class="col-file"><div class="cell-file"  title="${escHtml(f.filename)}">${escHtml(f.filename)}</div></td>
@@ -945,13 +1242,13 @@ function renderRow(f) {
 
 function renderAudioBadges(tracks) {
     if (!tracks.length) return '<span style="color:var(--french-gray-2)">—</span>';
-    return tracks.map(t => {
-        const lang  = (t.lang  || '').toUpperCase() || '?';
-        const codec = (t.codec || '').toLowerCase();
+    const tooltip = tracks.map(t => {
+        const lang  = (t.lang  || '?').toUpperCase();
+        const codec = (t.codec || '').toUpperCase();
         const ch    = t.channels ? ` ${t.channels}ch` : '';
-        const cls   = audioBadgeClass(lang.toLowerCase());
-        return `<span class="track-badge ${cls}">${lang} <span class="track-codec">${codec.toUpperCase()}${ch}</span></span>`;
-    }).join('');
+        return `${lang} ${codec}${ch}`;
+    }).join('\n');
+    return `<span class="track-count-pill" title="${escHtml(tooltip)}">🔊 ${tracks.length}</span>`;
 }
 
 function audioBadgeClass(lang) {
@@ -963,14 +1260,12 @@ function audioBadgeClass(lang) {
 
 function renderSubBadges(tracks) {
     if (!tracks.length) return '<span style="color:var(--french-gray-2)">—</span>';
-    const seen = new Set();
-    return tracks.map(t => {
-        const lang = (t.lang || '?').toUpperCase();
-        if (seen.has(lang)) return '';
-        seen.add(lang);
-        const cls = audioBadgeClass((t.lang || '').toLowerCase());
-        return `<span class="track-badge ${cls}">${lang}</span>`;
-    }).filter(Boolean).join('');
+    const tooltip = tracks.map(t => {
+        const lang  = (t.lang  || '?').toUpperCase();
+        const codec = (t.codec || '').toUpperCase();
+        return `${lang} ${codec}`;
+    }).join('\n');
+    return `<span class="track-count-pill" title="${escHtml(tooltip)}">💬 ${tracks.length}</span>`;
 }
 
 function renderStatusBadge(status, encStatus) {
@@ -1194,10 +1489,62 @@ function startScanPolling() {
     }, 1000);
 }
 
+// ── App logs ───────────────────────────────────────────────────────────────────
+let logSince      = 0;
+let logEntries    = [];
+let logBadgeCount = 0;
+
+async function loadLogs() {
+    try {
+        const r = await fetch(`/api/logs?since=${logSince}`);
+        const d = await r.json();
+        if (!d.logs || d.logs.length === 0) return;
+        logSince = d.total;
+        logEntries.push(...d.logs);
+        // cap local buffer at 500
+        if (logEntries.length > 500) logEntries = logEntries.slice(-500);
+        logBadgeCount += d.logs.filter(e => e.level === 'error').length;
+        renderLogs();
+    } catch (e) { /* silent */ }
+}
+
+function renderLogs() {
+    const box   = document.getElementById('log-box');
+    const badge = document.getElementById('log-badge');
+    if (!box) return;
+    if (logBadgeCount > 0) {
+        badge.textContent = `(${logBadgeCount} error${logBadgeCount > 1 ? 's' : ''})`;
+        badge.style.cssText = 'color:#dc3545;font-size:0.8rem;font-weight:500;';
+    } else {
+        badge.textContent = '';
+    }
+    if (logEntries.length === 0) {
+        box.innerHTML = '<span class="log-empty">No log entries yet.</span>';
+        return;
+    }
+    const wasAtBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+    box.innerHTML = logEntries.map(e => `
+        <div class="log-entry">
+            <span class="log-ts">${escHtml(e.ts)}</span>
+            <div class="log-level-dot ${e.level}"></div>
+            <span class="log-msg ${e.level}">${escHtml(e.msg)}</span>
+        </div>`).join('');
+    const autoScroll = document.getElementById('log-autoscroll');
+    if (autoScroll && autoScroll.checked && wasAtBottom) {
+        box.scrollTop = box.scrollHeight;
+    }
+}
+
+function clearLogs() {
+    logEntries    = [];
+    logBadgeCount = 0;
+    renderLogs();
+}
+
 // ── Encode jobs ───────────────────────────────────────────────────────────────
 function startJobsPolling() {
     stopJobsPolling();
-    jobsPollTimer = setInterval(() => { loadJobs(); loadTranslateJobs(); }, 2000);
+    jobsPollTimer = setInterval(() => { loadJobs(); loadTranslateJobs(); loadLogs(); }, 2000);
 }
 
 function stopJobsPolling() {

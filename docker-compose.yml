@@ -1,17 +1,14 @@
 services:
-  media-monitor:
-    build: .
-    container_name: media-monitor
+  backend:
+    image: ivanchelo/media-monitor:3.22.26.3
+    container_name: media-monitor-backend
     restart: unless-stopped
-    ports:
-      - "5000:5000"
     volumes:
-      # Mount your media directory (read-only recommended)
-      - /path/to/your/media:/watch:ro
+      # Mount your media directory (read/write required for encoding in-place)
+      - /path/to/your/media:/watch
       # Persistent config and database
       - ./config:/config
     environment:
-      # Optional: Override defaults
       - WATCH_DIR=/watch
       - PORT=5000
       - MAX_WORKERS=4
@@ -25,14 +22,27 @@ services:
       # - NTFY_TOPIC=my-media-notifications
       # - DISCORD_WEBHOOK=https://discord.com/api/webhooks/...
       # - TVDB_API_KEY=your-api-key
+      # - OPENAI_API_KEY=your-openai-key
+      # - OPENAI_MODEL=gpt-4o-mini
 
     # NVIDIA GPU access for hevc_nvenc encoding
     # Requires: NVIDIA Container Toolkit installed on the host
-    #   https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
     deploy:
       resources:
         reservations:
           devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+            - count: all
+              capabilities:
+                - gpu
+                - video
+
+  frontend:
+    image: ivanchelo/media-monitor-frontend:3.22.26.3
+    container_name: media-monitor-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - BACKEND_URL=http://backend:5000
+    depends_on:
+      - backend

@@ -7,10 +7,13 @@ import re
 import json
 import time
 import shutil
+import select
+import struct
 import threading
 import sqlite3
 import subprocess
-from collections import Counter
+import tempfile
+from collections import Counter, deque
 from contextlib import contextmanager
 from pathlib import Path
 from queue import Queue
@@ -40,6 +43,22 @@ IMAGE_BASED_SUB_CODECS = {
     'dvb_teletext', 'eia_608', 'eia_708',
 }
 
+# Codecs we can OCR (PGS only for now; VOBSUB uses a different binary format)
+OCR_CAPABLE_CODECS = {'hdmv_pgs_subtitle'}
+
+# MKV ISO 639-2 → Tesseract language code
+TESS_LANG_MAP = {
+    'eng': 'eng', 'spa': 'spa', 'jpn': 'jpn', 'fra': 'fra', 'deu': 'deu',
+    'ita': 'ita', 'por': 'por', 'rus': 'rus', 'kor': 'kor', 'ara': 'ara',
+    'hin': 'hin', 'chi': 'chi_sim', 'zho': 'chi_sim', 'zht': 'chi_tra',
+    'dut': 'nld', 'nld': 'nld', 'pol': 'pol', 'swe': 'swe', 'nor': 'nor',
+    'dan': 'dan', 'fin': 'fin', 'cze': 'ces', 'ces': 'ces', 'hun': 'hun',
+    'rum': 'ron', 'ron': 'ron', 'gre': 'ell', 'ell': 'ell', 'tur': 'tur',
+    'heb': 'heb', 'ukr': 'ukr', 'vie': 'vie', 'tha': 'tha', 'ind': 'ind',
+    'may': 'msa', 'bul': 'bul', 'hrv': 'hrv', 'slk': 'slk', 'slv': 'slv',
+    'est': 'est', 'lat': 'lav', 'lav': 'lav', 'lit': 'lit',
+}
+
 APPROVED_AUDIO_LANGS = {'eng', 'spa', 'jpn'}
 APPROVED_SUB_LANGS   = {'eng', 'spa'}
 
@@ -53,6 +72,48 @@ LANG_MAP = {
     'de': 'deu', 'fr': 'fra', 'pt': 'por', 'it': 'ita', 'zh': 'zho',
     'ko': 'kor', 'ru': 'rus', 'ar': 'ara', 'hi': 'hin',
 }
+
+SHOW_ROOT_SEGMENTS  = {'series', 'tv', 'shows', 'anime', 'television'}
+MOVIE_ROOT_SEGMENTS = {'movies', 'movie', 'films', 'film'}
+SE_PATTERN          = re.compile(r'[Ss](\d{1,2})[Ee](\d{1,2})')
+
+# ── In-memory log buffer (frontend /api/logs) ─────────────────────────────────
+_log_buffer     = deque(maxlen=500)
+_log_seq        = 0
+_log_lock       = threading.Lock()
+
+def log(level: str, msg: str):
+    """Log to stdout and the in-memory ring buffer exposed via /api/logs."""
+    global _log_seq
+    ts = datetime.now().strftime('%H:%M:%S')
+    print(f"[{ts}] [{level.upper()}] {msg}", flush=True)
+    with _log_lock:
+        _log_seq += 1
+        _log_buffer.append({'seq': _log_seq, 'ts': ts, 'level': level, 'msg': msg})
+
+
+def detect_media_type(filepath):
+    """Return (media_type, show_name, season_episode) for a given filepath."""
+    parts = Path(filepath).parts
+    for i, part in enumerate(parts):
+        low = part.lower()
+        if low in SHOW_ROOT_SEGMENTS and i + 1 < len(parts):
+            show_name = parts[i + 1]
+            m = SE_PATTERN.search(Path(filepath).stem)
+            se = f"S{int(m.group(1)):02d}E{int(m.group(2)):02d}" if m else None
+            return 'show', show_name, se
+        if low in MOVIE_ROOT_SEGMENTS:
+            return 'movie', None, None
+    # Fallback: filename SE pattern suggests an episode
+    m = SE_PATTERN.search(Path(filepath).stem)
+    if m:
+        p = Path(filepath)
+        # parent is likely "Season N", grandparent is show name
+        show_name = p.parent.parent.name if p.parent.parent != p.parent else p.parent.name
+        se = f"S{int(m.group(1)):02d}E{int(m.group(2)):02d}"
+        return 'show', show_name, se
+    return 'movie', None, None
+
 
 config = {
     'ntfy_server':     os.environ.get('NTFY_SERVER', 'https://ntfy.sh'),
@@ -110,9 +171,10 @@ def save_config():
 # ── Database ──────────────────────────────────────────────────────────────────
 @contextmanager
 def db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA journal_mode=WAL')
+    conn.execute('PRAGMA busy_timeout=30000')
     try:
         yield conn
         conn.commit()
@@ -127,12 +189,23 @@ def _migrate_db():
     """Add columns introduced after initial schema creation."""
     with db() as conn:
         for col, definition in [
-            ('poster_url', 'TEXT'),
+            ('poster_url',     'TEXT'),
+            ('media_type',     "TEXT DEFAULT 'movie'"),
+            ('show_name',      'TEXT'),
+            ('season_episode', 'TEXT'),
         ]:
             try:
                 conn.execute(f'ALTER TABLE media_files ADD COLUMN {col} {definition}')
             except Exception:
                 pass  # column already exists
+        # encode_jobs additions
+        for col, definition in [
+            ('job_type', "TEXT DEFAULT 'encode'"),
+        ]:
+            try:
+                conn.execute(f'ALTER TABLE encode_jobs ADD COLUMN {col} {definition}')
+            except Exception:
+                pass
 
 
 def init_db():
@@ -164,6 +237,9 @@ def init_db():
                 encode_status       TEXT,
                 has_sibling_videos  INTEGER DEFAULT 0,
                 poster_url          TEXT,
+                media_type          TEXT DEFAULT 'movie',
+                show_name           TEXT,
+                season_episode      TEXT,
                 scanned_at          TEXT DEFAULT (datetime('now'))
             );
 
@@ -180,6 +256,7 @@ def init_db():
                 original_size   INTEGER,
                 encoded_size    INTEGER,
                 error_text      TEXT,
+                job_type        TEXT DEFAULT 'encode',
                 created_at      TEXT DEFAULT (datetime('now'))
             );
 
@@ -189,6 +266,7 @@ def init_db():
                 filepath        TEXT NOT NULL,
                 source_sub_idx  INTEGER,
                 source_lang     TEXT,
+                source_codec    TEXT,
                 status          TEXT DEFAULT 'pending',
                 progress        REAL DEFAULT 0.0,
                 progress_detail TEXT,
@@ -199,6 +277,11 @@ def init_db():
                 created_at      TEXT DEFAULT (datetime('now'))
             );
         ''')
+        # Migration: add source_codec to existing databases
+        try:
+            conn.execute('ALTER TABLE translation_jobs ADD COLUMN source_codec TEXT')
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
 
 # ── Language helpers ──────────────────────────────────────────────────────────
@@ -279,6 +362,8 @@ def parse_media_info(filepath):
     video = video_streams[0] if video_streams else {}
     status = determine_status(size_bytes, audio_streams, subtitle_streams)
 
+    media_type, show_name, season_episode = detect_media_type(filepath)
+
     return {
         'filepath':         filepath,
         'folder_name':      path.parent.name,
@@ -294,6 +379,9 @@ def parse_media_info(filepath):
         'format_name':      fmt.get('format_name', ''),
         'status':           status,
         'has_sibling_videos': 0,  # set by caller
+        'media_type':       media_type,
+        'show_name':        show_name,
+        'season_episode':   season_episode,
     }
 
 
@@ -305,6 +393,11 @@ def determine_status(size_bytes, audio_streams, subtitle_streams):
     active = [s for s in audio_streams + subtitle_streams if s.get('action') != 'drop']
     if any(not s.get('lang') for s in active):
         parts.append('REMUX')
+    # Flag if BOTH English and Spanish subtitles are not present — each is required
+    active_subs = [s for s in subtitle_streams if s.get('action') != 'drop']
+    active_sub_langs = {normalize_lang(s.get('lang', '')) for s in active_subs}
+    if not APPROVED_SUB_LANGS.issubset(active_sub_langs):
+        parts.append('MISSING LANG')
     return ' | '.join(parts) if parts else 'OK'
 
 
@@ -316,12 +409,16 @@ def upsert_media_file(info):
                 (filepath, folder_name, filename, size_bytes, duration_seconds,
                  video_codec, video_width, video_height, video_bitrate,
                  audio_tracks, subtitle_tracks, format_name, status,
-                 has_sibling_videos, poster_url, scanned_at)
+                 has_sibling_videos, poster_url,
+                 media_type, show_name, season_episode,
+                 scanned_at)
             VALUES
                 (:filepath, :folder_name, :filename, :size_bytes, :duration_seconds,
                  :video_codec, :video_width, :video_height, :video_bitrate,
                  :audio_tracks, :subtitle_tracks, :format_name, :status,
-                 :has_sibling_videos, :poster_url, datetime('now'))
+                 :has_sibling_videos, :poster_url,
+                 :media_type, :show_name, :season_episode,
+                 datetime('now'))
             ON CONFLICT(filepath) DO UPDATE SET
                 folder_name=excluded.folder_name,
                 filename=excluded.filename,
@@ -337,6 +434,9 @@ def upsert_media_file(info):
                 status=excluded.status,
                 has_sibling_videos=excluded.has_sibling_videos,
                 poster_url=COALESCE(excluded.poster_url, media_files.poster_url),
+                media_type=COALESCE(excluded.media_type, media_files.media_type),
+                show_name=excluded.show_name,
+                season_episode=excluded.season_episode,
                 scanned_at=datetime('now')
         ''', row)
 
@@ -421,10 +521,19 @@ def scan_library():
     if scan_status['running']:
         return {'error': 'Scan already in progress'}
 
+    # Set running=True HERE (before the thread starts) so any status poll
+    # that fires in the first few milliseconds already sees running=True.
+    scan_status = {'running': True, 'scanned': 0, 'total': 0}
+
     def _run():
         global scan_status
-        scan_status = {'running': True, 'scanned': 0, 'total': 0}
         try:
+            # Wipe all existing records so reorganised folders / renamed files
+            # don't leave ghost entries (e.g. duplicate seasons after restructuring).
+            log('info', '[scan] clearing existing media records for a clean rescan…')
+            with db() as conn:
+                conn.execute("DELETE FROM media_files")
+
             all_files = []
             for root, _, files in os.walk(WATCH_DIR):
                 for f in files:
@@ -432,31 +541,101 @@ def scan_library():
                         all_files.append(os.path.join(root, f))
 
             scan_status['total'] = len(all_files)
-            print(f"[scan] found {len(all_files)} video files")
+            log('info', f"[scan] found {len(all_files)} video files in {WATCH_DIR}")
 
             folder_counts = Counter(str(Path(fp).parent) for fp in all_files)
-            poster_cache  = {}   # folder_name → url|None (fetch once per title)
+            poster_cache  = {}   # cache_key → url|None (fetch once per title/show)
 
             for fp in all_files:
                 info = parse_media_info(fp)
                 if info:
-                    info['has_sibling_videos'] = 1 if folder_counts[str(Path(fp).parent)] > 1 else 0
+                    is_show = info.get('media_type') == 'show'
+                    info['has_sibling_videos'] = 1 if (
+                        folder_counts[str(Path(fp).parent)] > 1 and not is_show
+                    ) else 0
 
-                    folder_name = info['folder_name']
-                    if folder_name not in poster_cache:
-                        is_ep = any(
-                            x in info['filename'].lower()
-                            for x in ['s0', 'e0', 'season', 'episode']
-                        )
-                        poster_cache[folder_name] = tvdb_search_poster(folder_name, is_ep)
+                    cache_key = info['show_name'] if is_show and info.get('show_name') else info['folder_name']
+                    if cache_key not in poster_cache:
+                        poster_cache[cache_key] = tvdb_search_poster(cache_key, is_show)
 
-                    info['poster_url'] = poster_cache.get(folder_name)
+                    info['poster_url'] = poster_cache.get(cache_key)
                     upsert_media_file(info)
+                    log('info', f"[scan] ({scan_status['scanned'] + 1}/{scan_status['total']}) {Path(fp).name}")
                 scan_status['scanned'] += 1
 
-            print(f"[scan] complete — {scan_status['scanned']} files processed")
+            log('info', f"[scan] complete — {scan_status['scanned']} files processed")
         except Exception as e:
-            print(f"[scan] error: {e}")
+            log('error', f"[scan] error: {e}")
+        finally:
+            scan_status['running'] = False
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {'status': 'started'}
+
+
+def scan_library_folder(folder_path):
+    """Scan a specific folder subtree, replacing only the DB records for files within it.
+
+    This is much faster than a full rescan when you've reorganised a single show
+    or added episodes to one season — the rest of the library is untouched.
+    """
+    global scan_status
+    if scan_status['running']:
+        return {'error': 'Scan already in progress'}
+
+    scan_status = {'running': True, 'scanned': 0, 'total': 0}
+    folder = Path(folder_path)
+
+    def _run():
+        global scan_status
+        try:
+            log('info', f"[scan] folder scan: {folder}")
+
+            # Delete only records for files that live inside this folder subtree
+            with db() as conn:
+                existing = conn.execute(
+                    "SELECT id, filepath FROM media_files"
+                ).fetchall()
+                to_delete = [
+                    r['id'] for r in existing
+                    if Path(r['filepath']).is_relative_to(folder)
+                ]
+                if to_delete:
+                    conn.execute(
+                        f"DELETE FROM media_files WHERE id IN ({','.join('?'*len(to_delete))})",
+                        to_delete,
+                    )
+
+            all_files = []
+            for root, _, files in os.walk(folder_path):
+                for f in files:
+                    if f.lower().endswith(VIDEO_EXTENSIONS):
+                        all_files.append(os.path.join(root, f))
+
+            scan_status['total'] = len(all_files)
+            log('info', f"[scan] found {len(all_files)} files in {folder}")
+
+            folder_counts = Counter(str(Path(fp).parent) for fp in all_files)
+            poster_cache  = {}
+
+            for fp in all_files:
+                info = parse_media_info(fp)
+                if info:
+                    is_show = info.get('media_type') == 'show'
+                    info['has_sibling_videos'] = 1 if (
+                        folder_counts[str(Path(fp).parent)] > 1 and not is_show
+                    ) else 0
+                    cache_key = info['show_name'] if is_show and info.get('show_name') else info['folder_name']
+                    if cache_key not in poster_cache:
+                        poster_cache[cache_key] = tvdb_search_poster(cache_key, is_show)
+                    info['poster_url'] = poster_cache.get(cache_key)
+                    upsert_media_file(info)
+                    log('info', f"[scan] ({scan_status['scanned'] + 1}/{scan_status['total']}) {Path(fp).name}")
+                scan_status['scanned'] += 1
+
+            log('info', f"[scan] folder scan complete — {scan_status['scanned']} files processed")
+        except Exception as e:
+            log('error', f"[scan] error: {e}")
         finally:
             scan_status['running'] = False
 
@@ -472,6 +651,7 @@ def get_multi_video_folders():
                    COUNT(*) AS cnt
             FROM media_files
             WHERE has_sibling_videos = 1
+              AND (media_type IS NULL OR media_type = 'movie')
             GROUP BY folder_name
             HAVING cnt > 1
         ''').fetchall()
@@ -568,7 +748,15 @@ def build_ffmpeg_cmd(filepath, output_path, row):
 
     cmd = [
         'ffmpeg', '-y',
-        '-hwaccel', 'cuda',
+        # Structured progress → stdout (newline-separated key=value).
+        # -nostats suppresses the \r-overwritten stats line on stderr so
+        # stderr carries only warnings/errors (safe to buffer until done).
+        '-progress', 'pipe:1',
+        '-nostats',
+        # CPU decode → GPU encode (hevc_nvenc).
+        # Avoids requiring libnvcuvid (NVDEC) which can be missing even
+        # when libnvidia-encode (NVENC) is present. CPU decoding adds
+        # negligible overhead vs. GPU encoding on REMUX sources.
         '-i', filepath,
         '-map', '0:v:0',
     ]
@@ -582,6 +770,7 @@ def build_ffmpeg_cmd(filepath, output_path, row):
         '-preset:v', 'p4',
         '-cq:v', '20',
         '-profile:v', 'main10',
+        '-rc-lookahead', '20',   # default is 32; reduce to lower RAM usage
     ]
 
     if height > 1080:
@@ -591,24 +780,87 @@ def build_ffmpeg_cmd(filepath, output_path, row):
     if sel_subs:
         cmd += ['-c:s', 'copy']
 
-    cmd.append(output_path)
+    # Explicitly set container format — ffmpeg can't infer it from .encoding.tmp
+    cmd += ['-f', 'matroska', output_path]
+    return cmd
+
+
+def build_remux_cmd(filepath, output_path, audio_tracks, subtitle_tracks):
+    """
+    Build an ffmpeg remux command: copy every stream bit-for-bit, drop tracks
+    whose action=='drop', and stamp the language tags from assignments.
+    No re-encode — only the container/metadata is rewritten.
+    """
+    cmd = ['ffmpeg', '-y', '-progress', 'pipe:1', '-nostats', '-i', filepath]
+
+    # Always keep the primary video stream
+    cmd += ['-map', '0:v:0']
+
+    kept_audio = [t for t in audio_tracks if t.get('action') != 'drop']
+    kept_subs  = [t for t in subtitle_tracks if t.get('action') != 'drop']
+
+    # Map by absolute stream_idx so drops work correctly
+    for t in kept_audio:
+        si = t.get('stream_idx')
+        cmd += ['-map', f'0:{si}'] if si is not None else ['-map', f'0:a:{t["audio_idx"]}']
+    for t in kept_subs:
+        si = t.get('stream_idx')
+        cmd += ['-map', f'0:{si}'] if si is not None else ['-map', f'0:s:{t["sub_idx"]}']
+
+    cmd += ['-c', 'copy']
+
+    # Stamp language metadata on the re-ordered output streams
+    for i, t in enumerate(kept_audio):
+        if t.get('lang'):
+            cmd += [f'-metadata:s:a:{i}', f'language={t["lang"]}']
+    for i, t in enumerate(kept_subs):
+        if t.get('lang'):
+            cmd += [f'-metadata:s:s:{i}', f'language={t["lang"]}']
+
+    cmd += ['-f', 'matroska', output_path]
     return cmd
 
 
 # ── FFmpeg progress parsing ───────────────────────────────────────────────────
-_TIME_RE  = re.compile(r'time=(\d{2}):(\d{2}):(\d{2})\.(\d+)')
-_SPEED_RE = re.compile(r'speed=\s*([\d.]+)x')
+# ffmpeg -progress pipe:1 emits newline-separated key=value pairs, e.g.:
+#   out_time_us=51234567000
+#   speed=1.50x
+#   progress=continue   (or "end" when finished)
+# We accumulate key/value pairs and emit an update on each "progress=" line.
 
+_FFMPEG_PROGRESS_TIMEOUT = 300  # seconds of no output before declaring a hang
 
-def parse_progress_line(line):
-    """Return (elapsed_seconds, speed_str) or (None, None)."""
-    tm = _TIME_RE.search(line)
-    if not tm:
-        return None, None
-    elapsed = int(tm[1]) * 3600 + int(tm[2]) * 60 + int(tm[3]) + int(tm[4]) / 100.0
-    sp      = _SPEED_RE.search(line)
-    speed   = (sp[1] + 'x') if sp else ''
-    return elapsed, speed
+def parse_progress_output(stdout_pipe):
+    """Generator that yields (elapsed_seconds, speed_str) for each ffmpeg
+    progress report block (triggered by the "progress=..." sentinel line).
+    Returns early (without raising) if no output arrives within
+    _FFMPEG_PROGRESS_TIMEOUT seconds — caller should check proc.poll() to
+    distinguish a normal EOF from a timeout/hang.
+    """
+    block = {}
+    while True:
+        ready, _, _ = select.select([stdout_pipe], [], [], _FFMPEG_PROGRESS_TIMEOUT)
+        if not ready:
+            return  # timeout — ffmpeg produced no output for too long
+        raw = stdout_pipe.readline()
+        if not raw:
+            break  # EOF — process exited normally
+        line = raw.strip()
+        if '=' not in line:
+            continue
+        key, _, val = line.partition('=')
+        block[key] = val
+        if key == 'progress':
+            # Emit one update per complete block
+            try:
+                elapsed = int(block.get('out_time_us', 0)) / 1_000_000
+            except ValueError:
+                elapsed = None
+            speed_raw = block.get('speed', '').strip()
+            speed = speed_raw if speed_raw and speed_raw != 'N/A' else ''
+            if elapsed is not None:
+                yield elapsed, speed
+            block = {}
 
 
 # ── Health verification ───────────────────────────────────────────────────────
@@ -659,7 +911,7 @@ def _fail_job(job_id, filepath, tmp_path, error):
             "UPDATE media_files SET encode_status='failed' WHERE filepath=?",
             (filepath,),
         )
-    print(f"[encode] job {job_id} failed: {error}")
+    log('error', f"[encode] job {job_id} failed: {error}")
     folder_name = Path(filepath).parent.name
     filename    = Path(filepath).name
     send_ntfy_notification(
@@ -677,7 +929,11 @@ def run_encode_job(job_id):
         job = conn.execute(
             'SELECT * FROM encode_jobs WHERE id=?', (job_id,)
         ).fetchone()
-        if not job or job['status'] in ('cancelled', 'done', 'failed'):
+        if not job:
+            log('warn', f"[encode] job {job_id} not found in DB — skipping")
+            return
+        if job['status'] in ('cancelled', 'done', 'failed'):
+            log('info', f"[encode] job {job_id} already in terminal state '{job['status']}' — skipping")
             return
         mf = conn.execute(
             'SELECT * FROM media_files WHERE filepath=?', (job['filepath'],)
@@ -687,8 +943,12 @@ def run_encode_job(job_id):
         _fail_job(job_id, job['filepath'], None, 'Media record not found in DB')
         return
 
+    job_type = (job['job_type'] or 'encode') if 'job_type' in job.keys() else 'encode'
+    tag      = '[remux]' if job_type == 'remux' else '[encode]'
+    log('info', f"{tag} job {job_id} picked up — {Path(job['filepath']).name}")
+
     filepath = job['filepath']
-    tmp_path = filepath + '.encoding.tmp'
+    tmp_path = filepath + ('.remux.tmp' if job_type == 'remux' else '.encoding.tmp')
 
     if os.path.exists(tmp_path):
         try:
@@ -696,37 +956,66 @@ def run_encode_job(job_id):
         except OSError:
             pass
 
-    with db() as conn:
-        conn.execute(
-            "UPDATE encode_jobs SET status='encoding', started_at=datetime('now') WHERE id=?",
-            (job_id,),
-        )
-        conn.execute(
-            "UPDATE media_files SET encode_status='encoding' WHERE filepath=?",
-            (filepath,),
-        )
+    try:
+        with db() as conn:
+            conn.execute(
+                "UPDATE encode_jobs SET status='encoding', started_at=datetime('now') WHERE id=?",
+                (job_id,),
+            )
+            conn.execute(
+                "UPDATE media_files SET encode_status='encoding' WHERE filepath=?",
+                (filepath,),
+            )
+    except Exception as e:
+        _fail_job(job_id, filepath, tmp_path, f'DB error before encode start: {e}')
+        return
 
-    cmd      = build_ffmpeg_cmd(filepath, tmp_path, dict(mf))
+    if job_type == 'remux':
+        cmd = build_remux_cmd(
+            filepath, tmp_path,
+            json.loads(mf['audio_tracks']    or '[]'),
+            json.loads(mf['subtitle_tracks'] or '[]'),
+        )
+    else:
+        cmd = build_ffmpeg_cmd(filepath, tmp_path, dict(mf))
     duration = mf['duration_seconds'] or 0
-    print(f"[encode] job {job_id} starting — {Path(filepath).name}")
+    log('info', f"{tag} job {job_id} starting — {Path(filepath).name}")
+    log('info', f"[encode] cmd: {' '.join(cmd)}")
+
+    stderr_lines = []
 
     try:
         proc = subprocess.Popen(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            cmd,
+            stdout=subprocess.PIPE,   # -progress pipe:1 → structured key=value
+            stderr=subprocess.PIPE,   # errors only (-nostats suppresses stats)
             text=True, bufsize=1,
         )
         with encode_lock:
             active_proc   = proc
             active_job_id = job_id
 
-        for line in proc.stderr:
-            elapsed, speed = parse_progress_line(line)
-            if elapsed is not None and duration > 0:
+        # Drain stderr in a background thread so a full pipe buffer never
+        # causes ffmpeg to stall waiting on us to read it.
+        # Log each line immediately so warnings appear even if the job succeeds.
+        def _read_stderr():
+            for line in proc.stderr:
+                stripped = line.rstrip()
+                if stripped:
+                    stderr_lines.append(stripped)
+                    log('warn', f"{tag} stderr: {stripped}")
+
+        stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
+        stderr_thread.start()
+
+        # Read structured progress from stdout.
+        for elapsed, speed in parse_progress_output(proc.stdout):
+            if duration > 0:
                 progress = min(elapsed / duration * 100, 99.0)
                 eta = None
                 try:
                     if speed:
-                        rate = float(speed.replace('x', ''))
+                        rate = float(speed.rstrip('x'))
                         if rate > 0:
                             eta = int((duration - elapsed) / rate)
                 except (ValueError, ZeroDivisionError):
@@ -737,7 +1026,24 @@ def run_encode_job(job_id):
                         (round(progress, 1), speed, eta, job_id),
                     )
 
+        # If the process is still alive after the loop exits, parse_progress_output
+        # timed out (no output for _FFMPEG_PROGRESS_TIMEOUT seconds) — kill it.
+        if proc.poll() is None:
+            log('error',
+                f"{tag} job {job_id} — ffmpeg unresponsive for "
+                f"{_FFMPEG_PROGRESS_TIMEOUT}s, killing process")
+            proc.kill()
+            try:
+                proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                pass
+            stderr_thread.join(timeout=5)
+            _fail_job(job_id, filepath, tmp_path,
+                      f'ffmpeg timed out (no output for {_FFMPEG_PROGRESS_TIMEOUT}s)')
+            return
+
         proc.wait()
+        stderr_thread.join(timeout=5)
         retcode = proc.returncode
 
     except Exception as e:
@@ -752,13 +1058,20 @@ def run_encode_job(job_id):
             active_job_id = None
 
     if retcode != 0:
+        # stderr lines were already logged in real-time by _read_stderr;
+        # repeat the tail here for a single-place failure summary.
+        err_tail = '\n'.join(stderr_lines[-10:]) if stderr_lines else '(no stderr)'
+        log('error', f"{tag} job {job_id} ffmpeg exited {retcode}; last stderr:\n{err_tail}")
         _fail_job(job_id, filepath, tmp_path, f'ffmpeg exited with code {retcode}')
         return
 
+    log('info', f"{tag} job {job_id} ffmpeg finished — verifying output file…")
     ok, msg = verify_encoded_file(filepath, tmp_path)
     if not ok:
+        log('error', f"{tag} job {job_id} verification failed: {msg}")
         _fail_job(job_id, filepath, tmp_path, f'Health check failed: {msg}')
         return
+    log('info', f"{tag} job {job_id} verification passed")
 
     encoded_size = os.path.getsize(tmp_path)
     try:
@@ -800,11 +1113,17 @@ def run_encode_job(job_id):
     orig_h       = mf['video_height'] or 0
     new_h        = new_info['video_height'] if new_info else orig_h
     res_str      = f"{orig_h}p → {new_h}p" if new_h and new_h != orig_h else f"{new_h or orig_h}p"
-    print(
-        f"[encode] job {job_id} done — "
-        f"{orig_size/1e9:.2f} GB → {encoded_size/1e9:.2f} GB "
-        f"(saved {savings_pct:.0f}%)"
-    )
+    if job_type == 'remux':
+        log('info',
+            f"[remux] job {job_id} done — "
+            f"{orig_size/1e9:.2f} GB (tracks rewritten, no re-encode)"
+        )
+    else:
+        log('info',
+            f"[encode] job {job_id} done — "
+            f"{orig_size/1e9:.2f} GB → {encoded_size/1e9:.2f} GB "
+            f"(saved {savings_pct:.0f}%, {res_str})"
+        )
     send_ntfy_notification(
         f"Encode Complete: {mf['folder_name']}",
         f"File: {mf['filename']}\n"
@@ -817,6 +1136,7 @@ def run_encode_job(job_id):
 
 def encode_worker_loop():
     """Single-threaded worker — processes encode jobs one at a time (one GPU)."""
+    log('info', '[encode] worker thread started')
     while True:
         try:
             job_id = encode_queue.get(timeout=2)
@@ -825,12 +1145,16 @@ def encode_worker_loop():
         try:
             run_encode_job(job_id)
         except Exception as e:
-            print(f"[encode] unhandled error in job {job_id}: {e}")
+            log('error', f"[encode] unhandled error in job {job_id}: {e}")
         encode_queue.task_done()
 
 
 def queue_encode_jobs(file_ids):
-    """Insert encode jobs and push them onto the worker queue."""
+    """Insert encode jobs and push them onto the worker queue.
+
+    encode_queue.put() is called AFTER the transaction commits so the worker
+    never reads a job_id before the INSERT is visible to other connections.
+    """
     queued = []
     with db() as conn:
         for fid in file_ids:
@@ -838,12 +1162,14 @@ def queue_encode_jobs(file_ids):
                 'SELECT * FROM media_files WHERE id=?', (fid,)
             ).fetchone()
             if not mf:
+                log('warn', f"[encode] queue: file_id {fid} not found in DB — skipping")
                 continue
             existing = conn.execute(
                 "SELECT id FROM encode_jobs WHERE filepath=? AND status IN ('queued','encoding')",
                 (mf['filepath'],),
             ).fetchone()
             if existing:
+                log('info', f"[encode] queue: {Path(mf['filepath']).name} already queued/encoding (job {existing['id']}) — skipping")
                 continue
             cursor = conn.execute(
                 'INSERT INTO encode_jobs (media_file_id, filepath, original_size) VALUES (?,?,?)',
@@ -853,8 +1179,12 @@ def queue_encode_jobs(file_ids):
             conn.execute(
                 "UPDATE media_files SET encode_status='queued' WHERE id=?", (fid,)
             )
-            encode_queue.put(job_id)
             queued.append(job_id)
+            log('info', f"[encode] queue: job {job_id} — {Path(mf['filepath']).name} ({(mf['size_bytes'] or 0)/1e9:.2f} GB)")
+    # Push onto the queue only after the transaction has committed
+    for job_id in queued:
+        encode_queue.put(job_id)
+    log('info', f"[encode] queue: {len(queued)} job(s) added, {len(file_ids) - len(queued)} skipped")
     return queued
 
 
@@ -878,14 +1208,23 @@ def is_image_based_subtitle(codec):
 
 
 def extract_subtitle_to_srt(filepath, sub_stream_idx, output_path):
-    """Extract subtitle track at position sub_stream_idx to SRT via ffmpeg."""
+    """Extract subtitle track at position sub_stream_idx to SRT via ffmpeg.
+
+    No timeout — large remux files (40-50 GB BluRay) can take several minutes
+    to demux even a single subtitle stream.  This always runs inside the
+    translation worker thread so there is no risk of blocking the Flask server.
+    """
     cmd = [
-        'ffmpeg', '-y', '-i', filepath,
+        'ffmpeg', '-y',
+        '-fflags', '+genpts',   # helps with malformed PTS in remux streams
+        '-i', filepath,
         '-map', f'0:s:{sub_stream_idx}',
         '-c:s', 'srt',
         output_path,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=None)
+    if result.returncode != 0:
+        log('error', f'[translate] subtitle extract stderr: {result.stderr[-500:]}')
     return result.returncode == 0
 
 
@@ -923,7 +1262,7 @@ def translate_srt_chunk(content, source_lang=''):
     return translated.strip()
 
 
-def translate_subtitle_file(srt_path, source_lang='', progress_cb=None):
+def translate_subtitle_file(srt_path, source_lang='', progress_cb=None, job_id=None):
     """
     Translate a full SRT file to Cuban Spanish, chunking if needed.
     progress_cb(pct: float, detail: str) is called periodically.
@@ -939,11 +1278,17 @@ def translate_subtitle_file(srt_path, source_lang='', progress_cb=None):
     if not chunks:
         raise ValueError('Could not parse subtitle content into blocks')
 
+    _tag = f"[translate] job {job_id}" if job_id is not None else "[translate]"
+    total_blocks = len(re.split(r'\n\n+', content.strip()))
+    log('info', f"{_tag} {total_blocks} subtitle block(s) → {len(chunks)} chunk(s) to translate")
+
     translated_parts = []
     for i, chunk in enumerate(chunks):
+        log('info', f"{_tag} translating chunk {i + 1}/{len(chunks)}…")
         if progress_cb:
             progress_cb((i / len(chunks)) * 100, f'Translating part {i + 1}/{len(chunks)}…')
         translated_parts.append(translate_srt_chunk(chunk, source_lang))
+        log('info', f"{_tag} chunk {i + 1}/{len(chunks)} done")
 
     if progress_cb:
         progress_cb(95, 'Assembling translated file…')
@@ -975,10 +1320,13 @@ def mux_subtitle_into_video(filepath, srt_path):
         '-c', 'copy',
         f'-metadata:s:s:{new_sub_idx}', 'language=spa',
         f'-metadata:s:s:{new_sub_idx}', 'title=Spanish (Cuban)',
+        '-f', 'matroska',
         tmp_path,
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    # No timeout — muxing a 40-50 GB remux can take longer than 5 minutes.
+    # Runs in the translation worker thread, never blocks Flask.
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=None)
     if result.returncode != 0:
         if os.path.exists(tmp_path):
             try: os.remove(tmp_path)
@@ -1014,7 +1362,7 @@ def _fail_translation_job(job_id, error):
         job = conn.execute(
             'SELECT filepath FROM translation_jobs WHERE id=?', (job_id,)
         ).fetchone()
-    print(f"[translate] job {job_id} failed: {error}")
+    log('error', f"[translate] job {job_id} failed: {error}")
     if job:
         folder_name = Path(job['filepath']).parent.name
         filename    = Path(job['filepath']).name
@@ -1024,6 +1372,318 @@ def _fail_translation_job(job_id, error):
             tags='rotating_light,x',
             priority='high',
         )
+
+
+# ── PGS OCR pipeline ──────────────────────────────────────────────────────────
+
+def _decode_rle(rle: bytes, width: int, height: int) -> list:
+    """Decode PGS run-length encoded bitmap to a flat list of palette indices."""
+    pixels: list = []
+    line:   list = []
+    i, n = 0, len(rle)
+
+    while i < n:
+        b = rle[i]; i += 1
+        if b != 0:
+            line.append(b)
+            continue
+
+        # Escape byte — next byte describes the run
+        if i >= n:
+            break
+        b2 = rle[i]; i += 1
+
+        if b2 == 0:
+            # End of line — pad to width and flush
+            if len(line) < width:
+                line.extend([0] * (width - len(line)))
+            pixels.extend(line[:width])
+            line = []
+        elif b2 >> 6 == 0:           # 0x01–0x3F: short run of color 0
+            line.extend([0] * b2)
+        elif b2 >> 6 == 1:           # 0x40–0x7F: long run of color 0
+            if i >= n: break
+            count = ((b2 & 0x3F) << 8) | rle[i]; i += 1
+            line.extend([0] * count)
+        elif b2 >> 6 == 2:           # 0x80–0xBF: short run of color C
+            count = b2 & 0x3F
+            if i >= n: break
+            color = rle[i]; i += 1
+            line.extend([color] * count)
+        else:                        # 0xC0–0xFF: long run of color C
+            if i + 1 >= n: break
+            count = ((b2 & 0x3F) << 8) | rle[i]; i += 1
+            color = rle[i]; i += 1
+            line.extend([color] * count)
+
+    # Flush any partial last line
+    if line:
+        if len(line) < width:
+            line.extend([0] * (width - len(line)))
+        pixels.extend(line[:width])
+
+    expected = width * height
+    if len(pixels) < expected:
+        pixels.extend([0] * (expected - len(pixels)))
+    return pixels[:expected]
+
+
+def _parse_pgs(sup_bytes: bytes):
+    """
+    Parse a raw PGS (.sup) bytestring.
+    Yields (start_ms: int, end_ms: int, image: PIL.Image.Image) for each
+    subtitle event.  The caller owns the Image objects.
+    """
+    from PIL import Image as PilImage
+
+    SEG_PDS, SEG_ODS, SEG_PCS, SEG_END = 0x14, 0x15, 0x16, 0x80
+    MAGIC = b'PG'
+
+    data = sup_bytes
+    pos, n = 0, len(data)
+
+    # Persistent state (palette survives display-set boundaries)
+    palette: dict = {}   # entry_id -> (R, G, B, A)
+    # Per-display-set state
+    objects: dict = {}   # object_id -> {'w', 'h', 'rle'}
+    pcs_pts: int  = 0
+    pcs_objs: list = []
+
+    pending = None  # (start_ms, PilImage) – currently displayed subtitle
+
+    def pts_ms(pts: int) -> int:
+        return pts * 1000 // 90000
+
+    while pos + 13 <= n:
+        if data[pos:pos + 2] != MAGIC:
+            pos += 1
+            continue
+
+        pts      = struct.unpack_from('>I', data, pos + 2)[0]
+        seg_type = data[pos + 10]
+        seg_size = struct.unpack_from('>H', data, pos + 11)[0]
+
+        if pos + 13 + seg_size > n:
+            break
+        seg = data[pos + 13: pos + 13 + seg_size]
+        pos += 13 + seg_size
+
+        # ── PDS: palette definition ───────────────────────────────────────────
+        if seg_type == SEG_PDS and len(seg) >= 2:
+            i = 2   # skip palette_id, version
+            while i + 4 < len(seg):
+                eid = seg[i]
+                Y, Cr, Cb, T = seg[i+1], seg[i+2], seg[i+3], seg[i+4]
+                r = max(0, min(255, round(Y + 1.402   * (Cr - 128))))
+                g = max(0, min(255, round(Y - 0.34414 * (Cb - 128) - 0.71414 * (Cr - 128))))
+                b = max(0, min(255, round(Y + 1.772   * (Cb - 128))))
+                palette[eid] = (r, g, b, T)
+                i += 5
+
+        # ── ODS: object (bitmap) data ─────────────────────────────────────────
+        elif seg_type == SEG_ODS and len(seg) >= 4:
+            obj_id   = struct.unpack_from('>H', seg, 0)[0]
+            seq_flag = seg[3]
+            if seq_flag & 0x80:          # first (or only) fragment
+                if len(seg) < 11:
+                    continue
+                width  = struct.unpack_from('>H', seg, 7)[0]
+                height = struct.unpack_from('>H', seg, 9)[0]
+                objects[obj_id] = {'w': width, 'h': height, 'rle': bytearray(seg[11:])}
+            elif obj_id in objects:      # continuation fragment
+                objects[obj_id]['rle'].extend(seg[4:])
+
+        # ── PCS: presentation composition ────────────────────────────────────
+        elif seg_type == SEG_PCS and len(seg) >= 11:
+            pcs_pts  = pts_ms(pts)
+            n_objs   = seg[10]
+            pcs_objs = []
+            if n_objs > 0:
+                off = 11
+                for _ in range(n_objs):
+                    if off + 7 >= len(seg):
+                        break
+                    oid     = struct.unpack_from('>H', seg, off)[0]
+                    cropped = bool(seg[off + 3] & 0x80)
+                    pcs_objs.append(oid)
+                    off += 8 + (8 if cropped else 0)
+
+        # ── END: display-set boundary ─────────────────────────────────────────
+        elif seg_type == SEG_END:
+            if pcs_objs:
+                # Render the first object in this display set
+                for oid in pcs_objs:
+                    if oid not in objects:
+                        continue
+                    obj = objects[oid]
+                    w, h = obj['w'], obj['h']
+                    if w == 0 or h == 0:
+                        continue
+
+                    pix_indices = _decode_rle(bytes(obj['rle']), w, h)
+
+                    raw = bytearray(w * h * 4)
+                    for idx, ci in enumerate(pix_indices):
+                        r, g, b, a = palette.get(ci, (0, 0, 0, 0))
+                        off = idx * 4
+                        raw[off], raw[off+1], raw[off+2], raw[off+3] = r, g, b, a
+
+                    img = PilImage.frombytes('RGBA', (w, h), bytes(raw))
+
+                    # Close any previous pending subtitle (overridden by new one)
+                    if pending:
+                        s_ms, s_img = pending
+                        yield s_ms, pcs_pts, s_img
+
+                    pending = (pcs_pts, img)
+                    break   # only first object; multi-object sets are very rare
+
+            else:
+                # PCS had no objects → "clear" event ends the current subtitle
+                if pending:
+                    s_ms, s_img = pending
+                    yield s_ms, pcs_pts, s_img
+                    pending = None
+
+            # Reset per-display-set state; palette is intentionally kept
+            objects  = {}
+            pcs_objs = []
+
+    # Flush a subtitle that was never explicitly cleared
+    if pending:
+        s_ms, s_img = pending
+        yield s_ms, s_ms + 3000, s_img
+
+
+def _preprocess_for_ocr(img):
+    """
+    Return a high-contrast grayscale PIL image optimised for Tesseract.
+    Applies transformations only when the source warrants it:
+      1. Composites RGBA on black (typical PGS: sparse text on transparent bg).
+      2. Inverts when text is light on dark (Tesseract wants dark-on-light).
+      3. Applies autocontrast when the dynamic range is poor (std-dev < 55).
+      4. Upscales when text is too small for reliable OCR (height < 50 px).
+    """
+    from PIL import Image as PilImage, ImageOps
+
+    # Composite on black to preserve colour information before greyscale
+    bg = PilImage.new('RGB', img.size, (0, 0, 0))
+    if img.mode == 'RGBA':
+        bg.paste(img, mask=img.split()[3])
+    else:
+        bg.paste(img.convert('RGB'))
+    gray = bg.convert('L')
+
+    pixels = list(gray.getdata())
+    total  = len(pixels)
+    if total == 0:
+        return gray
+
+    mean = sum(pixels) / total
+
+    # Invert if the background is dark (light text on dark bg is the PGS norm)
+    if mean < 128:
+        gray   = ImageOps.invert(gray)
+        pixels = list(gray.getdata())
+        mean   = sum(pixels) / total
+
+    # Enhance contrast if the dynamic range is narrow
+    variance = sum((p - mean) ** 2 for p in pixels) / total
+    if variance ** 0.5 < 55:
+        gray = ImageOps.autocontrast(gray, cutoff=2)
+
+    # Upscale tiny text — Tesseract accuracy drops sharply below ~30 px cap height
+    w, h = gray.size
+    if 0 < h < 50:
+        scale = max(2, 60 // h)
+        from PIL import Image as PilImage
+        gray = gray.resize((w * scale, h * scale), PilImage.LANCZOS)
+
+    return gray
+
+
+def _ms_to_srt_ts(ms: int) -> str:
+    h   =  ms // 3_600_000
+    m   = (ms %  3_600_000) // 60_000
+    s   = (ms %     60_000) // 1_000
+    ms_ =  ms %      1_000
+    return f'{h:02d}:{m:02d}:{s:02d},{ms_:03d}'
+
+
+def pgs_ocr(filepath: str, sub_stream_idx: int, source_lang: str,
+            job_id=None, progress_cb=None) -> str:
+    """
+    Extract the PGS subtitle track at sub_stream_idx from filepath,
+    OCR every frame with Tesseract, and return a complete SRT string.
+
+    progress_cb(pct: float, detail: str) is called periodically during OCR.
+    Raises RuntimeError on unrecoverable failures.
+    """
+    import pytesseract
+
+    tag      = f'[ocr] job {job_id}' if job_id is not None else '[ocr]'
+    tess_lang = TESS_LANG_MAP.get((source_lang or '').lower(), 'eng')
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sup_path = os.path.join(tmpdir, 'subtitle.sup')
+
+        # 1 ── Extract PGS track to a raw .sup file
+        log('info', f'{tag} extracting PGS track {sub_stream_idx} → {sup_path}')
+        result = subprocess.run(
+            ['ffmpeg', '-y', '-fflags', '+genpts',
+             '-i', filepath,
+             '-map', f'0:s:{sub_stream_idx}',
+             '-c:s', 'copy', sup_path],
+            capture_output=True, text=True, timeout=None,
+        )
+        if result.returncode != 0 or not os.path.exists(sup_path):
+            raise RuntimeError(
+                f'PGS extraction failed (rc={result.returncode}): '
+                f'{result.stderr[-400:]}'
+            )
+        log('info', f'{tag} .sup extracted ({os.path.getsize(sup_path) / 1024:.1f} KB)')
+
+        # 2 ── Parse binary PGS
+        with open(sup_path, 'rb') as fh:
+            sup_bytes = fh.read()
+
+    frames = list(_parse_pgs(sup_bytes))
+    log('info', f'{tag} parsed {len(frames)} subtitle frame(s) — OCR lang={tess_lang}')
+
+    if not frames:
+        raise RuntimeError('No subtitle frames found in PGS track')
+
+    # 3 ── OCR each frame
+    srt_blocks: list = []
+    for i, (start_ms, end_ms, img) in enumerate(frames):
+        if progress_cb and i % max(1, len(frames) // 20) == 0:
+            progress_cb(i / len(frames) * 100, f'OCR frame {i + 1}/{len(frames)}…')
+
+        gray = _preprocess_for_ocr(img)
+
+        try:
+            # PSM 6: assume a single uniform block of text (clean subtitle image)
+            text = pytesseract.image_to_string(
+                gray, lang=tess_lang, config='--psm 6',
+            ).strip()
+        except Exception as exc:
+            log('warn', f'{tag} OCR error on frame {i + 1}: {exc}')
+            text = ''
+
+        if not text:
+            continue
+
+        srt_blocks.append(
+            f'{len(srt_blocks) + 1}\n'
+            f'{_ms_to_srt_ts(start_ms)} --> {_ms_to_srt_ts(end_ms)}\n'
+            f'{text}'
+        )
+
+    if not srt_blocks:
+        raise RuntimeError('OCR produced no readable text from subtitle images')
+
+    log('info', f'{tag} OCR complete — {len(srt_blocks)}/{len(frames)} frame(s) yielded text')
+    return '\n\n'.join(srt_blocks)
 
 
 def run_translation_job(job_id):
@@ -1041,13 +1701,15 @@ def run_translation_job(job_id):
         _fail_translation_job(job_id, 'Media record not found in DB')
         return
 
-    filepath    = job['filepath']
-    sub_idx     = job['source_sub_idx']
-    source_lang = job['source_lang'] or ''
+    filepath     = job['filepath']
+    sub_idx      = job['source_sub_idx']
+    source_lang  = job['source_lang']  or ''
+    source_codec = job['source_codec'] or ''
+    is_image     = is_image_based_subtitle(source_codec)
 
-    path        = Path(filepath)
-    srt_path    = str(path.parent / (path.stem + '.es.srt'))
-    tmp_srt     = filepath + f'.sub{sub_idx}.extracting.srt'
+    path     = Path(filepath)
+    srt_path = str(path.parent / (path.stem + '.es.srt'))
+    tmp_srt  = filepath + f'.sub{sub_idx}.extracting.srt'
 
     def set_progress(pct, detail=''):
         with db() as conn:
@@ -1056,34 +1718,72 @@ def run_translation_job(job_id):
                 (round(pct, 1), detail, job_id),
             )
 
+    mode_label = f'OCR+translate ({source_codec})' if is_image else 'translate'
+    log('info', f"[translate] job {job_id} started — {Path(filepath).name}"
+                f" (track {sub_idx}, lang={source_lang or 'unknown'}, {mode_label})")
+
     try:
-        # 1 ── Extract
+        # 1 ── Extract / OCR
         with db() as conn:
             conn.execute(
                 "UPDATE translation_jobs SET status='extracting', started_at=datetime('now') WHERE id=?",
                 (job_id,),
             )
-        set_progress(5, 'Extracting subtitle track…')
 
-        if not extract_subtitle_to_srt(filepath, sub_idx, tmp_srt) or not os.path.exists(tmp_srt):
-            _fail_translation_job(job_id, 'ffmpeg could not extract subtitle track as SRT')
-            return
+        if is_image:
+            # 1a ── OCR path: extract .sup → parse bitmaps → Tesseract → SRT
+            with db() as conn:
+                conn.execute(
+                    "UPDATE translation_jobs SET status='ocr' WHERE id=?", (job_id,)
+                )
+            set_progress(5, 'Extracting subtitle images…')
+            log('info', f"[translate] job {job_id} running OCR on PGS track {sub_idx}…")
+
+            ocr_content = pgs_ocr(
+                filepath, sub_idx, source_lang, job_id=job_id,
+                progress_cb=lambda pct, detail: set_progress(5 + pct * 0.15, detail),
+            )
+            with open(tmp_srt, 'w', encoding='utf-8') as fh:
+                fh.write(ocr_content)
+            log('info', f"[translate] job {job_id} OCR complete — "
+                        f"{len(ocr_content)} chars written to temp SRT")
+        else:
+            # 1b ── Text path: ffmpeg extract SRT directly
+            set_progress(5, 'Extracting subtitle track…')
+            log('info', f"[translate] job {job_id} extracting subtitle track {sub_idx}…")
+
+            if not extract_subtitle_to_srt(filepath, sub_idx, tmp_srt) or not os.path.exists(tmp_srt):
+                _fail_translation_job(job_id, 'ffmpeg could not extract subtitle track as SRT')
+                return
+            extracted_size  = os.path.getsize(tmp_srt)
+            with open(tmp_srt, encoding='utf-8', errors='replace') as _f:
+                extracted_lines = sum(1 for _ in _f)
+            log('info', f"[translate] job {job_id} subtitle extracted — "
+                        f"{extracted_lines} lines, {extracted_size / 1024:.1f} KB")
 
         # 2 ── Translate
+        # Progress range: text=10–85 %, image=20–85 % (OCR already used 5–20 %)
+        translate_start = 20 if is_image else 10
         with db() as conn:
             conn.execute(
                 "UPDATE translation_jobs SET status='translating' WHERE id=?", (job_id,)
             )
+        log('info', f"[translate] job {job_id} translating subtitles ({source_lang or '?'} → spa)…")
 
         translated = translate_subtitle_file(
             tmp_srt, source_lang,
-            progress_cb=lambda pct, detail: set_progress(10 + pct * 0.75, detail),
+            progress_cb=lambda pct, detail: set_progress(
+                translate_start + pct * ((87 - translate_start) / 100), detail
+            ),
+            job_id=job_id,
         )
 
         # 3 ── Save .srt alongside video
         set_progress(87, 'Saving .srt file…')
+        log('info', f"[translate] job {job_id} saving .srt → {Path(srt_path).name}…")
         with open(srt_path, 'w', encoding='utf-8') as f:
             f.write(translated)
+        log('info', f"[translate] job {job_id} .srt saved ({os.path.getsize(srt_path)/1024:.1f} KB)")
 
         # 4 ── Mux into video
         with db() as conn:
@@ -1092,11 +1792,14 @@ def run_translation_job(job_id):
                 (srt_path, job_id),
             )
         set_progress(90, 'Muxing subtitle into video file…')
+        log('info', f"[translate] job {job_id} muxing subtitle into video file…")
 
         ok, msg = mux_subtitle_into_video(filepath, srt_path)
         if not ok:
+            log('error', f"[translate] job {job_id} mux failed: {msg}")
             _fail_translation_job(job_id, f'Mux failed: {msg}')
             return
+        log('info', f"[translate] job {job_id} mux successful")
 
         # 5 ── Refresh media record
         set_progress(97, 'Updating media record…')
@@ -1124,7 +1827,7 @@ def run_translation_job(job_id):
                 (srt_path, job_id),
             )
 
-        print(f"[translate] job {job_id} done → {srt_path}")
+        log('info', f"[translate] job {job_id} done → {srt_path}")
         src_label = source_lang.upper() if source_lang else 'unknown'
         send_ntfy_notification(
             f"Subtitle Ready: {mf['folder_name']}",
@@ -1145,6 +1848,7 @@ def run_translation_job(job_id):
 
 def translation_worker_loop():
     """Translation runs independently of encoding (API/IO-bound, not GPU-bound)."""
+    log('info', '[translate] worker thread started')
     while True:
         try:
             job_id = translation_queue.get(timeout=2)
@@ -1153,7 +1857,7 @@ def translation_worker_loop():
         try:
             run_translation_job(job_id)
         except Exception as e:
-            print(f"[translate] unhandled error in job {job_id}: {e}")
+            log('error', f"[translate] unhandled error in job {job_id}: {e}")
         translation_queue.task_done()
 
 
@@ -1299,13 +2003,15 @@ def analyze_file(filepath):
         if info:
             folder   = str(Path(filepath).parent)
             siblings = [f for f in os.listdir(folder) if f.lower().endswith(VIDEO_EXTENSIONS)]
-            info['has_sibling_videos'] = 1 if len(siblings) > 1 else 0
+            is_show = info.get('media_type') == 'show'
+            info['has_sibling_videos'] = 1 if (len(siblings) > 1 and not is_show) else 0
 
-            is_ep = any(x in info['filename'].lower() for x in ['s0', 'e0', 'season', 'episode'])
-            info['poster_url'] = tvdb_search_poster(info['folder_name'], is_ep)
+            is_show = info.get('media_type') == 'show'
+            cache_key = info['show_name'] if is_show and info.get('show_name') else info['folder_name']
+            info['poster_url'] = tvdb_search_poster(cache_key, is_show)
             upsert_media_file(info)
 
-            if info['has_sibling_videos']:
+            if info['has_sibling_videos'] and info.get('media_type') != 'show':
                 sibling_list = '\n'.join(f'• {f}' for f in siblings)
                 send_ntfy_notification(
                     f"Multiple Videos: {info['folder_name']}",
@@ -1436,32 +2142,56 @@ def get_stats():
 @app.route('/api/media')
 def get_media():
     f = request.args.get('filter', 'all')
+    t = request.args.get('type', 'movie')
+    # Validate type to prevent injection (only allow known values)
+    if t not in ('movie', 'show'):
+        t = 'movie'
+    tc = f" AND (media_type = '{t}' OR media_type IS NULL)" if t == 'movie' else f" AND media_type = '{t}'"
 
     queries = {
         'needs_encoding': (
-            "SELECT * FROM media_files "
-            "WHERE status LIKE '%RE-ENCODE%' "
-            "AND (encode_status IS NULL OR encode_status='failed') "
-            "ORDER BY size_bytes DESC"
+            f"SELECT * FROM media_files "
+            f"WHERE status LIKE '%RE-ENCODE%' "
+            f"AND (encode_status IS NULL OR encode_status='failed'){tc} "
+            f"ORDER BY size_bytes DESC"
+        ),
+        'needs_remux': (
+            f"SELECT * FROM media_files "
+            f"WHERE status LIKE '%REMUX%' "
+            f"AND (encode_status IS NULL OR encode_status='failed'){tc} "
+            f"ORDER BY size_bytes DESC"
         ),
         'queued': (
-            "SELECT * FROM media_files WHERE encode_status IN ('queued','encoding') "
-            "ORDER BY scanned_at DESC"
+            f"SELECT * FROM media_files WHERE encode_status IN ('queued','encoding'){tc} "
+            f"ORDER BY scanned_at DESC"
         ),
         'done': (
-            "SELECT * FROM media_files WHERE encode_status='done' ORDER BY scanned_at DESC"
+            f"SELECT * FROM media_files WHERE encode_status='done'{tc} ORDER BY scanned_at DESC"
         ),
         'alerts': (
-            "SELECT * FROM media_files WHERE has_sibling_videos=1 ORDER BY folder_name"
+            f"SELECT * FROM media_files WHERE has_sibling_videos=1{tc} ORDER BY folder_name"
+        ),
+        'missing_lang': (
+            f"SELECT * FROM media_files WHERE status LIKE '%MISSING LANG%'{tc} "
+            f"ORDER BY folder_name, filename"
         ),
         'all': (
-            "SELECT * FROM media_files ORDER BY folder_name, filename"
+            f"SELECT * FROM media_files WHERE 1=1{tc} ORDER BY folder_name, filename"
         ),
     }
 
     sql = queries.get(f, queries['all'])
+    search = request.args.get('search', '').strip()
+    params: list = []
+    if search:
+        sql = (
+            f"SELECT * FROM ({sql}) WHERE "
+            f"folder_name LIKE ? OR filename LIKE ? OR show_name LIKE ?"
+        )
+        params = [f'%{search}%', f'%{search}%', f'%{search}%']
+
     with db() as conn:
-        rows = conn.execute(sql).fetchall()
+        rows = conn.execute(sql, params).fetchall()
 
     result = []
     for r in rows:
@@ -1474,11 +2204,40 @@ def get_media():
             if 'RE-ENCODE' in (r['status'] or '')
             else None
         )
+        d['encode_progress']    = None
+        d['encode_job_type']    = None
+        d['translate_status']   = None
+        d['translate_progress'] = None
         result.append(d)
 
-    # Total library stats
+    # Merge active encode / translation progress into result rows
+    id_index = {d['id']: d for d in result}
     with db() as conn:
-        totals = conn.execute('''
+        # Include both 'queued' and 'encoding' so job_type is known from the moment
+        # the job is created (not just when the worker picks it up).
+        # ORDER BY id DESC ensures the most recent job wins if duplicates exist.
+        for enc_row in conn.execute(
+            "SELECT media_file_id, progress, job_type FROM encode_jobs "
+            "WHERE status IN ('queued','encoding') ORDER BY id DESC"
+        ).fetchall():
+            mid = enc_row['media_file_id']
+            if mid in id_index:
+                # Only set once (most-recent job wins due to ORDER BY id DESC)
+                if id_index[mid]['encode_job_type'] is None:
+                    id_index[mid]['encode_job_type'] = enc_row['job_type'] or 'encode'
+                if enc_row['progress']:
+                    id_index[mid]['encode_progress'] = enc_row['progress']
+        for tr_row in conn.execute(
+            "SELECT media_file_id, status, progress FROM translation_jobs "
+            "WHERE status IN ('pending','extracting','translating','muxing')"
+        ).fetchall():
+            if tr_row['media_file_id'] in id_index:
+                id_index[tr_row['media_file_id']]['translate_status']   = tr_row['status']
+                id_index[tr_row['media_file_id']]['translate_progress'] = tr_row['progress']
+
+    # Library stats filtered by type
+    with db() as conn:
+        totals = conn.execute(f'''
             SELECT
                 COUNT(*)                                         AS total_files,
                 COALESCE(SUM(size_bytes), 0)                     AS total_bytes,
@@ -1487,6 +2246,7 @@ def get_media():
                            THEN 1 END)                           AS needs_encoding,
                 COUNT(CASE WHEN encode_status IN ('queued','encoding') THEN 1 END) AS encoding_active
             FROM media_files
+            WHERE 1=1{tc}
         ''').fetchone()
 
     return jsonify({
@@ -1494,6 +2254,30 @@ def get_media():
         'total':  len(result),
         'stats':  dict(totals),
     })
+
+
+@app.route('/api/media/recalculate-status', methods=['POST'])
+def recalculate_status():
+    """
+    Re-run determine_status() for every row using already-stored track data.
+    Much faster than a full scan — no ffprobe, no filesystem access.
+    """
+    updated = 0
+    with db() as conn:
+        rows = conn.execute(
+            'SELECT id, size_bytes, audio_tracks, subtitle_tracks FROM media_files'
+        ).fetchall()
+        for row in rows:
+            audio_streams = json.loads(row['audio_tracks']    or '[]')
+            sub_streams   = json.loads(row['subtitle_tracks'] or '[]')
+            new_status    = determine_status(row['size_bytes'] or 0, audio_streams, sub_streams)
+            conn.execute(
+                'UPDATE media_files SET status=? WHERE id=?',
+                (new_status, row['id']),
+            )
+            updated += 1
+    log('info', f'[recalculate] updated status for {updated} files')
+    return jsonify({'updated': updated})
 
 
 @app.route('/api/media/scan', methods=['POST'])
@@ -1504,6 +2288,45 @@ def trigger_scan():
 @app.route('/api/media/scan/status')
 def scan_status_route():
     return jsonify(scan_status)
+
+
+@app.route('/api/media/scan/folder', methods=['POST'])
+def trigger_folder_scan():
+    data     = request.get_json(force=True) or {}
+    file_ids = [int(i) for i in data.get('file_ids', [])]
+    if not file_ids:
+        return jsonify({'error': 'file_ids required'}), 400
+
+    with db() as conn:
+        rows = conn.execute(
+            f"SELECT filepath FROM media_files WHERE id IN ({','.join('?'*len(file_ids))})",
+            file_ids,
+        ).fetchall()
+
+    if not rows:
+        return jsonify({'error': 'No files found for given IDs'}), 404
+
+    # Derive the deepest common ancestor folder from all the file paths
+    parent_dirs  = [str(Path(r['filepath']).parent) for r in rows]
+    common       = os.path.commonpath(parent_dirs)
+    common_resolved = str(Path(common).resolve())
+
+    # Security: must sit inside the configured watch directory
+    watch_resolved = str(Path(WATCH_DIR).resolve())
+    if not common_resolved.startswith(watch_resolved):
+        return jsonify({'error': 'Path outside watch directory'}), 403
+
+    return jsonify(scan_library_folder(common_resolved))
+
+
+@app.route('/api/health')
+def health():
+    try:
+        with db() as conn:
+            conn.execute('SELECT 1')
+        return jsonify({'status': 'ok'})
+    except Exception as e:
+        return jsonify({'status': 'error', 'detail': str(e)}), 503
 
 
 @app.route('/api/media/<int:file_id>/refresh', methods=['POST'])
@@ -1528,6 +2351,29 @@ def get_alerts():
 
 
 # ── Flask routes — track assignment ──────────────────────────────────────────
+def queue_remux_job(file_id, filepath):
+    """Create an encode_job of type 'remux' and push it onto the encode queue."""
+    try:
+        size = os.path.getsize(filepath)
+    except OSError:
+        size = 0
+    with db() as conn:
+        cursor = conn.execute(
+            "INSERT INTO encode_jobs "
+            "(media_file_id, filepath, status, original_size, job_type) "
+            "VALUES (?,?,'queued',?,'remux')",
+            (file_id, filepath, size),
+        )
+        job_id = cursor.lastrowid
+        conn.execute(
+            "UPDATE media_files SET encode_status='queued' WHERE id=?",
+            (file_id,),
+        )
+    encode_queue.put(job_id)
+    log('info', f"[remux] job {job_id} queued — {Path(filepath).name}")
+    return job_id
+
+
 @app.route('/api/media/<int:file_id>/assign-tracks', methods=['POST'])
 def assign_tracks(file_id):
     """
@@ -1576,9 +2422,28 @@ def assign_tracks(file_id):
             (json.dumps(audio_tracks), json.dumps(subtitle_tracks), new_status, file_id),
         )
 
+    # Queue a remux job so the changes are actually written to the file
+    remux_job_id = None
+    remux_error  = None
+    try:
+        remux_job_id = queue_remux_job(file_id, row['filepath'])
+    except Exception as e:
+        remux_error = str(e)
+        log('error', f"[remux] failed to queue remux job for file {file_id}: {e}")
+
+    if remux_error:
+        return jsonify({
+            'status':        'saved_no_remux',
+            'new_status':    new_status,
+            'error':         f'Track assignments saved but remux could not be queued: {remux_error}',
+            'audio_tracks':    audio_tracks,
+            'subtitle_tracks': subtitle_tracks,
+        }), 207  # 207 Multi-Status: partial success (assignments saved, remux failed)
+
     return jsonify({
-        'status':     'ok',
-        'new_status': new_status,
+        'status':        'ok',
+        'new_status':    new_status,
+        'remux_job_id':  remux_job_id,
         'audio_tracks':    audio_tracks,
         'subtitle_tracks': subtitle_tracks,
     })
@@ -1603,7 +2468,7 @@ def cancel_encode(job_id):
 
     with encode_lock:
         if active_job_id == job_id and active_proc:
-            active_proc.terminate()
+            active_proc.kill()   # SIGKILL — guarantees process dies even if hung
 
     with db() as conn:
         job = conn.execute(
@@ -1621,12 +2486,13 @@ def cancel_encode(job_id):
                 "UPDATE media_files SET encode_status=NULL WHERE filepath=?",
                 (job['filepath'],),
             )
-            tmp = job['filepath'] + '.encoding.tmp'
-            if os.path.exists(tmp):
-                try:
-                    os.remove(tmp)
-                except OSError:
-                    pass
+            for suffix in ('.encoding.tmp', '.remux.tmp'):
+                tmp = job['filepath'] + suffix
+                if os.path.exists(tmp):
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
 
     return jsonify({'status': 'cancelled'})
 
@@ -1637,7 +2503,8 @@ def get_encode_jobs():
         rows = conn.execute('''
             SELECT ej.*,
                    mf.folder_name, mf.filename,
-                   mf.video_codec, mf.video_height
+                   mf.video_codec, mf.video_height,
+                   mf.show_name, mf.season_episode, mf.media_type
             FROM encode_jobs ej
             LEFT JOIN media_files mf ON ej.media_file_id = mf.id
             ORDER BY ej.created_at DESC
@@ -1684,16 +2551,16 @@ def api_translate_subtitle(file_id):
         if not track:
             return jsonify({'error': f'Subtitle track {sub_idx} not found'}), 404
 
-        if is_image_based_subtitle(track.get('codec', '')):
+        codec = track.get('codec', '')
+        if is_image_based_subtitle(codec) and codec not in OCR_CAPABLE_CODECS:
             return jsonify({
-                'error': f"Track #{sub_idx} is image-based ({track.get('codec')}) "
-                         f"and cannot be translated. Only text-based tracks (SRT, ASS, SSA) "
-                         f"are supported."
+                'error': f"Track #{sub_idx} ({codec}) cannot be OCR'd. "
+                         f"Only PGS (hdmv_pgs_subtitle) image tracks are supported."
             }), 400
 
         active = conn.execute(
             "SELECT id FROM translation_jobs WHERE filepath=? "
-            "AND status IN ('pending','extracting','translating','muxing')",
+            "AND status IN ('pending','extracting','ocr','translating','muxing')",
             (mf['filepath'],),
         ).fetchone()
         if active:
@@ -1701,13 +2568,51 @@ def api_translate_subtitle(file_id):
 
         cursor = conn.execute(
             'INSERT INTO translation_jobs '
-            '(media_file_id, filepath, source_sub_idx, source_lang) VALUES (?,?,?,?)',
-            (file_id, mf['filepath'], sub_idx, track.get('lang', '')),
+            '(media_file_id, filepath, source_sub_idx, source_lang, source_codec) '
+            'VALUES (?,?,?,?,?)',
+            (file_id, mf['filepath'], sub_idx, track.get('lang', ''), codec),
         )
         job_id = cursor.lastrowid
 
     translation_queue.put(job_id)
     return jsonify({'status': 'queued', 'job_id': job_id})
+
+
+@app.route('/api/translate/cancel/<int:job_id>', methods=['POST'])
+def cancel_translation(job_id):
+    with db() as conn:
+        job = conn.execute(
+            'SELECT * FROM translation_jobs WHERE id=?', (job_id,)
+        ).fetchone()
+        if not job:
+            return jsonify({'error': 'Job not found'}), 404
+        if job['status'] not in ('done', 'failed', 'cancelled'):
+            conn.execute(
+                "UPDATE translation_jobs SET status='cancelled', "
+                "completed_at=datetime('now') WHERE id=?",
+                (job_id,),
+            )
+    return jsonify({'status': 'cancelled'})
+
+
+@app.route('/api/encode/jobs/clear', methods=['POST'])
+def clear_encode_jobs():
+    """Delete encode jobs that are in a terminal state (done/failed/cancelled)."""
+    with db() as conn:
+        result = conn.execute(
+            "DELETE FROM encode_jobs WHERE status IN ('done', 'failed', 'cancelled')"
+        )
+    return jsonify({'deleted': result.rowcount})
+
+
+@app.route('/api/translate/jobs/clear', methods=['POST'])
+def clear_translation_jobs():
+    """Delete translation jobs that are in a terminal state (done/failed/cancelled)."""
+    with db() as conn:
+        result = conn.execute(
+            "DELETE FROM translation_jobs WHERE status IN ('done', 'failed', 'cancelled')"
+        )
+    return jsonify({'deleted': result.rowcount})
 
 
 @app.route('/api/translate/jobs')
@@ -1723,12 +2628,44 @@ def get_translation_jobs():
     return jsonify({'jobs': [dict(r) for r in rows]})
 
 
+@app.route('/api/logs')
+def get_logs():
+    """Return recent log entries from the in-memory ring buffer.
+    Optional ?since=N returns only entries with seq > N (for polling).
+    """
+    since = request.args.get('since', 0, type=int)
+    with _log_lock:
+        entries = [e for e in _log_buffer if e['seq'] > since]
+    return jsonify({'logs': entries, 'total': _log_seq})
+
+
 # ── Startup ───────────────────────────────────────────────────────────────────
+def _recover_queued_jobs():
+    """Re-enqueue any encode jobs that were left in 'queued' or 'encoding'
+    state from a previous run (e.g. container restart mid-encode).
+    'encoding' jobs are reset to 'queued' first since the process is gone.
+    """
+    with db() as conn:
+        conn.execute(
+            "UPDATE encode_jobs SET status='queued', progress=0 "
+            "WHERE status='encoding'"
+        )
+        rows = conn.execute(
+            "SELECT id FROM encode_jobs WHERE status='queued' ORDER BY created_at"
+        ).fetchall()
+    for row in rows:
+        encode_queue.put(row['id'])
+    if rows:
+        log('warn', f"[startup] re-queued {len(rows)} interrupted encode job(s)")
+
+
 if __name__ == '__main__':
     init_db()
     _migrate_db()
     load_config()
     os.makedirs(WATCH_DIR, exist_ok=True)
+
+    _recover_queued_jobs()
 
     threading.Thread(target=start_monitoring,       daemon=True).start()
     threading.Thread(target=encode_worker_loop,     daemon=True).start()
