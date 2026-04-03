@@ -2802,7 +2802,8 @@ def clear_translation_jobs():
 def get_translation_jobs():
     with db() as conn:
         rows = conn.execute('''
-            SELECT tj.*, mf.folder_name, mf.filename
+            SELECT tj.*, mf.folder_name, mf.filename,
+                   mf.media_type, mf.show_name, mf.season_episode
             FROM translation_jobs tj
             LEFT JOIN media_files mf ON tj.media_file_id = mf.id
             ORDER BY tj.created_at DESC
