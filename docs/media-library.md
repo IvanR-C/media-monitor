@@ -92,6 +92,7 @@ Click any column header to sort. Click again to reverse. Sortable columns:
 | **Assign Languages** | Open a dialog to manually set language tags on audio/subtitle tracks (used before remuxing) |
 | **OCR + Translate #N** | Queue an OCR + translation job for a PGS image subtitle track |
 | **Translate #N** | Queue a translation job for a text subtitle track |
+| **Mux Subtitle File** | Mux an external subtitle file from the same directory into the MKV (only shown when the movie has no subtitle tracks) |
 | **Re-scan Folder** | Re-run ffprobe on this file's folder to pick up changes (e.g. after external encoding) |
 
 ---
@@ -111,9 +112,28 @@ The toolbar shows how many files are selected and how many of those have transla
 
 ## Re-scanning
 
-**Full library scan:** Click the **Scan** button in the top toolbar. This walks the entire watch directory, runs ffprobe on every video file, and updates the database. Useful after major library reorganisation.
+**Full library scan:** Click the **Scan** button in the top toolbar. This walks the entire watch directory, runs ffprobe on every video file, and updates the database. Useful after major library reorganisation. If the library is empty, a large **Scan Library** button is shown in the centre of the table as a shortcut.
 
 **Folder re-scan:** Click the 🔄 icon next to any movie title, show header, or season header. Only files in that specific directory are re-analysed. Use this after encoding a file externally (e.g. HandBrake) so the UI reflects the new codec and file size.
+
+---
+
+## Muxing an External Subtitle File
+
+If a movie has no subtitle tracks, a **Mux Subtitle File** option appears in its ··· menu. This lets you inject an existing subtitle file (`.srt`, `.ass`, `.ssa`, `.vtt`, `.sub`) from the same directory into the MKV without re-encoding.
+
+**How it works:**
+
+1. Click **··· → Mux Subtitle File** on a movie with no subtitle tracks
+2. The dialog scans the movie's directory and lists any subtitle files it finds
+3. Select the file and choose the subtitle language
+4. Click **Queue Mux** — the dialog closes and a mux job is queued
+5. The job runs through the encode worker queue (visible in the Encode Queue panel)
+6. When complete the movie record is refreshed — the new subtitle track appears immediately
+
+The original movie file is replaced in-place; no re-encoding of video or audio takes place. The operation is fast (typically a few seconds regardless of file size).
+
+> **Subtitle files must be in the same directory as the movie.** Files in subdirectories or elsewhere on the system are not listed for security reasons.
 
 ---
 
