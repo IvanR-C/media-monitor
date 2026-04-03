@@ -29,6 +29,9 @@ interface TranslationJob {
   id: number
   folder_name: string
   filename: string
+  media_type?: "movie" | "show"
+  show_name?: string
+  season_episode?: string
   status: "pending" | "extracting" | "translating" | "muxing" | "done" | "failed" | "cancelled"
   progress?: number
   progress_detail?: string
@@ -327,11 +330,16 @@ function TranslateJobRow({
 
       <div className="min-w-0 flex-1 overflow-hidden">
         <div className="flex items-center gap-2">
-          <span className="truncate font-medium text-foreground/90">{job.folder_name}</span>
+          <span className="truncate font-medium text-foreground/90">
+            {job.media_type === "show" && job.show_name ? job.show_name : job.folder_name}
+          </span>
           {job.source_lang && (
             <span className="shrink-0 text-[10px] text-muted-foreground uppercase">{job.source_lang} → SPA</span>
           )}
         </div>
+        {job.media_type === "show" && job.season_episode && (
+          <div className="text-[10px] text-muted-foreground">{job.season_episode}</div>
+        )}
         {/* Detailed status line */}
         {isActive && (
           <div className="mt-0.5 flex items-center gap-2">
