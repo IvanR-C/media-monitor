@@ -1408,7 +1408,7 @@ function MuxSubtitleDialog({
     fetch(`/api/media/${file.id}/external-subs`)
       .then((r) => r.json())
       .then((data) => {
-        const subs: string[] = data.subtitle_files ?? [];
+        const subs: string[] = (data.subs ?? []).map((s: { path: string }) => s.path);
         setExternalSubs(subs);
         if (subs.length > 0) setSelectedSub(subs[0]);
       })
