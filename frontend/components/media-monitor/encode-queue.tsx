@@ -32,7 +32,7 @@ interface TranslationJob {
   media_type?: "movie" | "show"
   show_name?: string
   season_episode?: string
-  status: "pending" | "extracting" | "translating" | "muxing" | "done" | "failed" | "cancelled"
+  status: "pending" | "extracting" | "ocr" | "translating" | "muxing" | "done" | "failed" | "cancelled"
   progress?: number
   progress_detail?: string
   source_lang?: string
@@ -40,11 +40,12 @@ interface TranslationJob {
 }
 
 const ACTIVE_ENCODE_STATUSES    = new Set(["queued", "encoding"])
-const ACTIVE_TRANSLATE_STATUSES = new Set(["pending", "extracting", "translating", "muxing"])
+const ACTIVE_TRANSLATE_STATUSES = new Set(["pending", "extracting", "ocr", "translating", "muxing"])
 
 const TRANSLATE_STATUS_LABEL: Record<string, string> = {
   pending:    "Queued",
   extracting: "Extracting",
+  ocr:        "OCR",
   translating:"Translating",
   muxing:     "Muxing",
   done:       "Done",
@@ -322,7 +323,7 @@ function TranslateJobRow({
     job.status === "done"      ? "done"     :
     job.status === "failed"    ? "failed"   :
     job.status === "cancelled" ? "cancelled":
-    "encoding"
+    "encoding" // extracting | ocr | translating | muxing → pulsing dot
 
   return (
     <div className="flex items-center gap-3 px-3 py-1.5 text-xs hover:bg-secondary/20">
