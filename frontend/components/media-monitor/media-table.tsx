@@ -26,6 +26,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
+import { toast } from "sonner";
 import {
   MoreHorizontal,
   Play,
@@ -38,6 +39,9 @@ import {
   ArrowDown,
   ArrowUpDown,
   FolderSync,
+  ScanLine,
+  FileVideo,
+  Subtitles,
 } from "lucide-react";
 import type {
   MediaFile,
@@ -97,6 +101,7 @@ interface MediaTableProps {
   onTranslateSelected: () => void;
   onAssignTracks: (id: number, audio: any[], subs: any[]) => Promise<void>;
   onFolderScan: (fileIds: number[]) => void;
+  onScanLibrary: () => void;
   mediaType: MediaType;
   loading?: boolean;
 }
@@ -114,6 +119,7 @@ export function MediaTable({
   onTranslateSelected,
   onAssignTracks,
   onFolderScan,
+  onScanLibrary,
   mediaType,
   loading,
 }: MediaTableProps) {
@@ -124,6 +130,7 @@ export function MediaTable({
   const [assignDialogFile, setAssignDialogFile] = useState<MediaFile | null>(
     null,
   );
+  const [muxDialogFile, setMuxDialogFile] = useState<MediaFile | null>(null);
   const [sortCol, setSortCol] = useState<SortCol>("title");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
 
@@ -236,13 +243,24 @@ export function MediaTable({
 
   if (files.length === 0) {
     return (
-      <div className="flex h-full flex-col items-center justify-center rounded-lg border border-dashed border-border/50 bg-card/30">
-        <div className="text-sm font-medium text-foreground">
-          No files found
+      <div className="flex h-full flex-col items-center justify-center gap-4 rounded-lg border border-dashed border-border/50 bg-card/30">
+        <div className="flex flex-col items-center gap-2">
+          <FileVideo className="h-10 w-10 text-muted-foreground/30" />
+          <div className="text-sm font-medium text-foreground">
+            Your library is empty
+          </div>
+          <div className="text-xs text-muted-foreground">
+            Scan your watch directory to index media files
+          </div>
         </div>
-        <div className="mt-1 text-xs text-muted-foreground">
-          Try adjusting filters or click Scan to index your library
-        </div>
+        <Button
+          onClick={onScanLibrary}
+          className="gap-2"
+          size="sm"
+        >
+          <ScanLine className="h-4 w-4" />
+          Scan Library
+        </Button>
       </div>
     );
   }
@@ -258,6 +276,7 @@ export function MediaTable({
           onEnqueue={() => onEnqueue(file.id)}
           onTranslate={onTranslate}
           onOpenAssignDialog={setAssignDialogFile}
+          onOpenMuxDialog={setMuxDialogFile}
           onFolderScan={() => onFolderScan([file.id])}
         />
       ));
@@ -554,6 +573,7 @@ export function MediaTable({
                 onEnqueue={() => onEnqueue(file.id)}
                 onTranslate={onTranslate}
                 onOpenAssignDialog={setAssignDialogFile}
+                onOpenMuxDialog={setMuxDialogFile}
                 onFolderScan={() => onFolderScan([file.id])}
               />
             ))
@@ -704,6 +724,15 @@ export function MediaTable({
           setAssignDialogFile(null);
         }}
       />
+      <MuxSubtitleDialog
+        file={muxDialogFile}
+        open={muxDialogFile !== null}
+        onClose={() => setMuxDialogFile(null)}
+        onMuxed={() => {
+          setMuxDialogFile(null);
+          toast.success("Subtitle mux queued");
+        }}
+      />
     </div>
   );
 }
@@ -717,6 +746,7 @@ function MobileFileCard({
   onEnqueue,
   onTranslate,
   onOpenAssignDialog,
+  onOpenMuxDialog,
   indent,
   isEpisode,
   onFolderScan,
@@ -727,6 +757,7 @@ function MobileFileCard({
   onEnqueue: () => void;
   onTranslate: (id: number, subIdx: number) => void;
   onOpenAssignDialog: (file: MediaFile) => void;
+  onOpenMuxDialog?: (file: MediaFile) => void;
   indent?: boolean;
   isEpisode?: boolean;
   onFolderScan?: () => void;
@@ -822,6 +853,15 @@ function MobileFileCard({
                 ))}
               </>
             )}
+            {file.subtitle_tracks.length === 0 && onOpenMuxDialog && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={() => onOpenMuxDialog(file)}>
+                  <Subtitles className="mr-2 h-3.5 w-3.5" />
+                  Mux Subtitle File
+                </DropdownMenuItem>
+              </>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
@@ -883,6 +923,7 @@ interface MediaTableRowProps {
   onEnqueue: () => void;
   onTranslate: (id: number, subIdx: number) => void;
   onOpenAssignDialog: (file: MediaFile) => void;
+  onOpenMuxDialog?: (file: MediaFile) => void;
   isEpisode?: boolean;
   onFolderScan?: () => void;
 }
@@ -894,6 +935,7 @@ function MediaTableRow({
   onEnqueue,
   onTranslate,
   onOpenAssignDialog,
+  onOpenMuxDialog,
   isEpisode,
   onFolderScan,
 }: MediaTableRowProps) {
@@ -1002,6 +1044,15 @@ function MediaTableRow({
                     {t.lang ? ` (${t.lang.toUpperCase()})` : ""}
                   </DropdownMenuItem>
                 ))}
+              </>
+            )}
+            {file.subtitle_tracks.length === 0 && onOpenMuxDialog && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={() => onOpenMuxDialog(file)}>
+                  <Subtitles className="mr-2 h-3.5 w-3.5" />
+                  Mux Subtitle File
+                </DropdownMenuItem>
               </>
             )}
           </DropdownMenuContent>
@@ -1320,6 +1371,169 @@ function TrackAssignDialog({
           </Button>
           <Button onClick={handleSave} disabled={saving}>
             {saving ? "Saving…" : "Save Assignments"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ── Mux External Subtitle Dialog ───────────────────────────────────────────────
+
+function MuxSubtitleDialog({
+  file,
+  open,
+  onClose,
+  onMuxed,
+}: {
+  file: MediaFile | null;
+  open: boolean;
+  onClose: () => void;
+  onMuxed: () => void;
+}) {
+  const [externalSubs, setExternalSubs] = useState<string[]>([]);
+  const [selectedSub, setSelectedSub] = useState<string>("");
+  const [selectedLang, setSelectedLang] = useState<string>("eng");
+  const [loadingList, setLoadingList] = useState(false);
+  const [muxing, setMuxing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!file || !open) return;
+    setExternalSubs([]);
+    setSelectedSub("");
+    setSelectedLang("eng");
+    setError(null);
+    setLoadingList(true);
+    fetch(`/api/media/${file.id}/external-subs`)
+      .then((r) => r.json())
+      .then((data) => {
+        const subs: string[] = (data.subs ?? []).map((s: { path: string }) => s.path);
+        setExternalSubs(subs);
+        if (subs.length > 0) setSelectedSub(subs[0]);
+      })
+      .catch(() => setError("Failed to load subtitle files"))
+      .finally(() => setLoadingList(false));
+  }, [file, open]);
+
+  if (!file) return null;
+
+  const handleMux = async () => {
+    if (!selectedSub) return;
+    setMuxing(true);
+    setError(null);
+    try {
+      const r = await fetch(`/api/media/${file.id}/mux-external-sub`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sub_path: selectedSub, lang: selectedLang }),
+      });
+      let data: any = {};
+      try { data = await r.json(); } catch { /* non-JSON body */ }
+      if (!r.ok) throw new Error(data.error || "Failed to queue mux job");
+      onMuxed();
+    } catch (e: any) {
+      setError(e.message ?? "Failed to queue mux job");
+      setMuxing(false);
+    }
+  };
+
+  const basename = (p: string) => p.split(/[\\/]/).pop() ?? p;
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Mux Subtitle File</DialogTitle>
+          <DialogDescription className="truncate text-xs">
+            {file.folder_name}
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="mt-1 space-y-4">
+          {loadingList ? (
+            <div className="flex items-center justify-center py-6 gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Scanning for subtitle files…
+            </div>
+          ) : externalSubs.length === 0 ? (
+            <p className="py-4 text-center text-sm text-muted-foreground">
+              No subtitle files found in the same directory.
+            </p>
+          ) : (
+            <>
+              <div>
+                <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Subtitle File
+                </p>
+                <div className="space-y-1">
+                  {externalSubs.map((sub) => (
+                    <label
+                      key={sub}
+                      className={cn(
+                        "flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm transition-colors",
+                        selectedSub === sub
+                          ? "bg-accent/10 text-foreground"
+                          : "text-muted-foreground hover:bg-secondary/50",
+                      )}
+                    >
+                      <input
+                        type="radio"
+                        name="sub-file"
+                        value={sub}
+                        checked={selectedSub === sub}
+                        onChange={() => setSelectedSub(sub)}
+                        className="accent-primary"
+                      />
+                      <span className="truncate font-mono text-[11px]" title={sub}>
+                        {basename(sub)}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Language
+                </p>
+                <Select value={selectedLang} onValueChange={setSelectedLang}>
+                  <SelectTrigger className="h-8 text-sm">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {LANG_OPTIONS.filter((o) => o.value !== "__none__").map((o) => (
+                      <SelectItem key={o.value} value={o.value}>
+                        {o.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </>
+          )}
+
+          {error && (
+            <p className="text-xs text-destructive">{error}</p>
+          )}
+        </div>
+
+        <DialogFooter className="mt-4">
+          <Button variant="ghost" onClick={onClose} disabled={muxing}>
+            Cancel
+          </Button>
+          <Button
+            onClick={handleMux}
+            disabled={muxing || !selectedSub || externalSubs.length === 0}
+          >
+            {muxing ? (
+              <>
+                <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+                Queuing…
+              </>
+            ) : (
+              "Queue Mux"
+            )}
           </Button>
         </DialogFooter>
       </DialogContent>

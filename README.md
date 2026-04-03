@@ -39,6 +39,7 @@ Built for Plex, Jellyfin, and any folder-based media server.
 - Per-file details: resolution, video codec, audio tracks with language tags, subtitle tracks, file size
 - Inline estimated post-encode size for files that haven't been encoded yet
 - **Re-scan folder** button per movie/show to refresh metadata on demand
+- Empty library shows a prominent **Scan Library** button to get started quickly
 
 ### ⚡ GPU-Accelerated Encoding
 - One-click queue to re-encode any file to HEVC (H.265) using NVIDIA NVENC
@@ -63,6 +64,15 @@ See [docs/encoding.md](docs/encoding.md) for full details.
 > The target translation language is currently hardcoded to **Cuban Spanish**. Support for configuring the target language from the UI is planned for a future release.
 
 See [docs/subtitle-translation.md](docs/subtitle-translation.md) for full details.
+
+### 📎 External Subtitle Muxing
+- Movies with no subtitle tracks get a **Mux Subtitle File** action in their ··· menu
+- Scans the movie's directory for `.srt`, `.ass`, `.ssa`, `.vtt`, or `.sub` files
+- Select the file and language from a dialog — job is queued immediately and runs through the same encode worker
+- In-place operation: video and audio are never re-encoded, only the container is rewritten
+- New subtitle track is reflected in the library as soon as the job completes
+
+See [docs/media-library.md](docs/media-library.md) for full details.
 
 ### 🔤 Language Filtering (Encoding)
 During encoding, only tracks in the approved language sets are kept in the output file:
