@@ -26,6 +26,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
+import { toast } from "sonner";
 import {
   MoreHorizontal,
   Play,
@@ -729,8 +730,7 @@ export function MediaTable({
         onClose={() => setMuxDialogFile(null)}
         onMuxed={() => {
           setMuxDialogFile(null);
-          // Reload to reflect new subtitle track
-          onFolderScan(muxDialogFile ? [muxDialogFile.id] : []);
+          toast.success("Subtitle mux queued");
         }}
       />
     </div>
@@ -1428,12 +1428,12 @@ function MuxSubtitleDialog({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sub_path: selectedSub, lang: selectedLang }),
       });
-      const data = await r.json();
-      if (!r.ok) throw new Error(data.error || "Mux failed");
+      let data: any = {};
+      try { data = await r.json(); } catch { /* non-JSON body */ }
+      if (!r.ok) throw new Error(data.error || "Failed to queue mux job");
       onMuxed();
     } catch (e: any) {
-      setError(e.message ?? "Mux failed");
-    } finally {
+      setError(e.message ?? "Failed to queue mux job");
       setMuxing(false);
     }
   };
@@ -1529,10 +1529,10 @@ function MuxSubtitleDialog({
             {muxing ? (
               <>
                 <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
-                Muxing…
+                Queuing…
               </>
             ) : (
-              "Mux into Movie"
+              "Queue Mux"
             )}
           </Button>
         </DialogFooter>

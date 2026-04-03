@@ -201,6 +201,8 @@ def _migrate_db():
         # encode_jobs additions
         for col, definition in [
             ('job_type', "TEXT DEFAULT 'encode'"),
+            ('sub_path', 'TEXT'),
+            ('sub_lang', 'TEXT'),
         ]:
             try:
                 conn.execute(f'ALTER TABLE encode_jobs ADD COLUMN {col} {definition}')
@@ -944,10 +946,51 @@ def run_encode_job(job_id):
         return
 
     job_type = (job['job_type'] or 'encode') if 'job_type' in job.keys() else 'encode'
-    tag      = '[remux]' if job_type == 'remux' else '[encode]'
+    tag      = '[remux]' if job_type == 'remux' else ('[mux-sub]' if job_type == 'mux_sub' else '[encode]')
     log('info', f"{tag} job {job_id} picked up — {Path(job['filepath']).name}")
 
     filepath = job['filepath']
+
+    # ── mux_sub: inject external subtitle file into the MKV ──────────────────
+    if job_type == 'mux_sub':
+        sub_path = job['sub_path'] if 'sub_path' in job.keys() else None
+        sub_lang = job['sub_lang'] if 'sub_lang' in job.keys() else 'und'
+        if not sub_path:
+            _fail_job(job_id, filepath, None, 'mux_sub job missing sub_path')
+            return
+        log('info', f"[mux-sub] job {job_id} — muxing {Path(sub_path).name} (lang={sub_lang}) into {Path(filepath).name}")
+        with db() as conn:
+            conn.execute(
+                "UPDATE encode_jobs SET status='encoding', started_at=datetime('now') WHERE id=?",
+                (job_id,),
+            )
+            conn.execute(
+                "UPDATE media_files SET encode_status='encoding', encode_job_type='mux_sub' WHERE filepath=?",
+                (filepath,),
+            )
+        ok, msg = mux_external_subtitle(filepath, sub_path, sub_lang)
+        if not ok:
+            log('error', f"[mux-sub] job {job_id} failed: {msg}")
+            _fail_job(job_id, filepath, None, msg)
+            return
+        log('info', f"[mux-sub] job {job_id} done — refreshing media record")
+        new_info = parse_media_info(filepath)
+        with db() as conn:
+            conn.execute(
+                "UPDATE encode_jobs SET status='done', progress=100.0, "
+                "completed_at=datetime('now') WHERE id=?",
+                (job_id,),
+            )
+            if new_info:
+                new_info['has_sibling_videos'] = mf['has_sibling_videos']
+                new_info['encode_status']      = 'done'
+                upsert_media_file(new_info)
+                conn.execute(
+                    "UPDATE media_files SET encode_status='done' WHERE filepath=?",
+                    (filepath,),
+                )
+        return
+
     tmp_path = filepath + ('.remux.tmp' if job_type == 'remux' else '.encoding.tmp')
 
     if os.path.exists(tmp_path):
@@ -2351,6 +2394,29 @@ def get_alerts():
 
 
 # ── Flask routes — track assignment ──────────────────────────────────────────
+def queue_mux_sub_job(file_id, filepath, sub_path, lang):
+    """Create an encode_job of type 'mux_sub' and push it onto the worker queue."""
+    try:
+        size = os.path.getsize(filepath)
+    except OSError:
+        size = 0
+    with db() as conn:
+        cursor = conn.execute(
+            "INSERT INTO encode_jobs "
+            "(media_file_id, filepath, status, original_size, job_type, sub_path, sub_lang) "
+            "VALUES (?,?,'queued',?,'mux_sub',?,?)",
+            (file_id, filepath, size, sub_path, lang),
+        )
+        job_id = cursor.lastrowid
+        conn.execute(
+            "UPDATE media_files SET encode_status='queued', encode_job_type='mux_sub' WHERE id=?",
+            (file_id,),
+        )
+    encode_queue.put(job_id)
+    log('info', f"[mux-sub] job {job_id} queued — {Path(filepath).name} ← {Path(sub_path).name} (lang={lang})")
+    return job_id
+
+
 def queue_remux_job(file_id, filepath):
     """Create an encode_job of type 'remux' and push it onto the encode queue."""
     try:
@@ -2593,6 +2659,123 @@ def cancel_translation(job_id):
                 (job_id,),
             )
     return jsonify({'status': 'cancelled'})
+
+
+@app.route('/api/media/<int:file_id>/external-subs')
+def list_external_subs(file_id):
+    """Return subtitle files found in the same directory as the media file."""
+    with db() as conn:
+        mf = conn.execute('SELECT filepath FROM media_files WHERE id=?', (file_id,)).fetchone()
+    if not mf:
+        return jsonify({'error': 'File not found'}), 404
+
+    directory = Path(mf['filepath']).parent
+    SUB_EXTS  = {'.srt', '.ass', '.ssa', '.vtt', '.sub'}
+
+    subs = []
+    try:
+        for f in sorted(directory.iterdir()):
+            if f.is_file() and f.suffix.lower() in SUB_EXTS:
+                subs.append({'filename': f.name, 'path': str(f), 'ext': f.suffix.lower()})
+    except OSError as e:
+        return jsonify({'error': str(e)}), 500
+
+    return jsonify({'subs': subs})
+
+
+def mux_external_subtitle(filepath, sub_path, lang='und', title=''):
+    """
+    Mux an external subtitle file into filepath as a new track.
+    Returns (ok: bool, message: str).
+    """
+    tmp_path  = filepath + '.submux.tmp'
+    orig_data = run_ffprobe(filepath)
+    if not orig_data:
+        return False, 'Cannot read original file with ffprobe'
+
+    existing_subs = [
+        s for s in orig_data.get('streams', []) if s.get('codec_type') == 'subtitle'
+    ]
+    new_sub_idx = len(existing_subs)
+
+    cmd = [
+        'ffmpeg', '-y',
+        '-i', filepath,
+        '-i', sub_path,
+        '-map', '0',
+        '-map', '1:0',
+        '-c', 'copy',
+        f'-metadata:s:s:{new_sub_idx}', f'language={lang}',
+    ]
+    if title:
+        cmd += [f'-metadata:s:s:{new_sub_idx}', f'title={title}']
+    cmd += ['-f', 'matroska', tmp_path]
+
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=None)
+    if result.returncode != 0:
+        if os.path.exists(tmp_path):
+            try: os.remove(tmp_path)
+            except OSError: pass
+        return False, f'ffmpeg mux error: {result.stderr[-500:]}'
+
+    new_data = run_ffprobe(tmp_path)
+    if new_data:
+        new_subs = [s for s in new_data.get('streams', []) if s.get('codec_type') == 'subtitle']
+        if len(new_subs) <= new_sub_idx:
+            os.remove(tmp_path)
+            return False, 'Subtitle track count did not increase after mux'
+
+    try:
+        os.replace(tmp_path, filepath)
+    except OSError as e:
+        if os.path.exists(tmp_path):
+            try: os.remove(tmp_path)
+            except OSError: pass
+        return False, f'Failed to replace original file: {e}'
+
+    return True, 'OK'
+
+
+@app.route('/api/media/<int:file_id>/mux-external-sub', methods=['POST'])
+def api_mux_external_sub(file_id):
+    """Queue a mux_sub job to inject an external subtitle file into the media file."""
+    data     = request.json or {}
+    sub_path = data.get('sub_path', '').strip()
+    lang     = data.get('lang', 'und').strip() or 'und'
+
+    if not sub_path:
+        return jsonify({'error': 'sub_path is required'}), 400
+
+    with db() as conn:
+        mf = conn.execute('SELECT * FROM media_files WHERE id=?', (file_id,)).fetchone()
+    if not mf:
+        return jsonify({'error': 'File not found'}), 404
+
+    sub_p   = Path(sub_path)
+    media_p = Path(mf['filepath'])
+
+    if not sub_p.is_file():
+        return jsonify({'error': 'Subtitle file not found on disk'}), 404
+    # Security: subtitle must be in the same directory as the media file
+    if sub_p.parent.resolve() != media_p.parent.resolve():
+        return jsonify({'error': 'Subtitle file must be in the same directory as the media file'}), 400
+
+    # Check for an already-active mux_sub job for this file
+    with db() as conn:
+        existing = conn.execute(
+            "SELECT id FROM encode_jobs WHERE media_file_id=? AND job_type='mux_sub' AND status IN ('queued','encoding')",
+            (file_id,),
+        ).fetchone()
+    if existing:
+        return jsonify({'error': 'A subtitle mux job is already queued for this file'}), 409
+
+    try:
+        job_id = queue_mux_sub_job(file_id, mf['filepath'], str(sub_p), lang)
+    except Exception as e:
+        log('error', f"[mux-sub] failed to queue job for file {file_id}: {e}")
+        return jsonify({'error': str(e)}), 500
+
+    return jsonify({'status': 'queued', 'job_id': job_id})
 
 
 @app.route('/api/encode/jobs/clear', methods=['POST'])
