@@ -1067,6 +1067,7 @@ function MediaTableRow({
 const TRANSLATE_LABEL: Record<string, string> = {
   pending: "Queued",
   extracting: "Extracting",
+  ocr: "OCR",
   translating: "Translating",
   muxing: "Muxing",
 };

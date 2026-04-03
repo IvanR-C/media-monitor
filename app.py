@@ -2272,7 +2272,7 @@ def get_media():
                     id_index[mid]['encode_progress'] = enc_row['progress']
         for tr_row in conn.execute(
             "SELECT media_file_id, status, progress FROM translation_jobs "
-            "WHERE status IN ('pending','extracting','translating','muxing')"
+            "WHERE status IN ('pending','extracting','ocr','translating','muxing')"
         ).fetchall():
             if tr_row['media_file_id'] in id_index:
                 id_index[tr_row['media_file_id']]['translate_status']   = tr_row['status']
