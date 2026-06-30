@@ -25,7 +25,7 @@ Built for Plex, Jellyfin, and any folder-based media server.
 ## ✨ Features
 
 ### 📡 File Watching & Notifications
-- Monitors a directory (recursively) for new `.mkv`, `.mp4`, `.avi`, `.mov`, `.m4v` files
+- Monitors a directory (recursively) for new `.mkv`, `.mp4`, `.avi`, `.mov`, `.m4v`, `.m2ts`, `.mts`, `.mpg`, `.mpeg`, `.vob`, `.webm`, `.wmv`, `.flv`, and `.3gp` files
 - Waits for file stability before processing (configurable checks to detect when a copy finishes)
 - Sends rich notifications via **Ntfy** and/or **Discord** (with poster art, codec details, and status)
 - Classifies every file as `OK`, `REMUX` (missing language tags), or `RE-ENCODE` (above size threshold)
@@ -337,7 +337,7 @@ All environment variables can also be set directly in `docker-compose.yml`:
 
 **Files not detected:**
 - Verify the volume mount in `docker-compose.yml` (`/path/to/your/media:/watch`)
-- Check that the file extension is supported (`.mkv`, `.mp4`, `.avi`, `.mov`, `.m4v`)
+- Check that the file extension is supported (`.mkv`, `.mp4`, `.avi`, `.mov`, `.m4v`, `.m2ts`, `.mts`, `.mpg`, `.mpeg`, `.vob`, `.webm`, `.wmv`, `.flv`, `.3gp`)
 - Check container logs: `docker logs media-monitor-backend`
 
 **Encoding fails immediately:**
