@@ -39,13 +39,28 @@ REENCODE_SIZE_GB   = float(os.environ.get('REENCODE_SIZE_GB', '20'))
 
 VIDEO_EXTENSIONS = (
     '.mkv', '.mp4', '.avi', '.mov', '.m4v',
-    '.m2ts', '.mts', '.ts',
+    '.m2ts', '.mts',
     '.mpg', '.mpeg', '.vob',
     '.webm', '.wmv', '.flv', '.3gp',
 )
 
 # Disc images we can't ffprobe or encode — surfaced as UNPROCESSABLE under Alerts.
 UNPROCESSABLE_EXTENSIONS = ('.iso', '.img')
+
+# Transient files that share a media extension but aren't library content —
+# most notably Plex's transcode segments (plex-transcode-<uuid>/media-NNNNN.ts).
+# With .ts now in VIDEO_EXTENSIONS these would otherwise flood the library.
+_PLEX_SEGMENT_RE = re.compile(r'^media-\d+\.(ts|m4s|vtt)$', re.I)
+
+
+def is_ignored_media_path(filepath):
+    """True for files we must never index (Plex transcode/DVR scratch)."""
+    parts = Path(filepath).parts
+    for p in parts[:-1]:
+        pl = p.lower()
+        if pl.startswith('plex-transcode') or pl == '.grab':
+            return True
+    return bool(_PLEX_SEGMENT_RE.match(parts[-1] if parts else ''))
 
 IMAGE_BASED_SUB_CODECS = {
     'hdmv_pgs_subtitle', 'dvd_subtitle', 'dvb_subtitle',
@@ -656,13 +671,21 @@ def scan_library():
 
             all_files = []
             unproc_files = []
-            for root, _, files in os.walk(WATCH_DIR):
+            for root, dirs, files in os.walk(WATCH_DIR):
+                # Don't descend into Plex transcode/DVR scratch directories.
+                dirs[:] = [
+                    d for d in dirs
+                    if not d.lower().startswith('plex-transcode') and d.lower() != '.grab'
+                ]
                 for f in files:
+                    full = os.path.join(root, f)
+                    if is_ignored_media_path(full):
+                        continue
                     low = f.lower()
                     if low.endswith(VIDEO_EXTENSIONS):
-                        all_files.append(os.path.join(root, f))
+                        all_files.append(full)
                     elif low.endswith(UNPROCESSABLE_EXTENSIONS):
-                        unproc_files.append(os.path.join(root, f))
+                        unproc_files.append(full)
 
             scan_status['total'] = len(all_files) + len(unproc_files)
             log('info', f"[scan] found {len(all_files)} video files, "
@@ -738,13 +761,21 @@ def scan_library_folder(folder_path):
 
             all_files = []
             unproc_files = []
-            for root, _, files in os.walk(folder_path):
+            for root, dirs, files in os.walk(folder_path):
+                # Don't descend into Plex transcode/DVR scratch directories.
+                dirs[:] = [
+                    d for d in dirs
+                    if not d.lower().startswith('plex-transcode') and d.lower() != '.grab'
+                ]
                 for f in files:
+                    full = os.path.join(root, f)
+                    if is_ignored_media_path(full):
+                        continue
                     low = f.lower()
                     if low.endswith(VIDEO_EXTENSIONS):
-                        all_files.append(os.path.join(root, f))
+                        all_files.append(full)
                     elif low.endswith(UNPROCESSABLE_EXTENSIONS):
-                        unproc_files.append(os.path.join(root, f))
+                        unproc_files.append(full)
 
             scan_status['total'] = len(all_files) + len(unproc_files)
             log('info', f"[scan] found {len(all_files)} files, "
@@ -2888,6 +2919,8 @@ class MediaFileHandler(FileSystemEventHandler):
     def on_created(self, event):
         if event.is_directory:
             return
+        if is_ignored_media_path(event.src_path):
+            return
         if event.src_path.lower().endswith(VIDEO_EXTENSIONS):
             executor.submit(analyze_file, event.src_path)
         elif event.src_path.lower().endswith(UNPROCESSABLE_EXTENSIONS):
@@ -2895,6 +2928,8 @@ class MediaFileHandler(FileSystemEventHandler):
 
     def on_moved(self, event):
         if event.is_directory:
+            return
+        if is_ignored_media_path(event.dest_path):
             return
         if event.dest_path.lower().endswith(VIDEO_EXTENSIONS):
             executor.submit(analyze_file, event.dest_path)
