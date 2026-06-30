@@ -7,17 +7,26 @@ export function Header() {
   const [health, setHealth] = useState<'checking' | 'ok' | 'error'>('checking')
 
   useEffect(() => {
+    let inflight: AbortController | null = null
     const check = async () => {
+      inflight?.abort()
+      const ac = new AbortController()
+      inflight = ac
       try {
-        const r = await fetch('/api/health')
+        const r = await fetch('/api/health', { signal: ac.signal })
+        if (ac.signal.aborted) return
         setHealth(r.ok ? 'ok' : 'error')
-      } catch {
+      } catch (e) {
+        if ((e as { name?: string })?.name === 'AbortError') return
         setHealth('error')
       }
     }
     check()
     const id = setInterval(check, 30000)
-    return () => clearInterval(id)
+    return () => {
+      clearInterval(id)
+      inflight?.abort()
+    }
   }, [])
 
   return (

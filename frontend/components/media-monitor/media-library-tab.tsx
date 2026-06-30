@@ -23,6 +23,7 @@ export interface MediaFile {
   id: number;
   folder_name: string;
   filename: string;
+  size_bytes?: number;
   size_gb: number;
   estimated_size_gb?: number;
   video_width?: number;
@@ -40,6 +41,7 @@ export interface MediaFile {
   media_type: "movie" | "show";
   show_name?: string;
   season_episode?: string;
+  has_sibling_videos?: number;
 }
 
 export interface AudioTrack {
@@ -63,7 +65,11 @@ interface LibraryStatsData {
   total_files: number;
   total_bytes: number;
   needs_encoding: number;
+  needs_remux: number;
+  missing_lang: number;
   encoding_active: number;
+  done_count: number;
+  alerts_count: number;
 }
 
 interface MediaLibraryTabProps {
@@ -84,51 +90,136 @@ export function MediaLibraryTab({ scan }: MediaLibraryTabProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [showLogs, setShowLogs] = useState(false);
-  const [files, setFiles] = useState<MediaFile[]>([]);
-  const [stats, setStats] = useState<LibraryStatsData>({
-    total_files: 0,
-    total_bytes: 0,
-    needs_encoding: 0,
-    encoding_active: 0,
-  });
+  // Single source of truth: the entire library for both movies and shows. Tab
+  // switches, filter pills, and search all derive from this in-memory list, so
+  // no network round-trip is needed for any of those interactions.
+  const [allFiles, setAllFiles] = useState<MediaFile[]>([]);
   const [loading, setLoading] = useState(false);
   const [debouncedSearch, setDebouncedSearch] = useState("");
 
-  // Debounce search input — only trigger fetchMedia 300 ms after the user stops typing
+  // Debounce search input — only the in-memory filter recomputes, no network.
   useEffect(() => {
-    const t = setTimeout(() => setDebouncedSearch(searchQuery), 300);
+    const t = setTimeout(() => setDebouncedSearch(searchQuery), 150);
     return () => clearTimeout(t);
   }, [searchQuery]);
 
-  const fetchMedia = useCallback(
-    async (silent = false) => {
-      if (!silent) setLoading(true);
-      try {
-        const params = new URLSearchParams({ type: mediaType, filter });
-        if (debouncedSearch) params.set("search", debouncedSearch);
-        const data = await fetch(`/api/media?${params}`).then((r) => r.json());
-        setFiles(data.files ?? []);
-        if (data.stats) setStats(data.stats);
-      } catch {
-        if (!silent) toast.error("Failed to load media library");
-      } finally {
-        if (!silent) setLoading(false);
+  // Track the most recent in-flight fetch so a stale poll response can't
+  // clobber a fresh user-action refresh.
+  const inflightRef = useRef<AbortController | null>(null);
+  const allFilesRef = useRef<MediaFile[]>([]);
+  allFilesRef.current = allFiles;
+
+  const fetchMedia = useCallback(async (silent = false) => {
+    inflightRef.current?.abort();
+    const ac = new AbortController();
+    inflightRef.current = ac;
+    const showSpinner = !silent && allFilesRef.current.length === 0;
+    if (showSpinner) setLoading(true);
+    try {
+      const r = await fetch(`/api/media?type=all`, { signal: ac.signal });
+      const data = await r.json();
+      if (inflightRef.current !== ac) return;
+      setAllFiles(data.files ?? []);
+    } catch (e) {
+      if ((e as { name?: string })?.name === "AbortError") return;
+      if (!silent) toast.error("Failed to load media library");
+    } finally {
+      if (inflightRef.current === ac) {
+        inflightRef.current = null;
+        if (showSpinner) setLoading(false);
       }
-    },
-    [mediaType, filter, debouncedSearch],
-  );
+    }
+  }, []);
 
   useEffect(() => {
     fetchMedia();
+    return () => {
+      inflightRef.current?.abort();
+      inflightRef.current = null;
+    };
   }, [fetchMedia]);
 
-  // Auto-refresh every 3 s while any encode or translation job is active — silent so the table never blinks
-  const hasActiveJobs = files.some(
-    (f) =>
+  // Files for the currently-selected media type (derives stats and table rows)
+  const typedFiles = useMemo(
+    () => allFiles.filter(f => f.media_type === mediaType),
+    [allFiles, mediaType],
+  );
+
+  // Per-mediaType aggregates — all computed from the in-memory list so
+  // switching tabs, typing in search, or clicking filter pills costs nothing.
+  const stats = useMemo<LibraryStatsData>(() => {
+    let needs_encoding = 0, needs_remux = 0, missing_lang = 0;
+    let encoding_active = 0, done_count = 0, alerts_count = 0;
+    let total_bytes = 0;
+    for (const f of typedFiles) {
+      const status = f.status ?? "";
+      const enc = f.encode_status;
+      const queueable = enc == null || enc === "failed";
+      if (status.includes("RE-ENCODE") && queueable)  needs_encoding++;
+      if (status.includes("REMUX") && queueable)       needs_remux++;
+      if (status.includes("MISSING LANG"))             missing_lang++;
+      if (enc === "queued" || enc === "encoding")      encoding_active++;
+      if (enc === "done")                              done_count++;
+      if (f.has_sibling_videos === 1 || status === "UNPROCESSABLE") alerts_count++;
+      total_bytes += f.size_bytes ?? 0;
+    }
+    return {
+      total_files: typedFiles.length,
+      total_bytes,
+      needs_encoding,
+      needs_remux,
+      missing_lang,
+      encoding_active,
+      done_count,
+      alerts_count,
+    };
+  }, [typedFiles]);
+
+  // Apply the active filter pill + search to typedFiles. All in-memory.
+  const files = useMemo(() => {
+    let f = typedFiles;
+    switch (filter) {
+      case "needs_encoding":
+        f = f.filter(x => x.status?.includes("RE-ENCODE")
+                       && (x.encode_status == null || x.encode_status === "failed"));
+        break;
+      case "needs_remux":
+        f = f.filter(x => x.status?.includes("REMUX")
+                       && (x.encode_status == null || x.encode_status === "failed"));
+        break;
+      case "missing_lang":
+        f = f.filter(x => x.status?.includes("MISSING LANG"));
+        break;
+      case "queued":
+        f = f.filter(x => x.encode_status === "queued" || x.encode_status === "encoding");
+        break;
+      case "done":
+        f = f.filter(x => x.encode_status === "done");
+        break;
+      case "alerts":
+        f = f.filter(x => x.has_sibling_videos === 1 || x.status === "UNPROCESSABLE");
+        break;
+    }
+    if (debouncedSearch) {
+      const q = debouncedSearch.toLowerCase();
+      f = f.filter(x =>
+        (x.folder_name?.toLowerCase().includes(q)) ||
+        (x.filename?.toLowerCase().includes(q)) ||
+        (x.show_name?.toLowerCase().includes(q))
+      );
+    }
+    return f;
+  }, [typedFiles, filter, debouncedSearch]);
+
+  // Auto-refresh every 3 s while any encode or translation job is active.
+  // Polls the full library (silent) so all derived state stays current.
+  const hasActiveJobs = useMemo(
+    () => allFiles.some(f =>
       f.encode_status === "encoding" ||
       f.encode_status === "queued" ||
       (f.translate_status != null &&
-        !["done", "failed", "cancelled"].includes(f.translate_status)),
+        !["done", "failed", "cancelled"].includes(f.translate_status))),
+    [allFiles],
   );
   useEffect(() => {
     if (!hasActiveJobs) return;
@@ -136,32 +227,26 @@ export function MediaLibraryTab({ scan }: MediaLibraryTabProps) {
     return () => clearInterval(id);
   }, [hasActiveJobs, fetchMedia]);
 
-  // Recompute filter counts from current file list (approximate — full counts need separate query)
-  const filterCounts = useMemo(() => {
-    const all = files;
-    return {
-      all: all.length,
-      needs_encoding: all.filter((f) => f.status?.includes("RE-ENCODE")).length,
-      needs_remux: all.filter((f) => f.status?.includes("REMUX")).length,
-      missing_lang: all.filter((f) => f.status?.includes("MISSING LANG"))
-        .length,
-      queued: all.filter(
-        (f) => f.encode_status === "queued" || f.encode_status === "encoding",
-      ).length,
-      done: all.filter((f) => f.encode_status === "done").length,
-      alerts: all.filter(
-        (f) =>
-          f.audio_tracks.some((t) => !t.lang) ||
-          f.subtitle_tracks.some((t) => !t.lang),
-      ).length,
-    };
-  }, [files]);
+  const filterCounts = useMemo(
+    () => ({
+      all:            stats.total_files,
+      needs_encoding: stats.needs_encoding,
+      needs_remux:    stats.needs_remux,
+      missing_lang:   stats.missing_lang,
+      queued:         stats.encoding_active,
+      done:           stats.done_count,
+      alerts:         stats.alerts_count,
+    }),
+    [stats],
+  );
 
   // When the scan finishes (isScanning flips true→false) reload the table so
   // the clean-rescan results are immediately visible.
   const prevScanningRef = useRef(false);
   useEffect(() => {
-    if (prevScanningRef.current && !isScanning) fetchMedia();
+    if (prevScanningRef.current && !isScanning) {
+      fetchMedia();
+    }
     prevScanningRef.current = isScanning;
   }, [isScanning, fetchMedia]);
 
@@ -225,32 +310,34 @@ export function MediaLibraryTab({ scan }: MediaLibraryTabProps) {
     audio: any[],
     subs: any[],
   ) => {
+    let r: Response;
     try {
-      const r = await fetch(`/api/media/${fileId}/assign-tracks`, {
+      r = await fetch(`/api/media/${fileId}/assign-tracks`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ audio, subtitles: subs }),
       });
-      const data = await r.json();
-      if (!r.ok && r.status !== 207) throw new Error(data.error || "Failed");
-      if (r.status === 207) {
-        // Assignments saved but remux queue failed
-        toast.warning(
-          data.error || "Languages saved but remux could not be queued",
-        );
-      } else {
-        toast.success(
-          "Languages saved — remux queued to apply changes to file",
-        );
-      }
-      // Switch to the "queued" filter — it includes encode_status='queued' rows,
-      // so the newly remuxed file will be visible there. This avoids the race
-      // where fetchMedia(true) fetches the current filter (e.g. missing_lang)
-      // and overwrites our optimistic update because the file no longer matches.
-      setFilter("queued");
     } catch {
       toast.error("Failed to save track languages");
+      throw new Error("network");
     }
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok && r.status !== 207) {
+      toast.error(data.error || "Failed to save track languages");
+      throw new Error(data.error || "save failed");
+    }
+    if (r.status === 207) {
+      // Assignments saved but remux queue failed
+      toast.warning(
+        data.error || "Languages saved but remux could not be queued",
+      );
+    } else {
+      toast.success("Languages saved — remux queued to apply changes to file");
+    }
+    // Switch to the "queued" filter so the user can watch the just-queued
+    // remux progress, then pull the freshest server state in.
+    setFilter("queued");
+    fetchMedia(true);
   };
 
   const TEXT_SUB_CODECS_EXCLUDE = new Set([
@@ -366,8 +453,11 @@ export function MediaLibraryTab({ scan }: MediaLibraryTabProps) {
           onTranslateSelected={handleTranslateSelected}
           onAssignTracks={handleAssignTracks}
           onFolderScan={onFolderScan}
+          onScanLibrary={onScan}
           mediaType={mediaType}
           loading={loading}
+          totalFiles={stats.total_files}
+          isScanning={isScanning}
         />
       </div>
 

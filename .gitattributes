@@ -1,0 +1,8 @@
+# Force LF for files that run inside Linux containers, regardless of
+# the contributor's core.autocrlf setting. Without this, Windows clones
+# rewrite shell scripts with CRLF and the container fails with
+# "exec /entrypoint.sh: no such file or directory" because the kernel
+# tries to load /bin/bash\r as the interpreter.
+*.sh        text eol=lf
+Dockerfile  text eol=lf
+entrypoint* text eol=lf

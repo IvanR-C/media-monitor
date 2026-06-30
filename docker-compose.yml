@@ -1,48 +1,32 @@
 services:
-  backend:
-    image: ivanchelo/media-monitor:3.22.26.3
-    container_name: media-monitor-backend
+  media-monitor:
+    build: .
+    container_name: media-monitor
     restart: unless-stopped
+    ports:
+      - "5000:5000"
     volumes:
-      # Mount your media directory (read/write required for encoding in-place)
-      - /path/to/your/media:/watch
+      # Mount your media directory (read-only recommended)
+      - "E:/test:/watch:ro"
       # Persistent config and database
       - ./config:/config
     environment:
+      # Optional: Override defaults
       - WATCH_DIR=/watch
       - PORT=5000
       - MAX_WORKERS=4
       - STABILIZE_INTERVAL=10
       - STABILIZE_CHECKS=3
-      # Size threshold in GB above which a file is flagged RE-ENCODE (default: 20)
-      - REENCODE_SIZE_GB=20
-
+      
       # Optional: Set via environment instead of web UI
       # - NTFY_SERVER=https://ntfy.sh
       # - NTFY_TOPIC=my-media-notifications
       # - DISCORD_WEBHOOK=https://discord.com/api/webhooks/...
       # - TVDB_API_KEY=your-api-key
-      # - OPENAI_API_KEY=your-openai-key
-      # - OPENAI_MODEL=gpt-4o-mini
-
-    # NVIDIA GPU access for hevc_nvenc encoding
-    # Requires: NVIDIA Container Toolkit installed on the host
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - count: all
-              capabilities:
-                - gpu
-                - video
-
-  frontend:
-    image: ivanchelo/media-monitor-frontend:3.22.26.3
-    container_name: media-monitor-frontend
-    restart: unless-stopped
-    ports:
-      - "3000:3000"
-    environment:
-      - BACKEND_URL=http://backend:5000
-    depends_on:
-      - backend
+    
+    # Optional: Resource limits
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '2'
+    #       memory: 1G
