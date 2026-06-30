@@ -34,7 +34,7 @@ export interface MediaFile {
   status: string;
   encode_status?: string;
   encode_progress?: number;
-  encode_job_type?: "encode" | "remux";
+  encode_job_type?: "encode" | "remux" | "rip";
   translate_status?: string;
   translate_progress?: number;
   poster_url?: string;
@@ -42,6 +42,10 @@ export interface MediaFile {
   show_name?: string;
   season_episode?: string;
   has_sibling_videos?: number;
+  // Disc images (.iso/.img): set when the file is an analyzable DVD/Blu-ray.
+  disc_type?: "dvd" | "bluray" | null;
+  disc_title?: number | null;
+  disc_playlist?: number | null;
 }
 
 export interface AudioTrack {
@@ -286,6 +290,22 @@ export function MediaLibraryTab({ scan }: MediaLibraryTabProps) {
     }
   };
 
+  const handleRipDisc = async (id: number) => {
+    try {
+      const r = await fetch(`/api/media/${id}/rip`, { method: "POST" });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok) {
+        toast.success(`Rip queued → ${data.output}`);
+        setFilter("queued");
+        fetchMedia(true);
+      } else {
+        toast.error(data.error || "Failed to queue rip");
+      }
+    } catch {
+      toast.error("Failed to queue rip");
+    }
+  };
+
   const handleTranslateSingle = async (id: number, subIdx: number) => {
     try {
       const r = await fetch(`/api/media/${id}/translate-subtitle`, {
@@ -331,6 +351,9 @@ export function MediaLibraryTab({ scan }: MediaLibraryTabProps) {
       toast.warning(
         data.error || "Languages saved but remux could not be queued",
       );
+    } else if (data.status === "saved") {
+      // Disc image: choices saved, no remux (rip applies them instead)
+      toast.success("Track selection saved — use Rip to apply");
     } else {
       toast.success("Languages saved — remux queued to apply changes to file");
     }
@@ -449,6 +472,7 @@ export function MediaLibraryTab({ scan }: MediaLibraryTabProps) {
           onClearSelection={clearSelection}
           onEnqueue={handleEnqueueSingle}
           onEnqueueSelected={handleEnqueueSelected}
+          onRip={handleRipDisc}
           onTranslate={handleTranslateSingle}
           onTranslateSelected={handleTranslateSelected}
           onAssignTracks={handleAssignTracks}

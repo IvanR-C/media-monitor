@@ -4,6 +4,7 @@ Media Monitor - Media library monitoring, notifications, and transcoding managem
 """
 import os
 import re
+import ast
 import json
 import time
 import shutil
@@ -210,6 +211,10 @@ def _migrate_db():
             ('media_type',     "TEXT DEFAULT 'movie'"),
             ('show_name',      'TEXT'),
             ('season_episode', 'TEXT'),
+            # Disc-image (.iso/.img) inspection: type and the title/playlist to rip
+            ('disc_type',      'TEXT'),
+            ('disc_title',     'INTEGER'),
+            ('disc_playlist',  'INTEGER'),
         ]:
             try:
                 conn.execute(f'ALTER TABLE media_files ADD COLUMN {col} {definition}')
@@ -226,6 +231,9 @@ def _migrate_db():
             ('job_type', "TEXT DEFAULT 'encode'"),
             ('sub_path', 'TEXT'),
             ('sub_lang', 'TEXT'),
+            # 'rip' jobs write a NEW .mkv (next to the ISO) instead of replacing
+            # the source, so they record their destination path here.
+            ('output_path', 'TEXT'),
         ]:
             try:
                 conn.execute(f'ALTER TABLE encode_jobs ADD COLUMN {col} {definition}')
@@ -346,21 +354,12 @@ def run_ffprobe(filepath):
         return None
 
 
-def parse_media_info(filepath):
-    """Run ffprobe and return a structured dict ready for DB insertion."""
-    data = run_ffprobe(filepath)
-    if not data:
-        return None
+def _streams_from_ffprobe(data):
+    """Split ffprobe JSON into (video, audio, subtitle) stream-dict lists.
 
-    path = Path(filepath)
-    try:
-        size_bytes = os.path.getsize(filepath)
-    except OSError:
-        return None
-
-    fmt      = data.get('format', {})
-    duration = float(fmt.get('duration') or 0)
-
+    Shared by parse_media_info() and the Blu-ray ISO analyzer so both produce
+    identical track structures.
+    """
     video_streams, audio_streams, subtitle_streams = [], [], []
     audio_idx = sub_idx = 0
 
@@ -398,6 +397,26 @@ def parse_media_info(filepath):
                 'title':      title,
             })
             sub_idx += 1
+
+    return video_streams, audio_streams, subtitle_streams
+
+
+def parse_media_info(filepath):
+    """Run ffprobe and return a structured dict ready for DB insertion."""
+    data = run_ffprobe(filepath)
+    if not data:
+        return None
+
+    path = Path(filepath)
+    try:
+        size_bytes = os.path.getsize(filepath)
+    except OSError:
+        return None
+
+    fmt      = data.get('format', {})
+    duration = float(fmt.get('duration') or 0)
+
+    video_streams, audio_streams, subtitle_streams = _streams_from_ffprobe(data)
 
     video = video_streams[0] if video_streams else {}
     status = determine_status(size_bytes, audio_streams, subtitle_streams)
@@ -452,7 +471,13 @@ def determine_status(size_bytes, audio_streams, subtitle_streams):
 
 
 def upsert_media_file(info):
-    row = {**info, 'poster_url': info.get('poster_url')}
+    # disc_* default to NULL so non-disc callers (parse_media_info,
+    # record_unprocessable_file) don't have to supply them.
+    row = {
+        'disc_type': None, 'disc_title': None, 'disc_playlist': None,
+        **info,
+        'poster_url': info.get('poster_url'),
+    }
     with db() as conn:
         conn.execute('''
             INSERT INTO media_files
@@ -461,6 +486,7 @@ def upsert_media_file(info):
                  audio_tracks, subtitle_tracks, format_name, status,
                  has_sibling_videos, poster_url,
                  media_type, show_name, season_episode,
+                 disc_type, disc_title, disc_playlist,
                  scanned_at)
             VALUES
                 (:filepath, :folder_name, :filename, :size_bytes, :duration_seconds,
@@ -468,6 +494,7 @@ def upsert_media_file(info):
                  :audio_tracks, :subtitle_tracks, :format_name, :status,
                  :has_sibling_videos, :poster_url,
                  :media_type, :show_name, :season_episode,
+                 :disc_type, :disc_title, :disc_playlist,
                  datetime('now'))
             ON CONFLICT(filepath) DO UPDATE SET
                 folder_name=excluded.folder_name,
@@ -487,6 +514,9 @@ def upsert_media_file(info):
                 media_type=COALESCE(excluded.media_type, media_files.media_type),
                 show_name=excluded.show_name,
                 season_episode=excluded.season_episode,
+                disc_type=excluded.disc_type,
+                disc_title=excluded.disc_title,
+                disc_playlist=excluded.disc_playlist,
                 scanned_at=datetime('now')
         ''', row)
 
@@ -654,10 +684,10 @@ def scan_library():
                 scan_status['scanned'] += 1
 
             for fp in unproc_files:
-                record_unprocessable_file(fp)
+                scan_disc_image(fp, poster_cache)
                 scan_status['scanned'] += 1
                 log('info', f"[scan] ({scan_status['scanned']}/{scan_status['total']}) "
-                            f"unprocessable: {Path(fp).name}")
+                            f"disc image: {Path(fp).name}")
 
             log('info', f"[scan] complete — {scan_status['scanned']} files processed")
         except Exception as e:
@@ -734,10 +764,10 @@ def scan_library_folder(folder_path):
                 scan_status['scanned'] += 1
 
             for fp in unproc_files:
-                record_unprocessable_file(fp)
+                scan_disc_image(fp, poster_cache)
                 scan_status['scanned'] += 1
                 log('info', f"[scan] ({scan_status['scanned']}/{scan_status['total']}) "
-                            f"unprocessable: {Path(fp).name}")
+                            f"disc image: {Path(fp).name}")
 
             log('info', f"[scan] folder scan complete — {scan_status['scanned']} files processed")
         except Exception as e:
@@ -797,6 +827,230 @@ def select_subtitle_tracks(subtitle_tracks):
         if t.get('action') != 'drop'
         and normalize_lang(t.get('lang', '')) in APPROVED_SUB_LANGS
     ]
+
+
+# ── Disc-image (ISO) inspection ───────────────────────────────────────────────
+# ffmpeg can't read an .iso's internal filesystem directly. An ISO is either a
+# DVD-Video (VIDEO_TS / MPEG-2 VOBs) or a Blu-ray (BDMV / H.264-HEVC M2TS). We
+# inspect each *without* loop-mounting (no privileged container needed):
+#   • DVD     → lsdvd reads the image directly and lists titles/tracks.
+#   • Blu-ray → ffprobe's libbluray "bluray:" protocol probes the main playlist.
+
+def detect_disc_type(filepath):
+    """Return 'dvd', 'bluray', or None by peeking at the ISO's top-level dirs.
+
+    bsdtar (libarchive) lists the ISO9660/UDF table of contents without
+    extracting anything, so this is cheap even for a 40 GB Blu-ray image.
+    """
+    try:
+        result = subprocess.run(
+            ['bsdtar', '-tf', filepath],
+            capture_output=True, text=True, timeout=120,
+        )
+    except Exception as e:
+        print(f"[iso] bsdtar failed on {filepath}: {e}")
+        return None
+    listing = (result.stdout or '').upper()
+    if 'BDMV' in listing:
+        return 'bluray'
+    if 'VIDEO_TS' in listing:
+        return 'dvd'
+    return None
+
+
+def analyze_dvd_iso(filepath):
+    """Inspect a DVD-Video ISO with lsdvd; return the longest title's streams.
+
+    Returns a dict with video_codec/dimensions/duration and audio_tracks /
+    subtitle_tracks in the same shape parse_media_info produces, plus
+    disc_title (the 1-based title number to feed dvdbackup when ripping).
+    """
+    try:
+        result = subprocess.run(
+            ['lsdvd', '-Oy', filepath],
+            capture_output=True, text=True, timeout=120,
+        )
+    except Exception as e:
+        print(f"[iso] lsdvd failed on {filepath}: {e}")
+        return None
+
+    out = result.stdout or ''
+    # lsdvd -Oy emits a Python literal assignment: "lsdvd = { ... }"
+    if '=' not in out:
+        return None
+    literal = out.split('=', 1)[1].strip().rstrip(';')
+    try:
+        data = ast.literal_eval(literal)
+    except (ValueError, SyntaxError) as e:
+        print(f"[iso] could not parse lsdvd output for {filepath}: {e}")
+        return None
+
+    tracks = data.get('track') or []
+    if not tracks:
+        return None
+
+    longest = data.get('longest_track')
+    title = next((t for t in tracks if t.get('ix') == longest), None) or max(
+        tracks, key=lambda t: t.get('length') or 0
+    )
+
+    # lsdvd reports an undefined track language as 'xx' — treat it as empty so
+    # determine_status() flags it as a missing-language REMUX like elsewhere.
+    def _lc(code):
+        code = (code or '').strip().lower()
+        return normalize_lang('' if code in ('', 'xx') else code)
+
+    audio_streams = []
+    for i, a in enumerate(title.get('audio') or []):
+        audio_streams.append({
+            'stream_idx': None,
+            'audio_idx':  i,
+            'lang':       _lc(a.get('langcode')),
+            'codec':      (a.get('format') or '').lower(),
+            'channels':   a.get('channels') or 0,
+            'title':      '',
+            'bitrate':    0,
+        })
+    subtitle_streams = []
+    for i, s in enumerate(title.get('subp') or []):
+        subtitle_streams.append({
+            'stream_idx': None,
+            'sub_idx':    i,
+            'lang':       _lc(s.get('langcode')),
+            'codec':      'dvd_subtitle',
+            'title':      '',
+        })
+
+    # DVD video is always MPEG-2; fall back to the standard frame size by region.
+    width  = title.get('width')  or (720)
+    height = title.get('height') or (576 if (title.get('format') or '').upper() == 'PAL' else 480)
+
+    return {
+        'video_codec':      'mpeg2video',
+        'video_width':      width,
+        'video_height':     height,
+        'video_bitrate':    0,
+        'duration':         float(title.get('length') or 0),
+        'audio_tracks':     audio_streams,
+        'subtitle_tracks':  subtitle_streams,
+        'disc_title':       title.get('ix'),
+        'disc_playlist':    None,
+    }
+
+
+def analyze_bluray_iso(filepath):
+    """Inspect a Blu-ray ISO via ffprobe's libbluray protocol (longest title)."""
+    try:
+        result = subprocess.run(
+            ['ffprobe', '-v', 'quiet', '-print_format', 'json',
+             '-show_format', '-show_streams', f'bluray:{filepath}'],
+            capture_output=True, text=True, timeout=180,
+        )
+        data = json.loads(result.stdout)
+    except Exception as e:
+        # Unreadable / AACS-encrypted disc — caller falls back to UNPROCESSABLE.
+        print(f"[iso] ffprobe bluray failed on {filepath}: {e}")
+        return None
+
+    if not data or not data.get('streams'):
+        return None
+
+    fmt = data.get('format', {})
+    video_streams, audio_streams, subtitle_streams = _streams_from_ffprobe(data)
+    if not video_streams:
+        return None
+    video = video_streams[0]
+
+    return {
+        'video_codec':      video.get('codec', ''),
+        'video_width':      video.get('width', 0),
+        'video_height':     video.get('height', 0),
+        'video_bitrate':    video.get('bitrate', 0),
+        'duration':         float(fmt.get('duration') or 0),
+        'audio_tracks':     audio_streams,
+        'subtitle_tracks':  subtitle_streams,
+        'disc_title':       None,
+        # libbluray auto-selects the longest title; the rip step relies on the
+        # same default, so no explicit playlist id needs to be recorded.
+        'disc_playlist':    None,
+    }
+
+
+def analyze_iso(filepath):
+    """Inspect a disc image and return a media-info dict (best tracks annotated),
+    or None if it isn't a readable DVD/Blu-ray video disc (data/encrypted image).
+    """
+    path = Path(filepath)
+    try:
+        size_bytes = os.path.getsize(filepath)
+    except OSError:
+        return None
+
+    disc_type = detect_disc_type(filepath)
+    if disc_type == 'dvd':
+        probe = analyze_dvd_iso(filepath)
+    elif disc_type == 'bluray':
+        probe = analyze_bluray_iso(filepath)
+    else:
+        return None
+    if not probe:
+        return None
+
+    audio_streams    = probe['audio_tracks']
+    subtitle_streams = probe['subtitle_tracks']
+
+    # Annotate best-track recommendations: keep what the selectors pick (highest
+    # quality per approved language), mark everything else action='drop'. The UI
+    # then shows exactly which tracks a rip would keep, and the user can override.
+    keep_audio = {id(t) for t in select_audio_tracks(audio_streams)}
+    keep_subs  = {id(t) for t in select_subtitle_tracks(subtitle_streams)}
+    for t in audio_streams:
+        t['action'] = 'keep' if id(t) in keep_audio else 'drop'
+    for t in subtitle_streams:
+        t['action'] = 'keep' if id(t) in keep_subs else 'drop'
+
+    status = determine_status(size_bytes, audio_streams, subtitle_streams)
+    media_type, show_name, season_episode = detect_media_type(filepath)
+
+    return {
+        'filepath':           filepath,
+        'folder_name':        path.parent.name,
+        'filename':           path.name,
+        'size_bytes':         size_bytes,
+        'duration_seconds':   probe['duration'],
+        'video_codec':        probe['video_codec'],
+        'video_width':        probe['video_width'],
+        'video_height':       probe['video_height'],
+        'video_bitrate':      probe.get('video_bitrate', 0),
+        'audio_tracks':       json.dumps(audio_streams),
+        'subtitle_tracks':    json.dumps(subtitle_streams),
+        'format_name':        path.suffix.lstrip('.').lower(),
+        'status':             status,
+        'has_sibling_videos': 0,
+        'media_type':         media_type,
+        'show_name':          show_name,
+        'season_episode':     season_episode,
+        'disc_type':          disc_type,
+        'disc_title':         probe.get('disc_title'),
+        'disc_playlist':      probe.get('disc_playlist'),
+    }
+
+
+def scan_disc_image(fp, poster_cache):
+    """Analyze an ISO during a library scan (no per-file notifications).
+
+    Falls back to recording it UNPROCESSABLE if it isn't a readable video disc.
+    """
+    info = analyze_iso(fp)
+    if not info:
+        record_unprocessable_file(fp)
+        return
+    is_show   = info.get('media_type') == 'show'
+    cache_key = info['show_name'] if is_show and info.get('show_name') else info['folder_name']
+    if cache_key not in poster_cache:
+        poster_cache[cache_key] = tvdb_search_poster(cache_key, is_show)
+    info['poster_url'] = poster_cache.get(cache_key)
+    upsert_media_file(info)
 
 
 # ── Size estimation ───────────────────────────────────────────────────────────
@@ -928,6 +1182,77 @@ def build_remux_cmd(filepath, output_path, audio_tracks, subtitle_tracks):
     return cmd
 
 
+def build_rip_cmd(row, output_path, workdir):
+    """Build the ffmpeg command that rips a disc image's selected tracks to MKV.
+
+    Input handling differs by disc type:
+      • Blu-ray → read the image directly via libbluray's "bluray:" protocol
+        (longest title, the same one analyze_bluray_iso probed).
+      • DVD     → first extract the main title's VOBs with dvdbackup into
+        `workdir` (CSS-decrypted via libdvdcss), then feed them through the
+        ffmpeg concat protocol.
+    The map/encode tail mirrors build_ffmpeg_cmd (hevc_nvenc, audio/sub copy).
+    Raises on disc-preparation failure; the caller fails the job and cleans up.
+    """
+    disc_type = row['disc_type']
+    filepath  = row['filepath']
+    height    = row['video_height'] or 0
+    audio_tracks    = json.loads(row['audio_tracks']    or '[]')
+    subtitle_tracks = json.loads(row['subtitle_tracks'] or '[]')
+
+    sel_audio = select_audio_tracks(audio_tracks)
+    sel_subs  = select_subtitle_tracks(subtitle_tracks)
+
+    if disc_type == 'bluray':
+        input_args = ['-i', f'bluray:{filepath}']
+    elif disc_type == 'dvd':
+        title = row['disc_title'] or 0
+        subprocess.run(
+            ['dvdbackup', '-i', filepath, '-o', workdir, '-t', str(title), '-n', 'rip'],
+            check=True, capture_output=True, text=True, timeout=3600,
+        )
+        vts_dir = Path(workdir) / 'rip' / 'VIDEO_TS'
+        # VTS_##_0.VOB is the menu; the feature is split across _1.._9.
+        vobs = sorted(str(p) for p in vts_dir.glob('VTS_*_[1-9].VOB'))
+        if not vobs:
+            raise RuntimeError('dvdbackup produced no VOB files')
+        input_args = ['-i', 'concat:' + '|'.join(vobs)]
+    else:
+        raise RuntimeError(f'unsupported disc_type: {disc_type!r}')
+
+    cmd = ['ffmpeg', '-y', '-progress', 'pipe:1', '-nostats'] + input_args
+    cmd += ['-map', '0:v:0']
+    for t in sel_audio:
+        cmd += ['-map', f'0:a:{t["audio_idx"]}']
+    for t in sel_subs:
+        cmd += ['-map', f'0:s:{t["sub_idx"]}']
+
+    cmd += [
+        '-c:v', 'hevc_nvenc',
+        '-preset:v', 'p4',
+        '-cq:v', '20',
+        '-profile:v', 'main10',
+        '-rc-lookahead', '20',
+    ]
+    if height > 1080:
+        cmd += ['-vf', 'scale=-2:1080']
+
+    cmd += ['-c:a', 'copy']
+    if sel_subs:
+        cmd += ['-c:s', 'copy']
+
+    # Stamp language metadata on the re-ordered output streams
+    for i, t in enumerate(sel_audio):
+        if t.get('lang'):
+            cmd += [f'-metadata:s:a:{i}', f'language={t["lang"]}']
+    for i, t in enumerate(sel_subs):
+        if t.get('lang'):
+            cmd += [f'-metadata:s:s:{i}', f'language={t["lang"]}']
+
+    cmd += ['-f', 'matroska', output_path]
+    return cmd
+
+
 # ── FFmpeg progress parsing ───────────────────────────────────────────────────
 # ffmpeg -progress pipe:1 emits newline-separated key=value pairs, e.g.:
 #   out_time_us=51234567000
@@ -1034,6 +1359,84 @@ def _fail_job(job_id, filepath, tmp_path, error):
     )
 
 
+def _run_ffmpeg_with_progress(job_id, cmd, duration, tag):
+    """Run an ffmpeg command, stream -progress into encode_jobs, and drain
+    stderr in the background. Returns (outcome, retcode, stderr_lines):
+      'ok'      — process exited; inspect retcode
+      'timeout' — killed after _FFMPEG_PROGRESS_TIMEOUT with no output
+      'error'   — failed to launch (message in stderr_lines[-1])
+    Manages the global active_proc/active_job_id handles so cancel still works.
+    """
+    global active_proc, active_job_id
+    stderr_lines = []
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,   # -progress pipe:1 → structured key=value
+            stderr=subprocess.PIPE,   # errors only (-nostats suppresses stats)
+            text=True, bufsize=1,
+        )
+        with encode_lock:
+            active_proc   = proc
+            active_job_id = job_id
+
+        # Drain stderr in a background thread so a full pipe buffer never
+        # causes ffmpeg to stall waiting on us to read it.
+        def _read_stderr():
+            for line in proc.stderr:
+                stripped = line.rstrip()
+                if stripped:
+                    stderr_lines.append(stripped)
+                    log('warn', f"{tag} stderr: {stripped}")
+
+        stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
+        stderr_thread.start()
+
+        # Read structured progress from stdout.
+        for elapsed, speed in parse_progress_output(proc.stdout):
+            if duration > 0:
+                progress = min(elapsed / duration * 100, 99.0)
+                eta = None
+                try:
+                    if speed:
+                        rate = float(speed.rstrip('x'))
+                        if rate > 0:
+                            eta = int((duration - elapsed) / rate)
+                except (ValueError, ZeroDivisionError):
+                    pass
+                with db() as conn:
+                    conn.execute(
+                        'UPDATE encode_jobs SET progress=?, speed=?, eta_seconds=? WHERE id=?',
+                        (round(progress, 1), speed, eta, job_id),
+                    )
+
+        # If the process is still alive after the loop exits, parse_progress_output
+        # timed out (no output for _FFMPEG_PROGRESS_TIMEOUT seconds) — kill it.
+        if proc.poll() is None:
+            log('error',
+                f"{tag} job {job_id} — ffmpeg unresponsive for "
+                f"{_FFMPEG_PROGRESS_TIMEOUT}s, killing process")
+            proc.kill()
+            try:
+                proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                pass
+            stderr_thread.join(timeout=5)
+            return 'timeout', None, stderr_lines
+
+        proc.wait()
+        stderr_thread.join(timeout=5)
+        return 'ok', proc.returncode, stderr_lines
+
+    except Exception as e:
+        stderr_lines.append(str(e))
+        return 'error', None, stderr_lines
+    finally:
+        with encode_lock:
+            active_proc   = None
+            active_job_id = None
+
+
 def run_encode_job(job_id):
     global active_proc, active_job_id
 
@@ -1056,7 +1459,7 @@ def run_encode_job(job_id):
         return
 
     job_type = (job['job_type'] or 'encode') if 'job_type' in job.keys() else 'encode'
-    tag      = '[remux]' if job_type == 'remux' else ('[mux-sub]' if job_type == 'mux_sub' else '[encode]')
+    tag      = {'remux': '[remux]', 'mux_sub': '[mux-sub]', 'rip': '[rip]'}.get(job_type, '[encode]')
     log('info', f"{tag} job {job_id} picked up — {Path(job['filepath']).name}")
 
     filepath = job['filepath']
@@ -1106,6 +1509,106 @@ def run_encode_job(job_id):
                 )
         return
 
+    # ── rip: extract a disc image's selected tracks into a NEW .mkv ──────────
+    # Unlike encode/remux, a rip does NOT replace its source — it writes a fresh
+    # .mkv next to the ISO and registers it as its own media row.
+    if job_type == 'rip':
+        output_path = job['output_path'] if 'output_path' in job.keys() else None
+        if not output_path:
+            _fail_job(job_id, filepath, None, 'rip job missing output_path')
+            return
+        tmp_path = output_path + '.rip.tmp'
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+        workdir = tempfile.mkdtemp(prefix='disc_rip_')
+        try:
+            with db() as conn:
+                conn.execute(
+                    "UPDATE encode_jobs SET status='encoding', started_at=datetime('now') WHERE id=?",
+                    (job_id,),
+                )
+                conn.execute(
+                    "UPDATE media_files SET encode_status='encoding' WHERE filepath=?",
+                    (filepath,),
+                )
+            try:
+                cmd = build_rip_cmd(dict(mf), tmp_path, workdir)
+            except subprocess.CalledProcessError as e:
+                _fail_job(job_id, filepath, tmp_path,
+                          f'disc extraction failed: {(e.stderr or str(e)).strip()[-300:]}')
+                return
+            except Exception as e:
+                _fail_job(job_id, filepath, tmp_path, f'rip preparation failed: {e}')
+                return
+
+            duration = mf['duration_seconds'] or 0
+            log('info', f"[rip] job {job_id} starting — {Path(filepath).name} → {Path(output_path).name}")
+            log('info', f"[rip] cmd: {' '.join(cmd)}")
+
+            outcome, retcode, stderr_lines = _run_ffmpeg_with_progress(job_id, cmd, duration, '[rip]')
+            if outcome == 'timeout':
+                _fail_job(job_id, filepath, tmp_path,
+                          f'ffmpeg timed out (no output for {_FFMPEG_PROGRESS_TIMEOUT}s)')
+                return
+            if outcome == 'error':
+                _fail_job(job_id, filepath, tmp_path,
+                          stderr_lines[-1] if stderr_lines else 'failed to launch ffmpeg')
+                return
+            if retcode != 0:
+                err_tail = '\n'.join(stderr_lines[-10:]) if stderr_lines else '(no stderr)'
+                log('error', f"[rip] job {job_id} ffmpeg exited {retcode}; last stderr:\n{err_tail}")
+                _fail_job(job_id, filepath, tmp_path, f'ffmpeg exited with code {retcode}')
+                return
+
+            # Can't compare against the ISO's duration, so just probe the result.
+            probe = run_ffprobe(tmp_path)
+            if not probe or not any(s.get('codec_type') == 'video' for s in probe.get('streams', [])):
+                _fail_job(job_id, filepath, tmp_path,
+                          'Health check failed: no video stream in ripped file')
+                return
+
+            ripped_size = os.path.getsize(tmp_path)
+            try:
+                os.replace(tmp_path, output_path)
+            except OSError as e:
+                _fail_job(job_id, filepath, tmp_path, f'Failed to move ripped file into place: {e}')
+                return
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+
+        # Mark the ISO row done and register the new MKV as its own media row.
+        with db() as conn:
+            conn.execute(
+                "UPDATE encode_jobs SET status='done', progress=100.0, "
+                "completed_at=datetime('now'), encoded_size=? WHERE id=?",
+                (ripped_size, job_id),
+            )
+            conn.execute(
+                "UPDATE media_files SET encode_status='done' WHERE filepath=?",
+                (filepath,),
+            )
+        new_info = parse_media_info(output_path)
+        if new_info:
+            new_info['has_sibling_videos'] = mf['has_sibling_videos']
+            new_info['poster_url']         = mf['poster_url']
+            upsert_media_file(new_info)
+        # Pre-mark the new .mkv so the watcher doesn't re-analyze/re-notify it.
+        mark_as_processed(output_path, new_info['status'] if new_info else 'OK', ripped_size)
+        log('info', f"[rip] job {job_id} done — {Path(output_path).name} ({ripped_size/1e9:.2f} GB)")
+        send_ntfy_notification(
+            f"Rip Complete: {mf['folder_name']}",
+            f"Disc: {mf['filename']}\n"
+            f"Output: {Path(output_path).name}\n"
+            f"Size: {ripped_size/1e9:.2f} GB",
+            tags='white_check_mark,cd',
+            attach_url=mf['poster_url'] if mf['poster_url'] else None,
+        )
+        return
+
     tmp_path = filepath + ('.remux.tmp' if job_type == 'remux' else '.encoding.tmp')
 
     if os.path.exists(tmp_path):
@@ -1140,80 +1643,15 @@ def run_encode_job(job_id):
     log('info', f"{tag} job {job_id} starting — {Path(filepath).name}")
     log('info', f"[encode] cmd: {' '.join(cmd)}")
 
-    stderr_lines = []
-
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,   # -progress pipe:1 → structured key=value
-            stderr=subprocess.PIPE,   # errors only (-nostats suppresses stats)
-            text=True, bufsize=1,
-        )
-        with encode_lock:
-            active_proc   = proc
-            active_job_id = job_id
-
-        # Drain stderr in a background thread so a full pipe buffer never
-        # causes ffmpeg to stall waiting on us to read it.
-        # Log each line immediately so warnings appear even if the job succeeds.
-        def _read_stderr():
-            for line in proc.stderr:
-                stripped = line.rstrip()
-                if stripped:
-                    stderr_lines.append(stripped)
-                    log('warn', f"{tag} stderr: {stripped}")
-
-        stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
-        stderr_thread.start()
-
-        # Read structured progress from stdout.
-        for elapsed, speed in parse_progress_output(proc.stdout):
-            if duration > 0:
-                progress = min(elapsed / duration * 100, 99.0)
-                eta = None
-                try:
-                    if speed:
-                        rate = float(speed.rstrip('x'))
-                        if rate > 0:
-                            eta = int((duration - elapsed) / rate)
-                except (ValueError, ZeroDivisionError):
-                    pass
-                with db() as conn:
-                    conn.execute(
-                        'UPDATE encode_jobs SET progress=?, speed=?, eta_seconds=? WHERE id=?',
-                        (round(progress, 1), speed, eta, job_id),
-                    )
-
-        # If the process is still alive after the loop exits, parse_progress_output
-        # timed out (no output for _FFMPEG_PROGRESS_TIMEOUT seconds) — kill it.
-        if proc.poll() is None:
-            log('error',
-                f"{tag} job {job_id} — ffmpeg unresponsive for "
-                f"{_FFMPEG_PROGRESS_TIMEOUT}s, killing process")
-            proc.kill()
-            try:
-                proc.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                pass
-            stderr_thread.join(timeout=5)
-            _fail_job(job_id, filepath, tmp_path,
-                      f'ffmpeg timed out (no output for {_FFMPEG_PROGRESS_TIMEOUT}s)')
-            return
-
-        proc.wait()
-        stderr_thread.join(timeout=5)
-        retcode = proc.returncode
-
-    except Exception as e:
-        with encode_lock:
-            active_proc   = None
-            active_job_id = None
-        _fail_job(job_id, filepath, tmp_path, str(e))
+    outcome, retcode, stderr_lines = _run_ffmpeg_with_progress(job_id, cmd, duration, tag)
+    if outcome == 'timeout':
+        _fail_job(job_id, filepath, tmp_path,
+                  f'ffmpeg timed out (no output for {_FFMPEG_PROGRESS_TIMEOUT}s)')
         return
-    finally:
-        with encode_lock:
-            active_proc   = None
-            active_job_id = None
+    if outcome == 'error':
+        _fail_job(job_id, filepath, tmp_path,
+                  stderr_lines[-1] if stderr_lines else 'failed to launch ffmpeg')
+        return
 
     if retcode != 0:
         # stderr lines were already logged in real-time by _read_stderr;
@@ -2351,22 +2789,86 @@ def notify_unprocessable(filepath, size):
             print(f"[discord] error: {e}")
 
 
-def handle_unprocessable_file(filepath):
-    """Watcher entry point for newly-arrived .iso/.img files."""
-    print(f"[{threading.current_thread().name}] unprocessable: {filepath}")
+def notify_disc_detected(filepath, info):
+    """Notify that a disc image was analyzed and is ready to rip."""
+    folder   = Path(filepath).parent.name
+    filename = Path(filepath).name
+    size_gb  = (info.get('size_bytes') or 0) / 1e9
+    disc     = (info.get('disc_type') or 'disc').upper()
+    audio = json.loads(info['audio_tracks']    or '[]')
+    subs  = json.loads(info['subtitle_tracks'] or '[]')
+    keep_audio = [t for t in audio if t.get('action') != 'drop']
+    keep_subs  = [t for t in subs  if t.get('action') != 'drop']
+    dur_min = int((info.get('duration_seconds') or 0) // 60)
+    a_langs = ', '.join(t.get('lang') or '?' for t in keep_audio) or 'none'
+    s_langs = ', '.join(t.get('lang') or '?' for t in keep_subs)  or 'none'
+    body = (
+        f"File: {filename}\n"
+        f"{disc} image  •  {size_gb:.2f} GB  •  {dur_min} min\n"
+        f"Best audio: {a_langs}\n"
+        f"Best subtitles: {s_langs}\n"
+        f"Ready to rip to MKV."
+    )
+    send_ntfy_notification(
+        f"Disc Detected: {folder}",
+        body,
+        tags='cd,movie_camera',
+        priority='default',
+        attach_url=info.get('poster_url'),
+    )
+    if config.get('enable_discord') and config.get('discord_webhook'):
+        try:
+            embed = {
+                'title':       f'{disc} Disc Image Detected',
+                'description': f"**Folder:** {folder}\n**File:** {filename}",
+                'color':       0x3399CC,
+                'fields': [
+                    {'name': 'Status',     'value': info.get('status') or 'OK',  'inline': True},
+                    {'name': 'Size',       'value': f"{size_gb:.2f} GB",          'inline': True},
+                    {'name': 'Duration',   'value': f"{dur_min} min",             'inline': True},
+                    {'name': 'Best audio', 'value': a_langs,                      'inline': True},
+                    {'name': 'Best subs',  'value': s_langs,                      'inline': True},
+                ],
+                'timestamp': datetime.utcnow().isoformat(),
+                'footer':    {'text': 'Media Monitor'},
+            }
+            requests.post(config['discord_webhook'], json={'embeds': [embed]}, timeout=10)
+        except Exception as e:
+            print(f"[discord] error: {e}")
+
+
+def handle_iso_file(filepath):
+    """Watcher entry point for newly-arrived .iso/.img disc images.
+
+    Tries to inspect the disc and surface its best tracks; if it isn't a
+    readable DVD/Blu-ray (data disc, AACS-encrypted, or unreadable) it falls
+    back to the legacy UNPROCESSABLE alert.
+    """
+    print(f"[{threading.current_thread().name}] disc image: {filepath}")
     if is_already_processed(filepath):
-        print(f"[unprocessable] already processed: {filepath}")
+        print(f"[iso] already processed: {filepath}")
         return
     if not wait_for_stable_file(filepath):
-        print(f"[unprocessable] file disappeared: {filepath}")
+        print(f"[iso] file disappeared: {filepath}")
         return
     try:
-        size = record_unprocessable_file(filepath)
-        notify_unprocessable(filepath, size)
-        mark_as_processed(filepath, 'UNPROCESSABLE', size)
-        print(f"[unprocessable] recorded: {filepath}")
+        info = analyze_iso(filepath)
+        if not info:
+            size = record_unprocessable_file(filepath)
+            notify_unprocessable(filepath, size)
+            mark_as_processed(filepath, 'UNPROCESSABLE', size)
+            print(f"[iso] unprocessable: {filepath}")
+            return
+
+        is_show   = info.get('media_type') == 'show'
+        cache_key = info['show_name'] if is_show and info.get('show_name') else info['folder_name']
+        info['poster_url'] = tvdb_search_poster(cache_key, is_show)
+        upsert_media_file(info)
+        notify_disc_detected(filepath, info)
+        mark_as_processed(filepath, info['status'], info['size_bytes'])
+        print(f"[iso] analyzed: {filepath} — {info['disc_type']} / {info['status']}")
     except Exception as e:
-        print(f"[unprocessable] error {filepath}: {e}")
+        print(f"[iso] error {filepath}: {e}")
 
 
 # ── Watchdog ──────────────────────────────────────────────────────────────────
@@ -2377,7 +2879,7 @@ class MediaFileHandler(FileSystemEventHandler):
         if event.src_path.lower().endswith(VIDEO_EXTENSIONS):
             executor.submit(analyze_file, event.src_path)
         elif event.src_path.lower().endswith(UNPROCESSABLE_EXTENSIONS):
-            executor.submit(handle_unprocessable_file, event.src_path)
+            executor.submit(handle_iso_file, event.src_path)
 
     def on_moved(self, event):
         if event.is_directory:
@@ -2385,7 +2887,7 @@ class MediaFileHandler(FileSystemEventHandler):
         if event.dest_path.lower().endswith(VIDEO_EXTENSIONS):
             executor.submit(analyze_file, event.dest_path)
         elif event.dest_path.lower().endswith(UNPROCESSABLE_EXTENSIONS):
-            executor.submit(handle_unprocessable_file, event.dest_path)
+            executor.submit(handle_iso_file, event.dest_path)
 
 
 def start_monitoring():
@@ -2509,7 +3011,8 @@ def get_media():
         ),
         'alerts': (
             f"SELECT * FROM media_files "
-            f"WHERE (has_sibling_videos=1 OR status='UNPROCESSABLE'){tc} "
+            f"WHERE (has_sibling_videos=1 OR status='UNPROCESSABLE' "
+            f"       OR disc_type IS NOT NULL){tc} "
             f"ORDER BY folder_name"
         ),
         'missing_lang': (
@@ -2770,6 +3273,54 @@ def queue_remux_job(file_id, filepath):
     return job_id
 
 
+def queue_rip_job(file_id, filepath, output_path):
+    """Create an encode_job of type 'rip' (disc image → new .mkv) and queue it."""
+    try:
+        size = os.path.getsize(filepath)
+    except OSError:
+        size = 0
+    with db() as conn:
+        cursor = conn.execute(
+            "INSERT INTO encode_jobs "
+            "(media_file_id, filepath, status, original_size, job_type, output_path) "
+            "VALUES (?,?,'queued',?,'rip',?)",
+            (file_id, filepath, size, output_path),
+        )
+        job_id = cursor.lastrowid
+        conn.execute(
+            "UPDATE media_files SET encode_status='queued' WHERE id=?",
+            (file_id,),
+        )
+    encode_queue.put(job_id)
+    log('info', f"[rip] job {job_id} queued — {Path(filepath).name} → {Path(output_path).name}")
+    return job_id
+
+
+@app.route('/api/media/<int:file_id>/rip', methods=['POST'])
+def api_rip_disc(file_id):
+    """Queue a rip of a disc-image row's selected best tracks into a new .mkv."""
+    with db() as conn:
+        row = conn.execute('SELECT * FROM media_files WHERE id=?', (file_id,)).fetchone()
+    if not row:
+        return jsonify({'error': 'Not found'}), 404
+    if not row['disc_type']:
+        return jsonify({'error': 'Not a disc image'}), 400
+    if row['encode_status'] in ('queued', 'encoding'):
+        return jsonify({'error': 'A job is already queued/running for this disc'}), 409
+
+    iso_path    = Path(row['filepath'])
+    output_path = str(iso_path.with_suffix('.mkv'))
+    if os.path.exists(output_path):
+        return jsonify({'error': f'{Path(output_path).name} already exists'}), 409
+
+    try:
+        job_id = queue_rip_job(file_id, row['filepath'], output_path)
+    except Exception as e:
+        log('error', f"[rip] failed to queue rip for file {file_id}: {e}")
+        return jsonify({'error': f'Could not queue rip: {e}'}), 500
+    return jsonify({'status': 'ok', 'job_id': job_id, 'output': Path(output_path).name})
+
+
 @app.route('/api/media/<int:file_id>/assign-tracks', methods=['POST'])
 def assign_tracks(file_id):
     """
@@ -2817,6 +3368,16 @@ def assign_tracks(file_id):
             'UPDATE media_files SET audio_tracks=?, subtitle_tracks=?, status=? WHERE id=?',
             (json.dumps(audio_tracks), json.dumps(subtitle_tracks), new_status, file_id),
         )
+
+    # Disc images have no remuxable file on disk — just persist the keep/drop
+    # choices; the user rips them with the dedicated /rip endpoint afterwards.
+    if row['disc_type']:
+        return jsonify({
+            'status':          'saved',
+            'new_status':      new_status,
+            'audio_tracks':    audio_tracks,
+            'subtitle_tracks': subtitle_tracks,
+        })
 
     # Queue a remux job so the changes are actually written to the file
     remux_job_id = None
@@ -2889,6 +3450,13 @@ def cancel_encode(job_id):
                         os.remove(tmp)
                     except OSError:
                         pass
+            # rip jobs write <output_path>.rip.tmp instead
+            out = job['output_path'] if 'output_path' in job.keys() else None
+            if out and os.path.exists(out + '.rip.tmp'):
+                try:
+                    os.remove(out + '.rip.tmp')
+                except OSError:
+                    pass
 
     return jsonify({'status': 'cancelled'})
 
@@ -2972,6 +3540,12 @@ def cancel_all_encode():
                         os.remove(tmp)
                     except OSError:
                         pass
+            out = job['output_path'] if 'output_path' in job.keys() else None
+            if out and os.path.exists(out + '.rip.tmp'):
+                try:
+                    os.remove(out + '.rip.tmp')
+                except OSError:
+                    pass
             cancelled += 1
     # Drain any still-queued job ids from the in-memory queue so the worker
     # doesn't pick them up after the DB rows are marked cancelled.
