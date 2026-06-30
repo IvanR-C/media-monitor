@@ -3,9 +3,29 @@
 import { useState, useEffect, useCallback } from "react"
 import { Button } from "@/components/ui/button"
 import { Progress } from "@/components/ui/progress"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
-import { ChevronDown, X, Trash2 } from "lucide-react"
+import { ChevronDown, Maximize2, Pause, Play, Square, X, Trash2 } from "lucide-react"
 import { toast } from "sonner"
+import {
+  ACTIVE_TRANSLATE_STATUSES,
+  TRANSLATE_STATUS_LABEL,
+} from "./translate-status"
 
 interface EncodeJob {
   id: number
@@ -39,25 +59,17 @@ interface TranslationJob {
   error_text?: string
 }
 
-const ACTIVE_ENCODE_STATUSES    = new Set(["queued", "encoding"])
-const ACTIVE_TRANSLATE_STATUSES = new Set(["pending", "extracting", "ocr", "translating", "muxing"])
-
-const TRANSLATE_STATUS_LABEL: Record<string, string> = {
-  pending:    "Queued",
-  extracting: "Extracting",
-  ocr:        "OCR",
-  translating:"Translating",
-  muxing:     "Muxing",
-  done:       "Done",
-  failed:     "Failed",
-  cancelled:  "Cancelled",
-}
+const ACTIVE_ENCODE_STATUSES = new Set(["queued", "encoding"])
 
 export function CombinedQueue() {
   const [isExpanded, setIsExpanded]         = useState(true)
   const [activeTab, setActiveTab]           = useState<"encode" | "translate">("encode")
   const [encodeJobs, setEncodeJobs]         = useState<EncodeJob[]>([])
   const [translateJobs, setTranslateJobs]   = useState<TranslationJob[]>([])
+  const [encodePaused, setEncodePaused]     = useState(false)
+  const [translatePaused, setTranslatePaused] = useState(false)
+  const [confirmCancelAll, setConfirmCancelAll] = useState<null | "encode" | "translate">(null)
+  const [isModalOpen, setIsModalOpen]       = useState(false)
 
   const fetchJobs = useCallback(async () => {
     try {
@@ -67,6 +79,8 @@ export function CombinedQueue() {
       ])
       setEncodeJobs(enc.jobs ?? [])
       setTranslateJobs(tr.jobs ?? [])
+      setEncodePaused(Boolean(enc.paused))
+      setTranslatePaused(Boolean(tr.paused))
     } catch {
       // silently ignore poll errors
     }
@@ -125,6 +139,48 @@ export function CombinedQueue() {
     }
   }
 
+  // ── Group controls (pause / resume / cancel-all) ────────────────────────────
+  const handleTogglePause = async (e: React.MouseEvent) => {
+    e.stopPropagation()
+    const isEncode = activeTab === "encode"
+    const paused   = isEncode ? encodePaused : translatePaused
+    const base     = isEncode ? "/api/encode" : "/api/translate"
+    const action   = paused ? "resume" : "pause"
+    // Optimistic flip; reverted by next poll if backend disagrees
+    if (isEncode) setEncodePaused(!paused)
+    else          setTranslatePaused(!paused)
+    try {
+      const r = await fetch(`${base}/${action}`, { method: "POST" })
+      if (!r.ok) throw new Error()
+      toast.info(`${isEncode ? "Encode" : "Translation"} queue ${paused ? "resumed" : "paused"}`)
+      fetchJobs()
+    } catch {
+      toast.error(`Failed to ${action} queue`)
+      fetchJobs()
+    }
+  }
+
+  const handleCancelAll = async () => {
+    if (!confirmCancelAll) return
+    const isEncode = confirmCancelAll === "encode"
+    const base     = isEncode ? "/api/encode" : "/api/translate"
+    try {
+      const r    = await fetch(`${base}/cancel-all`, { method: "POST" })
+      const data = await r.json().catch(() => ({}))
+      const n    = typeof data?.cancelled === "number" ? data.cancelled : null
+      toast.success(
+        n != null
+          ? `Cancelled ${n} ${isEncode ? "encode" : "translation"} job(s)`
+          : `Cancelled all ${isEncode ? "encode" : "translation"} jobs`
+      )
+      fetchJobs()
+    } catch {
+      toast.error("Failed to cancel jobs")
+    } finally {
+      setConfirmCancelAll(null)
+    }
+  }
+
   // ── Derived counts ────────────────────────────────────────────────────────────
   const activeEncodeCount    = encodeJobs.filter(j => ACTIVE_ENCODE_STATUSES.has(j.status)).length
   const activeTranslateCount = translateJobs.filter(j => ACTIVE_TRANSLATE_STATUSES.has(j.status)).length
@@ -155,8 +211,8 @@ export function CombinedQueue() {
         {currentlyEncoding && !isExpanded && (
           <div className="flex flex-1 items-center gap-2 px-2 text-xs text-muted-foreground">
             <span className="truncate">{currentlyEncoding.folder_name}</span>
-            <Progress value={currentlyEncoding.progress} className="h-1 w-24 shrink-0" />
-            <span className="tabular-nums">{currentlyEncoding.progress?.toFixed(0)}%</span>
+            <Progress value={currentlyEncoding.progress ?? 0} className="h-1 w-24 shrink-0" />
+            <span className="tabular-nums">{(currentlyEncoding.progress ?? 0).toFixed(0)}%</span>
           </div>
         )}
 
@@ -180,6 +236,48 @@ export function CombinedQueue() {
           </div>
         )}
 
+        {/* Group controls: pause/resume + cancel-all */}
+        {isExpanded && (() => {
+          const isEncode    = activeTab === "encode"
+          const paused      = isEncode ? encodePaused : translatePaused
+          const activeCount = isEncode ? activeEncodeCount : activeTranslateCount
+          // Pause toggle is meaningful even with 0 active (so user can pre-pause new jobs)
+          // Cancel-all only when something is actually active
+          return (
+            <>
+              <Button
+                variant="ghost"
+                size="sm"
+                className={cn(
+                  "h-6 px-2 text-[10px]",
+                  paused ? "text-accent" : "text-muted-foreground"
+                )}
+                onClick={handleTogglePause}
+                title={paused ? "Resume queue" : "Pause queue (current job finishes)"}
+              >
+                {paused
+                  ? <><Play className="mr-1 h-2.5 w-2.5" />Resume</>
+                  : <><Pause className="mr-1 h-2.5 w-2.5" />Pause</>}
+              </Button>
+              {activeCount > 0 && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 px-2 text-[10px] text-muted-foreground hover:text-destructive"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    setConfirmCancelAll(isEncode ? "encode" : "translate")
+                  }}
+                  title="Cancel all active jobs"
+                >
+                  <Square className="mr-1 h-2.5 w-2.5" />
+                  Stop all
+                </Button>
+              )}
+            </>
+          )
+        })()}
+
         {/* Clear finished button */}
         {isExpanded && activeTab === "encode" && doneEncodeCount > 0 && (
           <Button variant="ghost" size="sm" className="h-6 px-2 text-[10px] text-muted-foreground" onClick={handleClearEncode}>
@@ -193,31 +291,174 @@ export function CombinedQueue() {
             Clear {doneTranslateCount}
           </Button>
         )}
+
+        {/* Expand to modal */}
+        {isExpanded && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6 text-muted-foreground hover:text-foreground"
+            onClick={(e) => { e.stopPropagation(); setIsModalOpen(true) }}
+            title="Open queue in a larger view"
+          >
+            <Maximize2 className="h-3 w-3" />
+          </Button>
+        )}
       </div>
 
       {/* ── Body ───────────────────────────────────────────────────────────── */}
       {isExpanded && (
-        <div className="max-h-44 overflow-y-auto border-t border-border/30 bg-[#0a0a0c]">
-          {activeTab === "encode" && (
-            encodeJobs.length === 0
-              ? <EmptyState label="No encode jobs" />
-              : <div className="divide-y divide-border/20">
-                  {encodeJobs.map(job => (
-                    <EncodeJobRow key={job.id} job={job} onCancel={handleCancelEncode} />
-                  ))}
-                </div>
+        <div className="border-t border-border/30 bg-[#0a0a0c]">
+          {((activeTab === "encode" && encodePaused) || (activeTab === "translate" && translatePaused)) && (
+            <div className="flex items-center gap-2 border-b border-border/30 bg-accent/5 px-3 py-1 text-[10px] text-accent">
+              <Pause className="h-2.5 w-2.5" />
+              Queue paused — current job will finish, no new jobs will start
+            </div>
           )}
-          {activeTab === "translate" && (
-            translateJobs.length === 0
-              ? <EmptyState label="No translation jobs" />
-              : <div className="divide-y divide-border/20">
-                  {translateJobs.map(job => (
-                    <TranslateJobRow key={job.id} job={job} onCancel={handleCancelTranslate} />
-                  ))}
-                </div>
-          )}
+          <div className="max-h-44 overflow-y-auto">
+            {activeTab === "encode" && (
+              encodeJobs.length === 0
+                ? <EmptyState label="No encode jobs" />
+                : <div className="divide-y divide-border/20">
+                    {encodeJobs.map(job => (
+                      <EncodeJobRow key={job.id} job={job} onCancel={handleCancelEncode} />
+                    ))}
+                  </div>
+            )}
+            {activeTab === "translate" && (
+              translateJobs.length === 0
+                ? <EmptyState label="No translation jobs" />
+                : <div className="divide-y divide-border/20">
+                    {translateJobs.map(job => (
+                      <TranslateJobRow key={job.id} job={job} onCancel={handleCancelTranslate} />
+                    ))}
+                  </div>
+            )}
+          </div>
         </div>
       )}
+
+      {/* ── Cancel-all confirm ─────────────────────────────────────────────── */}
+      <AlertDialog open={confirmCancelAll !== null} onOpenChange={(open) => !open && setConfirmCancelAll(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Cancel all {confirmCancelAll === "encode" ? "encode" : "translation"} jobs?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              This stops the active job and removes everything still queued. Already-finished jobs are kept in the history.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep running</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleCancelAll}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              Cancel all
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* ── Expanded queue modal ───────────────────────────────────────────── */}
+      <Dialog open={isModalOpen} onOpenChange={setIsModalOpen}>
+        <DialogContent className="flex max-h-[85vh] flex-col gap-0 p-0 sm:max-w-3xl">
+          <DialogHeader className="border-b border-border/50 px-4 py-3">
+            <DialogTitle className="text-sm font-medium">Queue</DialogTitle>
+          </DialogHeader>
+
+          {/* Tabs + group controls inside the modal */}
+          <div className="flex flex-wrap items-center gap-2 border-b border-border/30 px-3 py-2">
+            <div className="flex gap-0.5">
+              <TabButton
+                active={activeTab === "encode"}
+                onClick={() => setActiveTab("encode")}
+                label="Encode"
+                count={activeEncodeCount}
+              />
+              <TabButton
+                active={activeTab === "translate"}
+                onClick={() => setActiveTab("translate")}
+                label="Translate"
+                count={activeTranslateCount}
+              />
+            </div>
+            <div className="ml-auto flex items-center gap-1">
+              {(() => {
+                const isEncode    = activeTab === "encode"
+                const paused      = isEncode ? encodePaused : translatePaused
+                const activeCount = isEncode ? activeEncodeCount : activeTranslateCount
+                return (
+                  <>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className={cn("h-7 px-2 text-xs", paused ? "text-accent" : "text-muted-foreground")}
+                      onClick={handleTogglePause}
+                    >
+                      {paused
+                        ? <><Play className="mr-1 h-3 w-3" />Resume</>
+                        : <><Pause className="mr-1 h-3 w-3" />Pause</>}
+                    </Button>
+                    {activeCount > 0 && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 px-2 text-xs text-muted-foreground hover:text-destructive"
+                        onClick={() => setConfirmCancelAll(isEncode ? "encode" : "translate")}
+                      >
+                        <Square className="mr-1 h-3 w-3" />
+                        Stop all
+                      </Button>
+                    )}
+                    {isEncode && doneEncodeCount > 0 && (
+                      <Button variant="ghost" size="sm" className="h-7 px-2 text-xs text-muted-foreground" onClick={handleClearEncode}>
+                        <Trash2 className="mr-1 h-3 w-3" />
+                        Clear {doneEncodeCount}
+                      </Button>
+                    )}
+                    {!isEncode && doneTranslateCount > 0 && (
+                      <Button variant="ghost" size="sm" className="h-7 px-2 text-xs text-muted-foreground" onClick={handleClearTranslate}>
+                        <Trash2 className="mr-1 h-3 w-3" />
+                        Clear {doneTranslateCount}
+                      </Button>
+                    )}
+                  </>
+                )
+              })()}
+            </div>
+          </div>
+
+          {((activeTab === "encode" && encodePaused) || (activeTab === "translate" && translatePaused)) && (
+            <div className="flex items-center gap-2 border-b border-border/30 bg-accent/5 px-4 py-1.5 text-xs text-accent">
+              <Pause className="h-3 w-3" />
+              Queue paused — current job will finish, no new jobs will start
+            </div>
+          )}
+
+          <div className="flex-1 overflow-y-auto bg-[#0a0a0c]">
+            {activeTab === "encode" && (
+              encodeJobs.length === 0
+                ? <EmptyState label="No encode jobs" />
+                : <div className="divide-y divide-border/20">
+                    {encodeJobs.map(job => (
+                      <EncodeJobRow key={job.id} job={job} onCancel={handleCancelEncode} />
+                    ))}
+                  </div>
+            )}
+            {activeTab === "translate" && (
+              translateJobs.length === 0
+                ? <EmptyState label="No translation jobs" />
+                : <div className="divide-y divide-border/20">
+                    {translateJobs.map(job => (
+                      <TranslateJobRow key={job.id} job={job} onCancel={handleCancelTranslate} />
+                    ))}
+                  </div>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
