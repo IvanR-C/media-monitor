@@ -97,6 +97,29 @@ LANG_MAP = {
     'ko': 'kor', 'ru': 'rus', 'ar': 'ara', 'hi': 'hin',
 }
 
+# Full language names → ISO 639-2, for sidecar files spelled out (Movie.Spanish.srt)
+LANG_NAME_MAP = {
+    'english': 'eng', 'spanish': 'spa', 'japanese': 'jpn', 'french': 'fra',
+    'german': 'deu', 'italian': 'ita', 'portuguese': 'por', 'russian': 'rus',
+    'korean': 'kor', 'arabic': 'ara', 'hindi': 'hin', 'chinese': 'zho',
+    'dutch': 'nld', 'polish': 'pol', 'swedish': 'swe', 'norwegian': 'nor',
+    'danish': 'dan', 'finnish': 'fin', 'czech': 'ces', 'hungarian': 'hun',
+    'romanian': 'ron', 'greek': 'ell', 'turkish': 'tur', 'hebrew': 'heb',
+    'ukrainian': 'ukr', 'vietnamese': 'vie', 'thai': 'tha', 'indonesian': 'ind',
+}
+
+# Subtitle file extensions treated as external "sidecar" tracks.
+SIDECAR_SUB_EXTS = {'.srt', '.ass', '.ssa', '.vtt', '.sub'}
+
+# Non-language tokens that commonly appear in sidecar filenames next to the lang.
+SUB_MODIFIER_TOKENS = {'forced', 'sdh', 'cc', 'hi', 'default', 'foreign', 'full'}
+
+# Every 3-letter code we recognize — used to reject junk tokens (title words, etc.)
+_KNOWN_LANGS = (
+    set(LANG_MAP.values()) | set(TESS_LANG_MAP) | set(TESS_LANG_MAP.values())
+    | set(LANG_NAME_MAP.values()) | APPROVED_AUDIO_LANGS | APPROVED_SUB_LANGS
+)
+
 SHOW_ROOT_SEGMENTS  = {'series', 'tv', 'shows', 'anime', 'television'}
 MOVIE_ROOT_SEGMENTS = {'movies', 'movie', 'films', 'film'}
 SE_PATTERN          = re.compile(r'[Ss](\d{1,2})[Ee](\d{1,2})')
@@ -439,9 +462,10 @@ def parse_media_info(filepath):
     video_streams, audio_streams, subtitle_streams = _streams_from_ffprobe(data)
 
     video = video_streams[0] if video_streams else {}
-    status = determine_status(size_bytes, audio_streams, subtitle_streams)
 
     media_type, show_name, season_episode = detect_media_type(filepath)
+    status = determine_status(size_bytes, audio_streams, subtitle_streams,
+                              filepath, media_type)
 
     return {
         'filepath':         filepath,
@@ -464,7 +488,62 @@ def parse_media_info(filepath):
     }
 
 
-def determine_status(size_bytes, audio_streams, subtitle_streams):
+def _token_to_lang(tok):
+    """Map a filename token to a normalized 3-letter language code, or '' if it
+    isn't a language we recognize (rejects modifiers, title words, junk)."""
+    t = (tok or '').strip().lower()
+    if not t or t in SUB_MODIFIER_TOKENS:
+        return ''
+    if t in LANG_NAME_MAP:
+        return LANG_NAME_MAP[t]
+    n = normalize_lang(t)          # 2-letter → 3-letter, else passthrough
+    return n if n in _KNOWN_LANGS else ''
+
+
+def sidecar_sub_langs(filepath, media_type=None):
+    """Languages available as external sidecar subtitle files for this video.
+
+    Only *language-tagged* sidecars count (an untagged Movie.srt is ignored).
+    Shows require the sidecar to share the episode's filename (so one episode's
+    sub can't clear another's); movies also accept a language-named sub
+    (Spanish.srt) anywhere in the folder.
+    """
+    try:
+        path = Path(filepath)
+        stem = path.stem
+        stem_low = stem.lower()
+        if media_type is None:
+            media_type = detect_media_type(filepath)[0]
+        is_show = media_type == 'show'
+
+        langs = set()
+        for f in path.parent.iterdir():
+            if not f.is_file() or f.suffix.lower() not in SIDECAR_SUB_EXTS:
+                continue
+            base = f.name[: -len(f.suffix)]          # filename without sub ext
+            if base.lower().startswith(stem_low):
+                # Sidecar named after this video — parse tokens after the stem.
+                for tok in re.split(r'[.\-_ ]+', base[len(stem):]):
+                    lang = _token_to_lang(tok)
+                    if lang:
+                        langs.add(lang)
+            elif not is_show:
+                # Movie only: accept a sub whose name is purely language/modifier
+                # tokens (Spanish.srt, 2_English.forced.srt) — reject real titles.
+                toks = [t for t in re.split(r'[.\-_ ]+', base) if t]
+                mapped = [_token_to_lang(t) for t in toks]
+                if toks and all(
+                    m or t.isdigit() or t.lower() in SUB_MODIFIER_TOKENS
+                    for t, m in zip(toks, mapped)
+                ):
+                    langs.update(m for m in mapped if m)
+        return langs
+    except OSError:
+        return set()
+
+
+def determine_status(size_bytes, audio_streams, subtitle_streams,
+                     filepath=None, media_type=None):
     parts = []
     # Read thresholds from runtime config (falls back to env-var constants)
     try:
@@ -482,11 +561,16 @@ def determine_status(size_bytes, audio_streams, subtitle_streams):
     active = [s for s in audio_streams + subtitle_streams if s.get('action') != 'drop']
     if any(not s.get('lang') for s in active):
         parts.append('REMUX')
-    # Flag if any required subtitle language is not present
+    # Flag if any required subtitle language is not present — but first count
+    # external sidecar subtitles (Movie.spa.srt) as available languages. The
+    # directory is only scanned when an embedded track is actually missing.
     active_subs = [s for s in subtitle_streams if s.get('action') != 'drop']
     active_sub_langs = {normalize_lang(s.get('lang', '')) for s in active_subs}
     if not required_subs.issubset(active_sub_langs):
-        parts.append('MISSING LANG')
+        if filepath:
+            active_sub_langs = active_sub_langs | sidecar_sub_langs(filepath, media_type)
+        if not required_subs.issubset(active_sub_langs):
+            parts.append('MISSING LANG')
     return ' | '.join(parts) if parts else 'OK'
 
 
@@ -1052,8 +1136,9 @@ def analyze_iso(filepath):
     for t in subtitle_streams:
         t['action'] = 'keep' if id(t) in keep_subs else 'drop'
 
-    status = determine_status(size_bytes, audio_streams, subtitle_streams)
     media_type, show_name, season_episode = detect_media_type(filepath)
+    status = determine_status(size_bytes, audio_streams, subtitle_streams,
+                              filepath, media_type)
 
     return {
         'filepath':           filepath,
@@ -2762,7 +2847,10 @@ def analyze_file(filepath):
 
         audio_streams = json.loads(info['audio_tracks'])    if info else []
         sub_streams   = json.loads(info['subtitle_tracks']) if info else []
-        status_str    = determine_status(size, audio_streams, sub_streams)
+        status_str    = determine_status(
+            size, audio_streams, sub_streams,
+            filepath, info.get('media_type') if info else None,
+        )
 
         # Rich new-file notification
         codec_str  = (f"{info['video_codec'].upper()} "
@@ -3176,20 +3264,24 @@ def get_media_stats():
 def recalculate_status():
     """
     Re-run determine_status() for every row using already-stored track data.
-    Much faster than a full scan — no ffprobe, no filesystem access.
+    Much faster than a full scan — no ffprobe (only a light sidecar-subtitle
+    directory scan for rows that are otherwise missing a required language).
     """
     updated = 0
     with db() as conn:
         # Exclude UNPROCESSABLE rows: they have no stream data, so determine_status()
         # would return 'OK' and silently erase the Alerts flag.
         rows = conn.execute(
-            "SELECT id, size_bytes, audio_tracks, subtitle_tracks FROM media_files "
-            "WHERE status IS NULL OR status != 'UNPROCESSABLE'"
+            "SELECT id, size_bytes, audio_tracks, subtitle_tracks, filepath, media_type "
+            "FROM media_files WHERE status IS NULL OR status != 'UNPROCESSABLE'"
         ).fetchall()
         for row in rows:
             audio_streams = json.loads(row['audio_tracks']    or '[]')
             sub_streams   = json.loads(row['subtitle_tracks'] or '[]')
-            new_status    = determine_status(row['size_bytes'] or 0, audio_streams, sub_streams)
+            new_status    = determine_status(
+                row['size_bytes'] or 0, audio_streams, sub_streams,
+                row['filepath'], row['media_type'],
+            )
             conn.execute(
                 'UPDATE media_files SET status=? WHERE id=?',
                 (new_status, row['id']),
@@ -3408,7 +3500,8 @@ def assign_tracks(file_id):
                 t['lang_assigned'] = True
             t['action'] = assignment.get('action', 'keep')
 
-    new_status = determine_status(row['size_bytes'], audio_tracks, subtitle_tracks)
+    new_status = determine_status(row['size_bytes'], audio_tracks, subtitle_tracks,
+                                  row['filepath'], row['media_type'])
 
     with db() as conn:
         conn.execute(
@@ -3682,12 +3775,11 @@ def list_external_subs(file_id):
         return jsonify({'error': 'File not found'}), 404
 
     directory = Path(mf['filepath']).parent
-    SUB_EXTS  = {'.srt', '.ass', '.ssa', '.vtt', '.sub'}
 
     subs = []
     try:
         for f in sorted(directory.iterdir()):
-            if f.is_file() and f.suffix.lower() in SUB_EXTS:
+            if f.is_file() and f.suffix.lower() in SIDECAR_SUB_EXTS:
                 subs.append({'filename': f.name, 'path': str(f), 'ext': f.suffix.lower()})
     except OSError as e:
         return jsonify({'error': str(e)}), 500
