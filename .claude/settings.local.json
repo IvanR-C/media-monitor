@@ -4,7 +4,14 @@
       "Bash(cp -r \"/c/Users/Ivan/Downloads/zip_extract/.\" \"/c/Users/Ivan/Docs/Projects/media-monitor/.claude/worktrees/infallible-goldwasser/frontend/\")",
       "Bash(echo \"Exit: $?\")",
       "Bash(docker push:*)",
-      "Bash(docker build:*)"
+      "Bash(docker build:*)",
+      "Bash(npx tsc *)",
+      "Bash(python -c \"import pytest; print\\(pytest.__version__\\)\")",
+      "Bash(pip install *)",
+      "Bash(python -m pytest tests/ -v)",
+      "Bash(python -m pytest tests/ -q)",
+      "Bash(pnpm tsc *)",
+      "Bash(pnpm exec *)"
     ]
   }
 }
