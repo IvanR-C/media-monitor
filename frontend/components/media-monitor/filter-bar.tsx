@@ -44,26 +44,42 @@ export function FilterBar({ value, onChange, counts, isScanning, scanProgress, l
 
       <div className="flex flex-wrap items-center gap-2">
         <div className="flex flex-wrap gap-1">
-          {filters.map(filter => (
-            <button
-              key={filter.key}
-              onClick={() => onChange(filter.key)}
-              className={cn(
-                "inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition-all",
-                value === filter.key
-                  ? "bg-accent/15 text-accent"
-                  : "text-muted-foreground hover:bg-secondary hover:text-foreground"
-              )}
-            >
-              {filter.label}
-              <span className={cn(
-                "tabular-nums",
-                value === filter.key ? "text-accent/70" : "text-muted-foreground/70"
-              )}>
-                {counts[filter.key]}
-              </span>
-            </button>
-          ))}
+          {filters.map(filter => {
+            const count    = counts[filter.key] ?? 0
+            // "All" is always clickable so users can recover from an empty
+            // filter; every other pill is disabled when nothing matches.
+            const disabled = filter.key !== "all" && count === 0
+            const active   = value === filter.key
+            return (
+              <button
+                key={filter.key}
+                onClick={() => !disabled && onChange(filter.key)}
+                disabled={disabled}
+                aria-pressed={active}
+                title={disabled ? "No files match this filter" : undefined}
+                className={cn(
+                  "inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition-all",
+                  active
+                    ? "bg-accent/15 text-accent"
+                    : disabled
+                    ? "cursor-not-allowed text-muted-foreground/40"
+                    : "text-muted-foreground hover:bg-secondary hover:text-foreground",
+                )}
+              >
+                {filter.label}
+                <span className={cn(
+                  "tabular-nums",
+                  active
+                    ? "text-accent/70"
+                    : disabled
+                    ? "text-muted-foreground/30"
+                    : "text-muted-foreground/70",
+                )}>
+                  {count}
+                </span>
+              </button>
+            )
+          })}
         </div>
 
         {/* Scan button + live/static scan info */}

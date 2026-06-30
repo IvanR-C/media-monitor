@@ -23,9 +23,11 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application files
+# Copy application files. Strip CR in case the script was checked out
+# on Windows with autocrlf — otherwise the kernel tries to load
+# /bin/bash\r as the interpreter and the container exits immediately.
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 COPY app.py .
 COPY templates/ templates/
 

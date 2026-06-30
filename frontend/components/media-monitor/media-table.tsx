@@ -42,13 +42,29 @@ import {
   ScanLine,
   FileVideo,
   Subtitles,
+  CheckCircle2,
+  AlertTriangle,
+  Wrench,
+  Search,
+  Disc,
 } from "lucide-react";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import { Skeleton } from "@/components/ui/skeleton";
 import type {
   MediaFile,
   MediaType,
   AudioTrack,
   SubtitleTrack,
 } from "./media-library-tab";
+import {
+  TRANSLATE_STATUS_LABEL,
+  TRANSLATE_PHASE_COUNT,
+  translatePhaseIndex,
+} from "./translate-status";
 
 const IMAGE_CODECS = new Set([
   "hdmv_pgs_subtitle",
@@ -104,6 +120,9 @@ interface MediaTableProps {
   onScanLibrary: () => void;
   mediaType: MediaType;
   loading?: boolean;
+  /** Unfiltered library size, used to distinguish "library empty" from "filter empty". */
+  totalFiles?: number;
+  isScanning?: boolean;
 }
 
 export function MediaTable({
@@ -122,6 +141,8 @@ export function MediaTable({
   onScanLibrary,
   mediaType,
   loading,
+  totalFiles,
+  isScanning,
 }: MediaTableProps) {
   const [expandedShows, setExpandedShows] = useState<Set<string>>(new Set());
   const [expandedSeasons, setExpandedSeasons] = useState<Set<string>>(
@@ -233,39 +254,59 @@ export function MediaTable({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sortedFiles, mediaType]);
 
-  if (loading) {
-    return (
-      <div className="flex h-full flex-col items-center justify-center rounded-lg border border-dashed border-border/50 bg-card/30">
-        <div className="text-sm text-muted-foreground">Loading...</div>
-      </div>
-    );
-  }
-
-  if (files.length === 0) {
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-4 rounded-lg border border-dashed border-border/50 bg-card/30">
-        <div className="flex flex-col items-center gap-2">
-          <FileVideo className="h-10 w-10 text-muted-foreground/30" />
-          <div className="text-sm font-medium text-foreground">
-            Your library is empty
+  // Empty states are only shown after the first load completes. While loading
+  // we render skeleton rows inside the table frame so headers don't shift.
+  if (!loading && files.length === 0) {
+    const isLibraryEmpty = (totalFiles ?? 0) === 0;
+    if (isLibraryEmpty) {
+      return (
+        <div className="flex h-full flex-col items-center justify-center gap-4 rounded-lg border border-dashed border-border/50 bg-card/30 px-6 py-10 text-center">
+          <div className="flex flex-col items-center gap-2">
+            <FileVideo className="h-12 w-12 text-muted-foreground/30" />
+            <div className="text-base font-medium text-foreground">
+              Your library is empty
+            </div>
+            <div className="max-w-sm text-xs text-muted-foreground">
+              Scan your watch directory to index media files. New files will be
+              picked up automatically once they land.
+            </div>
           </div>
-          <div className="text-xs text-muted-foreground">
-            Scan your watch directory to index media files
-          </div>
+          <Button
+            onClick={onScanLibrary}
+            className="gap-2"
+            size="sm"
+            disabled={isScanning}
+          >
+            {isScanning ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <ScanLine className="h-4 w-4" />
+            )}
+            {isScanning ? "Scanning…" : "Scan Library"}
+          </Button>
         </div>
-        <Button
-          onClick={onScanLibrary}
-          className="gap-2"
-          size="sm"
-        >
-          <ScanLine className="h-4 w-4" />
-          Scan Library
-        </Button>
+      );
+    }
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-border/50 bg-card/30 px-6 py-10 text-center">
+        <Search className="h-9 w-9 text-muted-foreground/30" />
+        <div className="text-sm font-medium text-foreground">
+          No files match the current filters
+        </div>
+        <div className="max-w-sm text-xs text-muted-foreground">
+          Try clearing the search box or switching the filter pill above to
+          “All”.
+        </div>
       </div>
     );
   }
 
   const renderRows = () => {
+    if (loading && files.length === 0) {
+      return Array.from({ length: 8 }).map((_, i) => (
+        <SkeletonTableRow key={`sk-${i}`} />
+      ));
+    }
     if (mediaType !== "show") {
       return sortedFiles.map((file) => (
         <MediaTableRow
@@ -419,6 +460,7 @@ export function MediaTable({
               onEnqueue={() => onEnqueue(ep.id)}
               onTranslate={onTranslate}
               onOpenAssignDialog={setAssignDialogFile}
+              onOpenMuxDialog={setMuxDialogFile}
               isEpisode
             />,
           );
@@ -563,7 +605,11 @@ export function MediaTable({
 
       {/* ── Mobile card list (<sm) ────────────────────────────────────────────── */}
       <div className="flex-1 overflow-auto sm:hidden">
-        {mediaType !== "show"
+        {loading && files.length === 0
+          ? Array.from({ length: 5 }).map((_, i) => (
+              <SkeletonMobileCard key={`sk-m-${i}`} />
+            ))
+          : mediaType !== "show"
           ? sortedFiles.map((file) => (
               <MobileFileCard
                 key={file.id}
@@ -702,6 +748,7 @@ export function MediaTable({
                                   onEnqueue={() => onEnqueue(ep.id)}
                                   onTranslate={onTranslate}
                                   onOpenAssignDialog={setAssignDialogFile}
+                                  onOpenMuxDialog={setMuxDialogFile}
                                   indent
                                   isEpisode
                                 />
@@ -812,7 +859,8 @@ function MobileFileCard({
           </div>
         </div>
 
-        {/* Action menu */}
+        {/* Action menu — none apply to unprocessable disc images */}
+        {file.status !== "UNPROCESSABLE" && (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0">
@@ -864,6 +912,7 @@ function MobileFileCard({
             )}
           </DropdownMenuContent>
         </DropdownMenu>
+        )}
       </div>
     </div>
   );
@@ -1015,6 +1064,8 @@ function MediaTableRow({
         <RowStatus file={file} />
       </td>
       <td className="px-2 py-2">
+        {/* No actions apply to unprocessable disc images */}
+        {file.status !== "UNPROCESSABLE" && (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button variant="ghost" size="icon" className="h-6 w-6">
@@ -1057,6 +1108,7 @@ function MediaTableRow({
             )}
           </DropdownMenuContent>
         </DropdownMenu>
+        )}
       </td>
     </tr>
   );
@@ -1064,17 +1116,47 @@ function MediaTableRow({
 
 // ── Row status (shows live progress when encoding/translating) ─────────────────
 
-const TRANSLATE_LABEL: Record<string, string> = {
-  pending: "Queued",
-  extracting: "Extracting",
-  ocr: "OCR",
-  translating: "Translating",
-  muxing: "Muxing",
-};
+const BADGE_BASE =
+  "inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded px-1.5 py-0.5 text-[10px] font-medium";
+
+function StatusBadge({
+  tone,
+  icon: Icon,
+  label,
+  tooltip,
+}: {
+  tone: string;
+  icon: React.ComponentType<{ className?: string }>;
+  label: React.ReactNode;
+  tooltip: string;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className={cn(BADGE_BASE, tone)}>
+          <Icon className="h-3 w-3" />
+          {label}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent side="top" className="max-w-[260px] text-[11px]">
+        {tooltip}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
 
 function RowStatus({ file }: { file: MediaFile }) {
-  const base =
-    "inline-flex shrink-0 items-center whitespace-nowrap rounded px-1.5 py-0.5 text-[10px] font-medium";
+  // Disc images can't be analyzed or encoded — surfaced under Alerts.
+  if (file.status === "UNPROCESSABLE") {
+    return (
+      <StatusBadge
+        tone="bg-purple-500/15 text-purple-400"
+        icon={Disc}
+        label="ISO"
+        tooltip="Disc image (.iso/.img) — cannot be analyzed or encoded. Needs manual handling."
+      />
+    );
+  }
 
   // Live encode / remux progress
   if (file.encode_status === "encoding") {
@@ -1094,50 +1176,86 @@ function RowStatus({ file }: { file: MediaFile }) {
     );
   }
 
-  // Live translate progress
-  if (file.translate_status && TRANSLATE_LABEL[file.translate_status]) {
-    const label = TRANSLATE_LABEL[file.translate_status];
+  // Live translate progress — show phase index (e.g. "OCR · 2/4") so users
+  // can see how far along the multi-step pipeline a file is at a glance.
+  if (
+    file.translate_status &&
+    file.translate_status !== "done" &&
+    file.translate_status !== "failed" &&
+    file.translate_status !== "cancelled"
+  ) {
+    const label =
+      TRANSLATE_STATUS_LABEL[file.translate_status] ?? file.translate_status;
+    const phase = translatePhaseIndex(file.translate_status);
     const pct =
       file.translate_progress != null && file.translate_progress > 0
         ? `${Math.round(file.translate_progress)}%`
+        : "";
+    const detail = pct
+      ? pct
+      : phase != null
+        ? `${phase}/${TRANSLATE_PHASE_COUNT}`
         : "";
     return (
       <div className="flex items-center gap-1.5">
         <Loader2 className="h-3 w-3 animate-spin text-accent" />
         <span className="text-[10px] text-accent">
           {label}
-          {pct ? ` ${pct}` : ""}
+          {detail ? ` · ${detail}` : ""}
         </span>
       </div>
     );
   }
 
   if (file.encode_status === "queued") {
-    const label = file.encode_job_type === "remux" ? "Remux Queued" : "Queued";
+    const isRemux = file.encode_job_type === "remux";
     return (
-      <span className={cn(base, "bg-secondary text-muted-foreground")}>
-        {label}
-      </span>
+      <StatusBadge
+        tone="bg-secondary text-muted-foreground"
+        icon={Loader2}
+        label={isRemux ? "Remux Queued" : "Queued"}
+        tooltip="Waiting in the encode queue. Jobs run sequentially based on worker availability."
+      />
     );
   }
-  if (file.encode_status === "done")
-    return <span className={cn(base, "bg-success/20 text-success")}>Done</span>;
-  if (file.encode_status === "failed")
+  if (file.encode_status === "done") {
     return (
-      <span className={cn(base, "bg-destructive/20 text-destructive")}>
-        Failed
-      </span>
+      <StatusBadge
+        tone="bg-success/20 text-success"
+        icon={CheckCircle2}
+        label="Done"
+        tooltip="Last job completed successfully."
+      />
     );
+  }
+  if (file.encode_status === "failed") {
+    return (
+      <StatusBadge
+        tone="bg-destructive/20 text-destructive"
+        icon={AlertTriangle}
+        label="Failed"
+        tooltip="Last job failed. Open the queue or app logs to see the error."
+      />
+    );
+  }
 
   const hasReEncode = file.status?.includes("RE-ENCODE");
   const hasRemux = file.status?.includes("REMUX");
   const hasMissingLang = file.status?.includes("MISSING LANG");
 
   if (!hasReEncode && !hasRemux && !hasMissingLang) {
-    if (file.status === "OK")
-      return <span className={cn(base, "bg-success/20 text-success")}>OK</span>;
+    if (file.status === "OK") {
+      return (
+        <StatusBadge
+          tone="bg-success/20 text-success"
+          icon={CheckCircle2}
+          label="OK"
+          tooltip="No action needed — tracks are tagged and the file is within size limits."
+        />
+      );
+    }
     return (
-      <span className={cn(base, "bg-secondary text-muted-foreground")}>
+      <span className={cn(BADGE_BASE, "bg-secondary text-muted-foreground")}>
         {file.status}
       </span>
     );
@@ -1146,17 +1264,28 @@ function RowStatus({ file }: { file: MediaFile }) {
   return (
     <div className="flex flex-wrap gap-0.5">
       {hasReEncode && (
-        <span className={cn(base, "bg-destructive/20 text-destructive")}>
-          Re-encode
-        </span>
+        <StatusBadge
+          tone="bg-destructive/20 text-destructive"
+          icon={AlertTriangle}
+          label="Re-encode"
+          tooltip="File is larger than the configured threshold. Re-encoding will shrink it while preserving quality."
+        />
       )}
       {hasRemux && (
-        <span className={cn(base, "bg-warning/20 text-warning")}>Remux</span>
+        <StatusBadge
+          tone="bg-warning/20 text-warning"
+          icon={Wrench}
+          label="Remux"
+          tooltip="One or more tracks are missing language tags. A fast remux rewrites the container without re-encoding video."
+        />
       )}
       {hasMissingLang && (
-        <span className={cn(base, "bg-sky-500/15 text-sky-400")}>
-          Missing Sub
-        </span>
+        <StatusBadge
+          tone="bg-sky-500/15 text-sky-400"
+          icon={Languages}
+          label="Missing Sub"
+          tooltip="No subtitle track in your target language. Translate an existing track or mux a subtitle file."
+        />
       )}
     </div>
   );
@@ -1292,6 +1421,10 @@ function TrackAssignDialog({
         action: subState.get(t.sub_idx)?.action ?? "keep",
       }));
       await onSave(file, audio, subs);
+    } catch {
+      // Parent already toasts the error; we just absorb the rejection so it
+      // doesn't surface as an unhandled-rejection and so the dialog stays
+      // open with the user's edits intact for retry.
     } finally {
       setSaving(false);
     }
@@ -1406,15 +1539,22 @@ function MuxSubtitleDialog({
     setSelectedLang("eng");
     setError(null);
     setLoadingList(true);
-    fetch(`/api/media/${file.id}/external-subs`)
+    const ac = new AbortController();
+    fetch(`/api/media/${file.id}/external-subs`, { signal: ac.signal })
       .then((r) => r.json())
       .then((data) => {
         const subs: string[] = (data.subs ?? []).map((s: { path: string }) => s.path);
         setExternalSubs(subs);
         if (subs.length > 0) setSelectedSub(subs[0]);
       })
-      .catch(() => setError("Failed to load subtitle files"))
-      .finally(() => setLoadingList(false));
+      .catch((e) => {
+        if (e?.name === "AbortError") return;
+        setError("Failed to load subtitle files");
+      })
+      .finally(() => {
+        if (!ac.signal.aborted) setLoadingList(false);
+      });
+    return () => ac.abort();
   }, [file, open]);
 
   if (!file) return null;
@@ -1435,6 +1575,7 @@ function MuxSubtitleDialog({
       onMuxed();
     } catch (e: any) {
       setError(e.message ?? "Failed to queue mux job");
+    } finally {
       setMuxing(false);
     }
   };
@@ -1443,15 +1584,18 @@ function MuxSubtitleDialog({
 
   return (
     <Dialog open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
-      <DialogContent className="max-w-md">
-        <DialogHeader>
+      {/* min-w-0 + overflow-hidden lets grid children truncate instead of
+          forcing the dialog wider than max-w-md when folder names or sub
+          paths are long. */}
+      <DialogContent className="max-w-md min-w-0 overflow-hidden">
+        <DialogHeader className="min-w-0">
           <DialogTitle>Mux Subtitle File</DialogTitle>
-          <DialogDescription className="truncate text-xs">
+          <DialogDescription className="block truncate text-xs" title={file.folder_name ?? undefined}>
             {file.folder_name}
           </DialogDescription>
         </DialogHeader>
 
-        <div className="mt-1 space-y-4">
+        <div className="mt-1 min-w-0 space-y-4">
           {loadingList ? (
             <div className="flex items-center justify-center py-6 gap-2 text-sm text-muted-foreground">
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -1472,7 +1616,7 @@ function MuxSubtitleDialog({
                     <label
                       key={sub}
                       className={cn(
-                        "flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm transition-colors",
+                        "flex w-full min-w-0 cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm transition-colors",
                         selectedSub === sub
                           ? "bg-accent/10 text-foreground"
                           : "text-muted-foreground hover:bg-secondary/50",
@@ -1484,9 +1628,9 @@ function MuxSubtitleDialog({
                         value={sub}
                         checked={selectedSub === sub}
                         onChange={() => setSelectedSub(sub)}
-                        className="accent-primary"
+                        className="shrink-0 accent-primary"
                       />
-                      <span className="truncate font-mono text-[11px]" title={sub}>
+                      <span className="min-w-0 flex-1 truncate font-mono text-[11px]" title={sub}>
                         {basename(sub)}
                       </span>
                     </label>
@@ -1519,13 +1663,14 @@ function MuxSubtitleDialog({
           )}
         </div>
 
-        <DialogFooter className="mt-4">
-          <Button variant="ghost" onClick={onClose} disabled={muxing}>
+        <DialogFooter className="mt-4 min-w-0">
+          <Button variant="ghost" onClick={onClose} disabled={muxing} className="shrink-0">
             Cancel
           </Button>
           <Button
             onClick={handleMux}
             disabled={muxing || !selectedSub || externalSubs.length === 0}
+            className="shrink-0"
           >
             {muxing ? (
               <>
@@ -1539,5 +1684,59 @@ function MuxSubtitleDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+// ── Loading skeletons ──────────────────────────────────────────────────────────
+// Rendered inside the live table frame while the first batch of data loads, so
+// headers and column widths don't shift when the real rows arrive.
+
+function SkeletonTableRow() {
+  return (
+    <tr className="border-b border-border/10">
+      <td className="px-3 py-3">
+        <Skeleton className="h-4 w-4 rounded-sm" />
+      </td>
+      <td className="px-3 py-3">
+        <Skeleton className="h-3 w-[70%]" />
+      </td>
+      <td className="hidden px-3 py-3 lg:table-cell">
+        <Skeleton className="h-3 w-[80%]" />
+      </td>
+      <td className="px-3 py-3">
+        <Skeleton className="h-3 w-12" />
+      </td>
+      <td className="hidden px-3 py-3 md:table-cell">
+        <Skeleton className="h-3 w-10" />
+      </td>
+      <td className="hidden px-3 py-3 lg:table-cell">
+        <Skeleton className="h-3 w-12" />
+      </td>
+      <td className="hidden px-3 py-3 xl:table-cell">
+        <Skeleton className="h-3 w-8" />
+      </td>
+      <td className="hidden px-3 py-3 xl:table-cell">
+        <Skeleton className="h-3 w-8" />
+      </td>
+      <td className="px-3 py-3">
+        <Skeleton className="h-4 w-20 rounded" />
+      </td>
+      <td className="px-2 py-3">
+        <Skeleton className="h-4 w-4 rounded-sm" />
+      </td>
+    </tr>
+  );
+}
+
+function SkeletonMobileCard() {
+  return (
+    <div className="flex items-center gap-3 border-b border-border/20 px-3 py-3">
+      <Skeleton className="h-4 w-4 shrink-0 rounded-sm" />
+      <div className="flex flex-1 flex-col gap-2">
+        <Skeleton className="h-3 w-3/4" />
+        <Skeleton className="h-2.5 w-1/2" />
+      </div>
+      <Skeleton className="h-5 w-14 rounded" />
+    </div>
   );
 }
