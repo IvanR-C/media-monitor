@@ -8,8 +8,8 @@ Media Monitor can translate subtitle tracks to **Cuban Spanish** using the OpenA
 
 | Requirement | Notes |
 |---|---|
-| OpenAI API key | Set in the Dashboard or via `OPENAI_API_KEY` env var |
-| OpenAI model | Default `gpt-4o-mini`; configurable in the Dashboard |
+| OpenAI API key | Set in Settings or via `OPENAI_API_KEY` env var |
+| OpenAI model | Default `gpt-4o-mini`; configurable in Settings |
 | Tesseract OCR | Pre-installed in the Docker image (`tesseract-ocr-all`) — no action needed |
 
 > The target translation language is currently hardcoded to **Cuban Spanish**. Configurable target language support is planned for a future release.
@@ -27,7 +27,7 @@ Media Monitor can translate subtitle tracks to **Cuban Spanish** using the OpenA
 
 ## How to Translate a Subtitle
 
-1. Open the **Media Library** tab
+1. Open the **Library** view
 2. Find the file — files with `RE-ENCODE` or `OK` status often have multiple subtitle tracks
 3. Click the **···** menu on the row
 4. You will see one entry per translatable subtitle track:
@@ -129,7 +129,7 @@ Large subtitle files are automatically split into chunks of up to **350 blocks**
 ## Troubleshooting
 
 **"OpenAI API key not configured":**
-Set it in the Dashboard tab or via the `OPENAI_API_KEY` environment variable.
+Set it in Settings or via the `OPENAI_API_KEY` environment variable.
 
 **Translation job stuck on `ocr`:**
 The OCR phase processes one frame at a time. A 2-hour movie with 2000 subtitle frames may take several minutes. Watch the progress detail in the queue panel — it shows "OCR frame N/N".

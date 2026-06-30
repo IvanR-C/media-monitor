@@ -5,8 +5,7 @@ import { Loader2 } from "lucide-react"
 import { toast } from "sonner"
 
 import { Header } from "@/components/media-monitor/header"
-import { TabNav } from "@/components/media-monitor/tab-nav"
-import { DashboardTab } from "@/components/media-monitor/dashboard-tab"
+import { SettingsTab } from "@/components/media-monitor/settings-tab"
 import { MediaLibraryTab } from "@/components/media-monitor/media-library-tab"
 import { Toaster } from "@/components/ui/sonner"
 
@@ -19,7 +18,7 @@ export type ScanState = {
 }
 
 export default function MediaMonitor() {
-  const [activeTab, setActiveTab] = useState<"dashboard" | "media">("dashboard")
+  const [activeView, setActiveView] = useState<"library" | "settings">("library")
 
   // ── Scan state lives here so it survives tab switches ────────────────────────
   const [isScanning, setIsScanning]       = useState(false)
@@ -103,12 +102,11 @@ export default function MediaMonitor() {
 
   return (
     <div className="min-h-screen bg-background">
-      <div className="mx-auto max-w-[1800px] px-4 py-6 sm:px-6">
-        <Header />
-        <TabNav activeTab={activeTab} onTabChange={setActiveTab} isScanning={isScanning} />
+      <Header activeView={activeView} onViewChange={setActiveView} isScanning={isScanning} />
 
-        {/* Cross-tab scan banner — visible whenever a scan runs outside the media tab */}
-        {isScanning && activeTab !== "media" && (
+      <main className="mx-auto max-w-[1800px] px-4 pb-6 pt-4 sm:px-6">
+        {/* Cross-view scan banner — visible whenever a scan runs outside the library view */}
+        {isScanning && activeView !== "library" && (
           <div className="mb-6 flex items-center gap-2.5 rounded-lg border border-accent/30 bg-accent/5 px-4 py-2.5 text-sm text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin text-accent" />
             <span>
@@ -119,10 +117,10 @@ export default function MediaMonitor() {
           </div>
         )}
 
-        {activeTab === "dashboard" && <DashboardTab />}
-        {activeTab === "media"     && <MediaLibraryTab scan={scanState} />}
-      </div>
-      <Toaster position="top-right" theme="dark" />
+        {activeView === "library"  && <MediaLibraryTab scan={scanState} />}
+        {activeView === "settings" && <SettingsTab />}
+      </main>
+      <Toaster position="bottom-right" theme="dark" />
     </div>
   )
 }

@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useMemo, useEffect, useCallback, useRef } from "react";
-import { LibraryStats } from "./library-stats";
 import { MediaTypeSwitch } from "./media-type-switch";
 import { FilterBar } from "./filter-bar";
 import { MediaTable } from "./media-table";
@@ -443,11 +442,12 @@ export function MediaLibraryTab({ scan }: MediaLibraryTabProps) {
   const clearSelection = () => setSelectedIds(new Set());
 
   return (
-    <div className="flex min-h-[420px] flex-col md:h-[calc(100vh-200px)]">
-      <LibraryStats stats={stats} />
-
-      <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <MediaTypeSwitch value={mediaType} onChange={setMediaType} />
+    <div className="flex min-h-[420px] flex-col md:h-[calc(100vh-152px)]">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-4">
+          <MediaTypeSwitch value={mediaType} onChange={setMediaType} />
+          <LibrarySummary stats={stats} />
+        </div>
         <FilterBar
           value={filter}
           onChange={setFilter}
@@ -490,6 +490,32 @@ export function MediaLibraryTab({ scan }: MediaLibraryTabProps) {
         <CombinedQueue />
         <AppLogs show={showLogs} onToggle={() => setShowLogs(!showLogs)} />
       </div>
+    </div>
+  );
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1e9) return `${(bytes / 1e6).toFixed(0)} MB`;
+  if (bytes < 1e12) return `${(bytes / 1e9).toFixed(1)} GB`;
+  return `${(bytes / 1e12).toFixed(2)} TB`;
+}
+
+function LibrarySummary({ stats }: { stats: LibraryStatsData }) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+      <span>
+        Total files{" "}
+        <span className="font-medium text-foreground">
+          {stats.total_files.toLocaleString()}
+        </span>
+      </span>
+      <span className="hidden h-3 w-px bg-border/70 sm:block" />
+      <span>
+        Size{" "}
+        <span className="font-medium text-foreground">
+          {formatBytes(stats.total_bytes)}
+        </span>
+      </span>
     </div>
   );
 }
