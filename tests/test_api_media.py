@@ -15,6 +15,26 @@ def test_media_list_empty(client):
     assert body == {"files": [], "total": 0}
 
 
+def test_common_media_extensions_are_supported(app_module):
+    expected = {
+        ".mkv",
+        ".mp4",
+        ".avi",
+        ".mov",
+        ".m4v",
+        ".m2ts",
+        ".mts",
+        ".mpg",
+        ".mpeg",
+        ".vob",
+        ".webm",
+        ".wmv",
+        ".flv",
+        ".3gp",
+    }
+    assert expected.issubset(set(app_module.VIDEO_EXTENSIONS))
+
+
 def test_media_list_filters_by_type(client, insert_media):
     insert_media(filename="movie-a.mkv", media_type="movie")
     insert_media(filename="show-b.mkv", media_type="show", filepath="/watch/shows/show-b.mkv")

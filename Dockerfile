@@ -2,7 +2,12 @@ FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install Python 3.11, ffmpeg, tesseract (all language packs), and utilities
+# Install Python 3.11, ffmpeg, tesseract (all language packs), and utilities.
+# Disc-image tooling:
+#   lsdvd          — enumerate DVD titles/tracks straight from an .iso
+#   dvdbackup      — extract the main-title VOBs for ripping (CSS-decrypted)
+#   libarchive-tools — bsdtar, used to peek at an ISO's top-level dirs
+#   libdvd-pkg     — builds/installs libdvdcss2 so CSS-protected DVDs are readable
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11 \
     python3-pip \
@@ -12,6 +17,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     coreutils \
     tesseract-ocr \
     tesseract-ocr-all \
+    lsdvd \
+    dvdbackup \
+    libarchive-tools \
+    libdvd-pkg \
+    build-essential \
+    fakeroot \
+    wget \
+    && dpkg-reconfigure -f noninteractive libdvd-pkg \
     && ln -sf /usr/bin/python3.11 /usr/bin/python3 \
     && ln -sf /usr/bin/python3 /usr/bin/python \
     && rm -rf /var/lib/apt/lists/*

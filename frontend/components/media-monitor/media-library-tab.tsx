@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useMemo, useEffect, useCallback, useRef } from "react";
-import { LibraryStats } from "./library-stats";
 import { MediaTypeSwitch } from "./media-type-switch";
 import { FilterBar } from "./filter-bar";
 import { MediaTable } from "./media-table";
@@ -34,7 +33,7 @@ export interface MediaFile {
   status: string;
   encode_status?: string;
   encode_progress?: number;
-  encode_job_type?: "encode" | "remux";
+  encode_job_type?: "encode" | "remux" | "rip";
   translate_status?: string;
   translate_progress?: number;
   poster_url?: string;
@@ -42,6 +41,10 @@ export interface MediaFile {
   show_name?: string;
   season_episode?: string;
   has_sibling_videos?: number;
+  // Disc images (.iso/.img): set when the file is an analyzable DVD/Blu-ray.
+  disc_type?: "dvd" | "bluray" | null;
+  disc_title?: number | null;
+  disc_playlist?: number | null;
 }
 
 export interface AudioTrack {
@@ -286,6 +289,22 @@ export function MediaLibraryTab({ scan }: MediaLibraryTabProps) {
     }
   };
 
+  const handleRipDisc = async (id: number) => {
+    try {
+      const r = await fetch(`/api/media/${id}/rip`, { method: "POST" });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok) {
+        toast.success(`Rip queued → ${data.output}`);
+        setFilter("queued");
+        fetchMedia(true);
+      } else {
+        toast.error(data.error || "Failed to queue rip");
+      }
+    } catch {
+      toast.error("Failed to queue rip");
+    }
+  };
+
   const handleTranslateSingle = async (id: number, subIdx: number) => {
     try {
       const r = await fetch(`/api/media/${id}/translate-subtitle`, {
@@ -331,6 +350,9 @@ export function MediaLibraryTab({ scan }: MediaLibraryTabProps) {
       toast.warning(
         data.error || "Languages saved but remux could not be queued",
       );
+    } else if (data.status === "saved") {
+      // Disc image: choices saved, no remux (rip applies them instead)
+      toast.success("Track selection saved — use Rip to apply");
     } else {
       toast.success("Languages saved — remux queued to apply changes to file");
     }
@@ -420,11 +442,12 @@ export function MediaLibraryTab({ scan }: MediaLibraryTabProps) {
   const clearSelection = () => setSelectedIds(new Set());
 
   return (
-    <div className="flex min-h-[420px] flex-col md:h-[calc(100vh-200px)]">
-      <LibraryStats stats={stats} />
-
-      <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <MediaTypeSwitch value={mediaType} onChange={setMediaType} />
+    <div className="flex min-h-[420px] flex-col md:h-[calc(100vh-152px)]">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-4">
+          <MediaTypeSwitch value={mediaType} onChange={setMediaType} />
+          <LibrarySummary stats={stats} />
+        </div>
         <FilterBar
           value={filter}
           onChange={setFilter}
@@ -449,6 +472,7 @@ export function MediaLibraryTab({ scan }: MediaLibraryTabProps) {
           onClearSelection={clearSelection}
           onEnqueue={handleEnqueueSingle}
           onEnqueueSelected={handleEnqueueSelected}
+          onRip={handleRipDisc}
           onTranslate={handleTranslateSingle}
           onTranslateSelected={handleTranslateSelected}
           onAssignTracks={handleAssignTracks}
@@ -466,6 +490,32 @@ export function MediaLibraryTab({ scan }: MediaLibraryTabProps) {
         <CombinedQueue />
         <AppLogs show={showLogs} onToggle={() => setShowLogs(!showLogs)} />
       </div>
+    </div>
+  );
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1e9) return `${(bytes / 1e6).toFixed(0)} MB`;
+  if (bytes < 1e12) return `${(bytes / 1e9).toFixed(1)} GB`;
+  return `${(bytes / 1e12).toFixed(2)} TB`;
+}
+
+function LibrarySummary({ stats }: { stats: LibraryStatsData }) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+      <span>
+        Total files{" "}
+        <span className="font-medium text-foreground">
+          {stats.total_files.toLocaleString()}
+        </span>
+      </span>
+      <span className="hidden h-3 w-px bg-border/70 sm:block" />
+      <span>
+        Size{" "}
+        <span className="font-medium text-foreground">
+          {formatBytes(stats.total_bytes)}
+        </span>
+      </span>
     </div>
   );
 }
