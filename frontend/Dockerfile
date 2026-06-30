@@ -1,18 +1,21 @@
-FROM node:20-slim AS deps
+FROM node:22-slim AS deps
 WORKDIR /app
-RUN npm install -g pnpm@latest
-COPY package.json pnpm-lock.yaml ./
+# Non-interactive build: pnpm aborts node_modules purges without a TTY otherwise.
+ENV CI=true
+RUN npm install -g pnpm@11
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 
-FROM node:20-slim AS builder
+FROM node:22-slim AS builder
 WORKDIR /app
-RUN npm install -g pnpm@latest
+ENV CI=true
+RUN npm install -g pnpm@11
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN pnpm build
 
-FROM node:20-slim AS runner
+FROM node:22-slim AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
