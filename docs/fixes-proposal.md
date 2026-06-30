@@ -348,11 +348,11 @@ If you want to keep the current sibling-video behavior, rename the filter to som
 
 Affected files:
 - [app.py](C:\Users\Ivan\Docs\Projects\media-monitor\app.py)
-- [frontend/components/media-monitor/dashboard-tab.tsx](C:\Users\Ivan\Docs\Projects\media-monitor\frontend\components\media-monitor\dashboard-tab.tsx)
+- [frontend/components/media-monitor/settings-tab.tsx](C:\Users\Ivan\Docs\Projects\media-monitor\frontend\components\media-monitor\settings-tab.tsx)
 
 Approximate lines:
 - Discord test route: 2154-2164
-- Dashboard handlers: 69-101
+- Settings handlers: 69-101
 
 Problem:
 - The backend returns success from the Discord test route even on non-2xx webhook responses.
@@ -388,8 +388,8 @@ Proposed fix:
 ```
 
 ```diff
---- a/frontend/components/media-monitor/dashboard-tab.tsx
-+++ b/frontend/components/media-monitor/dashboard-tab.tsx
+--- a/frontend/components/media-monitor/settings-tab.tsx
++++ b/frontend/components/media-monitor/settings-tab.tsx
 @@
    const handleSave = async () => {
      try {

@@ -29,7 +29,7 @@ deploy:
 
 ## How to Queue an Encode
 
-1. Open the **Media Library** tab
+1. Open the **Library** view
 2. Find the file you want to encode — files flagged `RE-ENCODE` are candidates
 3. Click the **···** menu on the row → **Queue Encode**
 4. The job appears in the **Encode Queue** panel at the bottom of the page
@@ -89,7 +89,7 @@ For audio, **only the highest-quality track per language** is kept. Quality rank
 
 ## Estimated Size
 
-For files not yet encoded, the Media Library table shows an estimated post-encode size in green (e.g. `→ 4.2 GB`). This estimate is calculated from the source bitrate, codec, resolution, and audio tracks — actual results will vary.
+For files not yet encoded, the Library table shows an estimated post-encode size in green (e.g. `→ 4.2 GB`). This estimate is calculated from the source bitrate, codec, resolution, and audio tracks — actual results will vary.
 
 ---
 

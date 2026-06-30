@@ -1,6 +1,6 @@
 # Media Library Browser
 
-The Media Library tab gives you a full view of every video file in your watch directory, with filtering, sorting, per-file actions, and live job queues.
+The Library view is the default screen when Media Monitor loads. It gives you a full view of every video file in your watch directory, with filtering, sorting, per-file actions, and live job queues.
 
 ---
 
@@ -8,10 +8,10 @@ The Media Library tab gives you a full view of every video file in your watch di
 
 ```
 ┌──────────────────────────────────────────────────┐
-│  Header: Stats cards (files, size, encode status) │
+│  App header: Media Monitor logo + Library/Settings │
 ├──────────────────────────────────────────────────┤
-│  Toolbar: Search · Filter · Movies/Shows toggle  │
-│           Scan button · Bulk actions             │
+│  Toolbar: Movies/Shows toggle · files/size totals │
+│           Search · filters · Scan · bulk actions  │
 ├──────────────────────────────────────────────────┤
 │                                                  │
 │  Media Table                                     │
@@ -28,7 +28,7 @@ The Media Library tab gives you a full view of every video file in your watch di
 
 ## Movies vs Shows
 
-Use the **Movies / Shows** toggle in the toolbar to switch views.
+Use the **Movies / Shows** toggle in the toolbar to switch views. Compact totals next to the toggle show the file count and total size for the currently selected media type.
 
 **Movies view:**
 - One row per movie folder
@@ -69,7 +69,7 @@ Click a filter pill in the toolbar to narrow the list:
 | Missing Lang | Files with audio tracks that have no language tag |
 | Queued | Files with an active or pending encode/translate job |
 | Done | Files that have been successfully encoded |
-| Alerts | Files with any actionable status (RE-ENCODE or REMUX) |
+| Alerts | Files with sibling-video conflicts or unprocessable analysis results |
 
 ---
 
@@ -112,7 +112,7 @@ The toolbar shows how many files are selected and how many of those have transla
 
 ## Re-scanning
 
-**Full library scan:** Click the **Scan** button in the top toolbar. This walks the entire watch directory, runs ffprobe on every video file, and updates the database. Useful after major library reorganisation. If the library is empty, a large **Scan Library** button is shown in the centre of the table as a shortcut.
+**Full library scan:** Click the **Scan** button in the toolbar. This walks the entire watch directory, runs ffprobe on every video file, and updates the database. Useful after major library reorganisation. If the library is empty, a large **Scan Library** button is shown in the centre of the table as a shortcut.
 
 **Folder re-scan:** Click the 🔄 icon next to any movie title, show header, or season header. Only files in that specific directory are re-analysed. Use this after encoding a file externally (e.g. HandBrake) so the UI reflects the new codec and file size.
 

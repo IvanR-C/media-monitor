@@ -1,6 +1,6 @@
 # Project Current State: Media Monitor
 
-Last reviewed: April 27, 2026
+Last reviewed: June 30, 2026
 Review posture: strict. Claims below should be treated as working assumptions unless backed by tests, recent manual verification, or code references.
 
 ## Executive Summary
@@ -27,8 +27,9 @@ The codebase has meaningful functionality in place, but the project is not in a 
 
 - Next.js App Router application under `frontend/`.
 - React 19, Tailwind CSS, Radix/shadcn-style UI components.
-- Main UI areas include dashboard/config, media library, encode/translation queues, and logs.
+- Main UI areas include a Library-first landing view, a secondary Settings view, encode/translation queues, and logs.
 - The frontend currently uses client-side hooks and in-memory filtering/sorting for much of the UI behavior.
+- Recent frontend updates moved branding and view switching into a slim sticky header, renamed the previous config view to Settings, and condensed library totals into inline text beside the Movies/Shows control.
 
 ### Data Model
 
@@ -104,7 +105,7 @@ The codebase has meaningful functionality in place, but the project is not in a 
 - Add or verify `.gitignore` protection for config, database, caches, and frontend dependency output.
 - Record test commands and latest results in the docs.
 - Rename leftover scaffold metadata to Media Monitor.
-- Clarify Dashboard language settings so required languages are not confused with approved retention languages.
+- Clarify Settings language rules so required subtitle languages are not confused with approved retention languages.
 - Add configurable translation target.
 
 ### Medium Term

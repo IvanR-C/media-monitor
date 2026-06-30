@@ -8,17 +8,11 @@ Built for Plex, Jellyfin, and any folder-based media server.
 
 ## 📸 Screenshots
 
-<!-- Screenshot: Dashboard tab showing library stats, notification config, and API key settings -->
-![Dashboard](docs/screenshots/dashboard.png)
+<!-- Screenshot: Library view showing the compact toolbar, filters, scan action, queue, and logs -->
+![Library](docs/screenshots/library.png)
 
-<!-- Screenshot: Media Library tab showing the Movies table with status badges, codec info, and action menus -->
-![Media Library](docs/screenshots/media-library.png)
-
-<!-- Screenshot: Encode queue with active job, progress bar, speed and ETA -->
-![Encode Queue](docs/screenshots/encode-queue.png)
-
-<!-- Screenshot: Mobile view of the show/season tree with episode rows -->
-![Mobile View](docs/screenshots/mobile.png)
+<!-- Screenshot: Settings view showing notifications, poster lookup, OpenAI, and file-status rules -->
+![Settings](docs/screenshots/settings.png)
 
 ---
 
@@ -32,9 +26,11 @@ Built for Plex, Jellyfin, and any folder-based media server.
 - SQLite-backed deduplication — no duplicate notifications on restart
 
 ### 🖥️ Media Library Browser
+- Opens by default when you load the app
 - Browse your entire library in a sortable, filterable table
 - **Movies** view — one row per movie folder
 - **Shows** view — grouped by show → season → episode tree
+- Compact library totals show total files and size beside the Movies/Shows switch
 - Filter by status: All · Needs Encoding · Needs Remux · Missing Language · Queued · Done · Alerts
 - Per-file details: resolution, video codec, audio tracks with language tags, subtitle tracks, file size
 - Inline estimated post-encode size for files that haven't been encoded yet
@@ -89,7 +85,7 @@ For audio, only the **highest-quality** track per language is kept (e.g. TrueHD 
 ### 📊 Real-Time Logs
 - In-app log viewer streamed from the backend
 - Level filtering (info / warn / error)
-- Collapsible panel in the Media Library tab
+- Collapsible panel in the Library view
 
 ---
 
@@ -198,7 +194,7 @@ docker build -t media-monitor-frontend ./frontend
 
 ### Web UI
 
-All settings can be configured from the **Dashboard** tab after first launch:
+All settings can be configured from the **Settings** view after first launch:
 
 | Setting | Description |
 |---|---|
@@ -274,19 +270,19 @@ All environment variables can also be set directly in `docker-compose.yml`:
 1. Install the [ntfy app](https://ntfy.sh) on your phone
 2. Choose a unique topic name (e.g. `my-library-abc123`)
 3. Subscribe to the topic in the app
-4. Enter the server URL and topic in the Media Monitor Dashboard
+4. Enter the server URL and topic in **Settings**
 
 ### Discord
 
 1. Open your Discord server settings → Integrations → Webhooks
 2. Click **New Webhook**, choose a channel, copy the URL
-3. Paste it in the Media Monitor Dashboard
+3. Paste it in **Settings**
 
 ### TVDB (optional — poster art in notifications)
 
 1. Create a free account at [thetvdb.com](https://thetvdb.com)
 2. Go to [API Information](https://thetvdb.com/api-information) and get your API key
-3. Enter it in the Dashboard
+3. Enter it in **Settings**
 
 ---
 
@@ -303,7 +299,7 @@ All environment variables can also be set directly in `docker-compose.yml`:
 │   └── index.html            # Legacy web UI (superseded by Next.js frontend)
 ├── frontend/
 │   ├── app/
-│   │   └── page.tsx          # Main page (Dashboard + Media Library tabs)
+│   │   └── page.tsx          # Main page (Library + Settings views)
 │   ├── components/
 │   │   └── media-monitor/    # All UI components
 │   ├── Dockerfile            # Frontend container (multi-stage Next.js build)
@@ -312,9 +308,10 @@ All environment variables can also be set directly in `docker-compose.yml`:
 │   ├── config.json           # Saved settings
 │   └── processed.db          # SQLite database
 └── docs/
+    ├── current_state.md      # Project state and known gaps
     ├── encoding.md           # Encoding feature walkthrough
     ├── subtitle-translation.md  # Subtitle translation + OCR walkthrough
-    └── media-library.md      # Media library browser guide
+    └── media-library.md      # Library browser guide
 ```
 
 ---
@@ -344,10 +341,10 @@ All environment variables can also be set directly in `docker-compose.yml`:
 - Confirm your NVIDIA driver is installed on the host: `nvidia-smi`
 - Confirm the NVIDIA Container Toolkit is installed and configured
 - Check that the `deploy.resources` block is present in `docker-compose.yml`
-- Encoding logs appear in the in-app log viewer (Media Library tab → Logs)
+- Encoding logs appear in the in-app log viewer (Library → Logs)
 
 **Translation not starting:**
-- Verify your OpenAI API key is saved in the Dashboard
+- Verify your OpenAI API key is saved in **Settings**
 - Check your OpenAI account has available credits
 - For PGS OCR jobs: the `ocr` phase runs before translation — progress will show "OCR frame N/N" first
 
