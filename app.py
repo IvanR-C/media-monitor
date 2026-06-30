@@ -37,7 +37,12 @@ STABILIZE_CHECKS   = int(os.environ.get('STABILIZE_CHECKS', '3'))
 MAX_WORKERS        = int(os.environ.get('MAX_WORKERS', '4'))
 REENCODE_SIZE_GB   = float(os.environ.get('REENCODE_SIZE_GB', '20'))
 
-VIDEO_EXTENSIONS = ('.mkv', '.mp4', '.avi', '.mov', '.m4v')
+VIDEO_EXTENSIONS = (
+    '.mkv', '.mp4', '.avi', '.mov', '.m4v',
+    '.m2ts', '.mts', '.ts',
+    '.mpg', '.mpeg', '.vob',
+    '.webm', '.wmv', '.flv', '.3gp',
+)
 
 # Disc images we can't ffprobe or encode — surfaced as UNPROCESSABLE under Alerts.
 UNPROCESSABLE_EXTENSIONS = ('.iso', '.img')
@@ -986,13 +991,20 @@ def analyze_iso(filepath):
     except OSError:
         return None
 
-    disc_type = detect_disc_type(filepath)
-    if disc_type == 'dvd':
-        probe = analyze_dvd_iso(filepath)
-    elif disc_type == 'bluray':
-        probe = analyze_bluray_iso(filepath)
-    else:
-        return None
+    # bsdtar can't read some UDF 2.50 (UHD Blu-ray) images even though libbluray
+    # opens them fine, so we never gate on it — it's only a hint for which probe
+    # to try first. The disc type is *confirmed* by actually opening the image
+    # with libbluray (Blu-ray) or libdvdread (DVD); whichever yields streams wins.
+    hint  = detect_disc_type(filepath)
+    order = ['dvd', 'bluray'] if hint == 'dvd' else ['bluray', 'dvd']
+
+    probe = None
+    disc_type = None
+    for dt in order:
+        probe = analyze_dvd_iso(filepath) if dt == 'dvd' else analyze_bluray_iso(filepath)
+        if probe:
+            disc_type = dt
+            break
     if not probe:
         return None
 
