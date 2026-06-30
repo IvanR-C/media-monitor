@@ -34,7 +34,7 @@ const COMMON_SUB_LANGS: { code: string; label: string }[] = [
   { code: "zho", label: "Chinese" },
 ]
 
-export function DashboardTab() {
+export function SettingsTab() {
   const [config, setConfig] = useState({
     enable_ntfy: true,
     ntfy_server: "https://ntfy.sh",

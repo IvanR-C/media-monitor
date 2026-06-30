@@ -113,6 +113,7 @@ interface MediaTableProps {
   onClearSelection: () => void;
   onEnqueue: (id: number) => void;
   onEnqueueSelected: () => void;
+  onRip: (id: number) => void;
   onTranslate: (id: number, subIdx: number) => void;
   onTranslateSelected: () => void;
   onAssignTracks: (id: number, audio: any[], subs: any[]) => Promise<void>;
@@ -134,6 +135,7 @@ export function MediaTable({
   onClearSelection,
   onEnqueue,
   onEnqueueSelected,
+  onRip,
   onTranslate,
   onTranslateSelected,
   onAssignTracks,
@@ -315,6 +317,7 @@ export function MediaTable({
           isSelected={selectedIds.has(file.id)}
           onToggleSelect={() => onToggleSelect(file.id)}
           onEnqueue={() => onEnqueue(file.id)}
+          onRip={() => onRip(file.id)}
           onTranslate={onTranslate}
           onOpenAssignDialog={setAssignDialogFile}
           onOpenMuxDialog={setMuxDialogFile}
@@ -458,6 +461,7 @@ export function MediaTable({
               isSelected={selectedIds.has(ep.id)}
               onToggleSelect={() => onToggleSelect(ep.id)}
               onEnqueue={() => onEnqueue(ep.id)}
+              onRip={() => onRip(ep.id)}
               onTranslate={onTranslate}
               onOpenAssignDialog={setAssignDialogFile}
               onOpenMuxDialog={setMuxDialogFile}
@@ -617,6 +621,7 @@ export function MediaTable({
                 isSelected={selectedIds.has(file.id)}
                 onToggleSelect={() => onToggleSelect(file.id)}
                 onEnqueue={() => onEnqueue(file.id)}
+                onRip={() => onRip(file.id)}
                 onTranslate={onTranslate}
                 onOpenAssignDialog={setAssignDialogFile}
                 onOpenMuxDialog={setMuxDialogFile}
@@ -746,6 +751,7 @@ export function MediaTable({
                                   isSelected={selectedIds.has(ep.id)}
                                   onToggleSelect={() => onToggleSelect(ep.id)}
                                   onEnqueue={() => onEnqueue(ep.id)}
+                                  onRip={() => onRip(ep.id)}
                                   onTranslate={onTranslate}
                                   onOpenAssignDialog={setAssignDialogFile}
                                   onOpenMuxDialog={setMuxDialogFile}
@@ -791,6 +797,7 @@ function MobileFileCard({
   isSelected,
   onToggleSelect,
   onEnqueue,
+  onRip,
   onTranslate,
   onOpenAssignDialog,
   onOpenMuxDialog,
@@ -802,6 +809,7 @@ function MobileFileCard({
   isSelected: boolean;
   onToggleSelect: () => void;
   onEnqueue: () => void;
+  onRip: () => void;
   onTranslate: (id: number, subIdx: number) => void;
   onOpenAssignDialog: (file: MediaFile) => void;
   onOpenMuxDialog?: (file: MediaFile) => void;
@@ -868,14 +876,21 @@ function MobileFileCard({
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            <DropdownMenuItem onClick={onEnqueue}>
-              <Play className="mr-2 h-3.5 w-3.5" />
-              Queue Encode
-            </DropdownMenuItem>
+            {file.disc_type ? (
+              <DropdownMenuItem onClick={onRip}>
+                <Disc className="mr-2 h-3.5 w-3.5" />
+                {file.encode_status === "done" ? "Re-rip to MKV" : "Rip to MKV"}
+              </DropdownMenuItem>
+            ) : (
+              <DropdownMenuItem onClick={onEnqueue}>
+                <Play className="mr-2 h-3.5 w-3.5" />
+                Queue Encode
+              </DropdownMenuItem>
+            )}
             <DropdownMenuSeparator />
             <DropdownMenuItem onClick={() => onOpenAssignDialog(file)}>
               <Tag className="mr-2 h-3.5 w-3.5" />
-              Assign Languages
+              {file.disc_type ? "Adjust Tracks" : "Assign Languages"}
             </DropdownMenuItem>
             {onFolderScan && (
               <>
@@ -970,6 +985,7 @@ interface MediaTableRowProps {
   isSelected: boolean;
   onToggleSelect: () => void;
   onEnqueue: () => void;
+  onRip: () => void;
   onTranslate: (id: number, subIdx: number) => void;
   onOpenAssignDialog: (file: MediaFile) => void;
   onOpenMuxDialog?: (file: MediaFile) => void;
@@ -982,6 +998,7 @@ function MediaTableRow({
   isSelected,
   onToggleSelect,
   onEnqueue,
+  onRip,
   onTranslate,
   onOpenAssignDialog,
   onOpenMuxDialog,
@@ -1073,14 +1090,21 @@ function MediaTableRow({
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            <DropdownMenuItem onClick={onEnqueue}>
-              <Play className="mr-2 h-3.5 w-3.5" />
-              Queue Encode
-            </DropdownMenuItem>
+            {file.disc_type ? (
+              <DropdownMenuItem onClick={onRip}>
+                <Disc className="mr-2 h-3.5 w-3.5" />
+                {file.encode_status === "done" ? "Re-rip to MKV" : "Rip to MKV"}
+              </DropdownMenuItem>
+            ) : (
+              <DropdownMenuItem onClick={onEnqueue}>
+                <Play className="mr-2 h-3.5 w-3.5" />
+                Queue Encode
+              </DropdownMenuItem>
+            )}
             <DropdownMenuSeparator />
             <DropdownMenuItem onClick={() => onOpenAssignDialog(file)}>
               <Tag className="mr-2 h-3.5 w-3.5" />
-              Assign Languages
+              {file.disc_type ? "Adjust Tracks" : "Assign Languages"}
             </DropdownMenuItem>
             {translatableSubTracks.length > 0 && (
               <>
@@ -1146,7 +1170,26 @@ function StatusBadge({
 }
 
 function RowStatus({ file }: { file: MediaFile }) {
-  // Disc images can't be analyzed or encoded — surfaced under Alerts.
+  const inner = <RowStatusInner file={file} />;
+  // Analyzable disc images get a DVD/Blu-ray pill in front of their status.
+  if (file.disc_type) {
+    return (
+      <div className="flex flex-wrap items-center gap-1">
+        <StatusBadge
+          tone="bg-cyan-500/15 text-cyan-400"
+          icon={Disc}
+          label={file.disc_type === "bluray" ? "Blu-ray" : "DVD"}
+          tooltip="Disc image — ready to rip its selected best tracks to MKV."
+        />
+        {inner}
+      </div>
+    );
+  }
+  return inner;
+}
+
+function RowStatusInner({ file }: { file: MediaFile }) {
+  // Unreadable disc images (data/encrypted) can't be analyzed — Alerts only.
   if (file.status === "UNPROCESSABLE") {
     return (
       <StatusBadge
@@ -1158,9 +1201,14 @@ function RowStatus({ file }: { file: MediaFile }) {
     );
   }
 
-  // Live encode / remux progress
+  // Live encode / remux / rip progress
   if (file.encode_status === "encoding") {
-    const isRemux = file.encode_job_type === "remux";
+    const verb =
+      file.encode_job_type === "rip"
+        ? "Ripping"
+        : file.encode_job_type === "remux"
+          ? "Remuxing"
+          : "Encoding";
     const pct =
       file.encode_progress != null
         ? `${Math.round(file.encode_progress)}%`
@@ -1169,7 +1217,7 @@ function RowStatus({ file }: { file: MediaFile }) {
       <div className="flex items-center gap-1.5">
         <Loader2 className="h-3 w-3 animate-spin text-accent" />
         <span className="text-[10px] text-accent">
-          {isRemux ? "Remuxing" : "Encoding"}
+          {verb}
           {pct ? ` ${pct}` : ""}
         </span>
       </div>
@@ -1208,12 +1256,17 @@ function RowStatus({ file }: { file: MediaFile }) {
   }
 
   if (file.encode_status === "queued") {
-    const isRemux = file.encode_job_type === "remux";
+    const label =
+      file.encode_job_type === "rip"
+        ? "Rip Queued"
+        : file.encode_job_type === "remux"
+          ? "Remux Queued"
+          : "Queued";
     return (
       <StatusBadge
         tone="bg-secondary text-muted-foreground"
         icon={Loader2}
-        label={isRemux ? "Remux Queued" : "Queued"}
+        label={label}
         tooltip="Waiting in the encode queue. Jobs run sequentially based on worker availability."
       />
     );

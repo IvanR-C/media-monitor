@@ -299,6 +299,7 @@
         .badge-queued   { background: var(--antiflash-white); color: var(--outer-space); }
         .badge-encoding { background: #e2d9f3; color: #2d1b69; animation: pulse-bg 1.5s ease-in-out infinite; }
         .badge-failed   { background: #f8d7da; color: #58151c; }
+        .badge-disc     { background: #cff4fc; color: #055160; }
 
         @keyframes pulse-bg {
             0%, 100% { opacity: 1; }
@@ -1205,8 +1206,11 @@ function renderRow(f, isEpisode = false) {
     // Sub badges
     const subBadges = renderSubBadges(f.subtitle_tracks || []);
 
-    // Status badge
-    const statusBadge = renderStatusBadge(f.status, f.encode_status);
+    // Status badge (disc images get a DVD/BLURAY pill in front)
+    const discPill = f.disc_type
+        ? `<span class="badge badge-disc" title="Disc image — ready to rip">${escHtml(f.disc_type.toUpperCase())}</span> `
+        : '';
+    const statusBadge = discPill + renderStatusBadge(f.status, f.encode_status);
 
     // Action button
     const actionBtn = renderActionBtn(f);
@@ -1295,6 +1299,18 @@ function renderActionBtn(f) {
     const hasRemux    = status.includes('REMUX');
     const hasReencode = status.includes('RE-ENCODE');
     const canTranslate = hasTranslatableSubs(f);
+
+    // Disc images (.iso/.img): rip selected best tracks into a new .mkv.
+    if (f.disc_type) {
+        if (enc === 'encoding' || enc === 'queued') {
+            return `<div style="display:flex;flex-direction:column;gap:4px;">`
+                 + `<button class="button button-danger button-sm" onclick="cancelByFileId(${f.id})">Cancel</button></div>`;
+        }
+        const ripLabel = enc === 'done' ? 'Re-rip' : 'Rip to MKV';
+        return `<div style="display:flex;flex-direction:column;gap:4px;">`
+             + `<button class="button button-sm" onclick="ripDisc(${f.id})">${ripLabel}</button>`
+             + `<button class="button button-secondary button-sm" onclick="openLangModal(${f.id}, false)">Adjust Tracks</button></div>`;
+    }
 
     let primaryBtn = '';
     if (enc === 'encoding' || enc === 'queued') {
@@ -1418,6 +1434,20 @@ async function queueFiles(fileIds) {
             showNotification('Files already in queue or not found', 'error');
         }
     } catch (e) { showNotification('Error queuing files', 'error'); }
+}
+
+async function ripDisc(fileId) {
+    try {
+        const r = await fetch(`/api/media/${fileId}/rip`, {method: 'POST'});
+        const d = await r.json();
+        if (r.ok) {
+            showNotification(`Rip queued → ${d.output}`);
+            loadMedia();
+            loadJobs();
+        } else {
+            showNotification(d.error || 'Could not queue rip', 'error');
+        }
+    } catch (e) { showNotification('Error queuing rip', 'error'); }
 }
 
 async function cancelByFileId(fileId) {
