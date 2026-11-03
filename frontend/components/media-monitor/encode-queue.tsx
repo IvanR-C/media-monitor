@@ -1,4 +1,6 @@
 "use client"
+import { Hint } from "@/components/ui/tooltip";
+
 
 import { useState, useEffect, useCallback } from "react"
 import { Button } from "@/components/ui/button"
@@ -195,7 +197,7 @@ export function CombinedQueue() {
   return (
     <div className="rounded-t-lg border border-b-0 border-border/50 bg-card/50">
       {/* ── Header bar ─────────────────────────────────────────────────────── */}
-      <div className="flex items-center gap-1 px-1 py-1">
+      <div className="flex flex-wrap items-center gap-1 px-1 py-1">
         {/* Collapse toggle */}
         <button
           onClick={() => setIsExpanded(!isExpanded)}
@@ -246,7 +248,7 @@ export function CombinedQueue() {
           // Cancel-all only when something is actually active
           return (
             <>
-              <Button
+              <Hint content={paused ? "Resume queue" : "Pause queue (current job finishes)"}><Button
                 variant="ghost"
                 size="sm"
                 className={cn(
@@ -254,14 +256,14 @@ export function CombinedQueue() {
                   paused ? "text-accent" : "text-muted-foreground"
                 )}
                 onClick={handleTogglePause}
-                title={paused ? "Resume queue" : "Pause queue (current job finishes)"}
+                aria-label={paused ? "Resume queue" : "Pause queue (current job finishes)"}
               >
                 {paused
                   ? <><Play className="mr-1 h-2.5 w-2.5" />Resume</>
                   : <><Pause className="mr-1 h-2.5 w-2.5" />Pause</>}
-              </Button>
+              </Button></Hint>
               {activeCount > 0 && (
-                <Button
+                <Hint content="Cancel all active jobs"><Button
                   variant="ghost"
                   size="sm"
                   className="h-6 px-2 text-[10px] text-muted-foreground hover:text-destructive"
@@ -269,11 +271,11 @@ export function CombinedQueue() {
                     e.stopPropagation()
                     setConfirmCancelAll(isEncode ? "encode" : "translate")
                   }}
-                  title="Cancel all active jobs"
+                  aria-label="Cancel all active jobs"
                 >
                   <Square className="mr-1 h-2.5 w-2.5" />
                   Stop all
-                </Button>
+                </Button></Hint>
               )}
             </>
           )
@@ -295,15 +297,15 @@ export function CombinedQueue() {
 
         {/* Expand to modal */}
         {isExpanded && (
-          <Button
+          <Hint content="Open queue in a larger view"><Button
             variant="ghost"
             size="icon"
             className="h-6 w-6 text-muted-foreground hover:text-foreground"
             onClick={(e) => { e.stopPropagation(); setIsModalOpen(true) }}
-            title="Open queue in a larger view"
+            aria-label="Open queue in a larger view"
           >
             <Maximize2 className="h-3 w-3" />
-          </Button>
+          </Button></Hint>
         )}
       </div>
 
@@ -543,6 +545,7 @@ function EncodeJobRow({
           size="icon"
           className="h-5 w-5 shrink-0 text-muted-foreground hover:text-destructive"
           onClick={(e) => onCancel(e, job.id)}
+          aria-label={`Cancel job for ${job.show_name || job.folder_name}`}
         >
           <X className="h-3 w-3" />
         </Button>
@@ -621,6 +624,7 @@ function TranslateJobRow({
           size="icon"
           className="h-5 w-5 shrink-0 text-muted-foreground hover:text-destructive"
           onClick={(e) => onCancel(e, job.id)}
+          aria-label={`Cancel job for ${job.show_name || job.folder_name}`}
         >
           <X className="h-3 w-3" />
         </Button>

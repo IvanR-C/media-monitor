@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "test:settings": "node --test tests/settings-autosave.test.mjs",
+    "test:library": "node --test tests/languages.test.mjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.1",

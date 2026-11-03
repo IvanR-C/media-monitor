@@ -24,7 +24,7 @@ interface Passkey {
   last_used_at: string | null
 }
 
-export function AccountSecurityCard() {
+export function AccountSecurityCard({ compact = false }: { compact?: boolean }) {
   const [username, setUsername] = useState("")
   const [passkeys, setPasskeys] = useState<Passkey[]>([])
   const [requireMfa, setRequireMfa] = useState(false)
@@ -135,18 +135,19 @@ export function AccountSecurityCard() {
   if (loading) return null
 
   return (
-    <Card className="border-border/50 bg-card/50">
-      <CardHeader className="pb-4">
+    <Card className={compact ? "gap-0 rounded-none border-0 bg-transparent py-0 shadow-none" : "border-border/50 bg-card/50"}>
+      <CardHeader className={compact ? "sr-only" : "pb-4"}>
         <CardTitle className="flex items-center gap-2 text-base font-medium">
           <ShieldCheck className="h-4 w-4 text-accent" />
           Account & Security
         </CardTitle>
       </CardHeader>
-      <CardContent className="space-y-6">
+      <CardContent className={compact ? "space-y-6 px-0 pt-3" : "space-y-6"}>
         <div className="space-y-3">
           <Label className="text-sm text-muted-foreground">Change password</Label>
           <div className="grid gap-2 sm:grid-cols-2">
             <Input
+              aria-label="Current password"
               type="password"
               placeholder="Current password"
               autoComplete="current-password"
@@ -155,6 +156,7 @@ export function AccountSecurityCard() {
               className="bg-input"
             />
             <Input
+              aria-label="New password"
               type="password"
               placeholder="New password"
               autoComplete="new-password"
@@ -178,12 +180,13 @@ export function AccountSecurityCard() {
         <div className="space-y-3 border-t border-border/40 pt-4">
           <div className="flex items-center justify-between">
             <div>
-              <Label className="text-sm">Require passkey for login</Label>
+              <Label htmlFor="require-passkey-mfa" className="text-sm">Require passkey for login</Label>
               <p className="text-xs text-muted-foreground">
                 Adds a passkey check after your password. Needs at least one passkey below.
               </p>
             </div>
             <Switch
+              id="require-passkey-mfa"
               checked={requireMfa}
               disabled={passkeys.length === 0}
               onCheckedChange={handleToggleMfa}
@@ -211,6 +214,7 @@ export function AccountSecurityCard() {
                   variant="ghost"
                   onClick={() => handleDeletePasskey(pk.id)}
                   title="Remove passkey"
+                  aria-label={`Remove passkey ${pk.name}`}
                 >
                   <Trash2 className="h-3.5 w-3.5 text-muted-foreground hover:text-destructive" />
                 </Button>
