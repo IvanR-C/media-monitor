@@ -1,11 +1,6 @@
 services:
   media-monitor:
-    # `image:` pulls the published image (e.g. for a Portainer Git-repository
-    # stack); `build: .` lets `docker compose up -d --build` build it locally
-    # instead — Compose tags that local build with the same name, so either
-    # workflow works from this one file.
     image: ivanchelo/media-monitor:latest
-    build: .
     container_name: media-monitor
     restart: unless-stopped
     ports:

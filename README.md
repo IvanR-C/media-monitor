@@ -171,11 +171,14 @@ docker compose up -d
 git clone https://github.com/your-username/media-monitor.git
 cd media-monitor
 
-# Build and start
-docker compose up -d --build
+# Build, then start with the image you just built
+docker build -t ivanchelo/media-monitor:latest .
+docker compose up -d
 ```
 
 > **Note on build time:** The image installs `tesseract-ocr-all` (all language packs for OCR, ~1 GB) and builds the frontend in its own Node stage. First builds will take several minutes depending on your connection.
+>
+> On every push to `main`, a GitHub Actions workflow builds and publishes this image to Docker Hub automatically — Option A pulls that, so you only need this if you're testing local changes before they're pushed.
 
 ---
 
