@@ -8,8 +8,8 @@ import { Command, CommandInput, CommandList, CommandEmpty, CommandGroup, Command
 import { languageLabel, normalizeLanguage, LANGUAGE_OPTIONS } from "@/lib/languages"
 import { cn } from "@/lib/utils"
 
-export function LanguagePicker({ value, onChange, label, disabled = false, allowUnknown = true }: {
-  value: string; onChange: (value: string) => void; label: string; disabled?: boolean; allowUnknown?: boolean
+export function LanguagePicker({ value, onChange, label, disabled = false, allowUnknown = true, placeholder }: {
+  value: string; onChange: (value: string) => void; label: string; disabled?: boolean; allowUnknown?: boolean; placeholder?: string
 }) {
   const [open, setOpen] = useState(false)
   const normalized = normalizeLanguage(value)
@@ -19,7 +19,7 @@ export function LanguagePicker({ value, onChange, label, disabled = false, allow
   return <Popover open={open} onOpenChange={setOpen}>
     <PopoverTrigger asChild>
       <Button variant="outline" role="combobox" aria-label={label} aria-expanded={open} disabled={disabled} className="h-9 w-full min-w-0 justify-between bg-input text-xs font-normal hover:bg-secondary hover:text-foreground">
-        <span className="truncate">{languageLabel(value)}</span><ChevronsUpDown className="ml-1 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+        <span className="truncate">{!normalized && placeholder ? placeholder : languageLabel(value)}</span><ChevronsUpDown className="ml-1 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
       </Button>
     </PopoverTrigger>
     <PopoverContent align="start" className="w-[min(320px,calc(100vw-32px))] p-0">

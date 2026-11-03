@@ -16,7 +16,7 @@ import sqlite3
 import subprocess
 import tempfile
 from collections import Counter, deque
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from pathlib import Path
 from queue import Queue
 from concurrent.futures import ThreadPoolExecutor
@@ -25,6 +25,7 @@ from datetime import datetime
 from flask import Flask, request, jsonify, Response, session, send_from_directory
 from werkzeug.security import generate_password_hash, check_password_hash
 import requests
+from anime_subtitles import DEFAULT_SETTINGS as ANIME_DEFAULTS, validate_settings as validate_anime_settings, srt_to_ass
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
@@ -248,6 +249,7 @@ config = {
     #                     for a file to NOT be flagged MISSING LANG.
     'reencode_size_gb':  REENCODE_SIZE_GB,
     'required_sub_langs': sorted(APPROVED_SUB_LANGS),
+    'anime_settings': dict(ANIME_DEFAULTS),
 }
 
 executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
@@ -264,6 +266,12 @@ encode_paused = threading.Event()
 # Translation job state
 translation_queue = Queue()
 translation_paused = threading.Event()
+# The encoding and subtitle workers must never rewrite the same file together.
+media_mutation_locks = [threading.RLock() for _ in range(64)]
+
+
+def media_mutation_lock(filepath):
+    return media_mutation_locks[hash(os.path.normcase(os.path.abspath(filepath))) % len(media_mutation_locks)]
 
 # Scan state (shared, read by /api/media/scan/status). The lock guards both
 # the check-then-set in scan_library{,_folder}() against rapid double-click
@@ -444,6 +452,14 @@ def init_db():
             conn.execute('ALTER TABLE translation_jobs ADD COLUMN extract_only INTEGER DEFAULT 0')
         except sqlite3.OperationalError:
             pass  # column already exists
+
+        for column, definition in [('job_type', "TEXT DEFAULT 'translate'"),
+                                   ('anime_settings', 'TEXT'), ('target_lang', 'TEXT'),
+                                   ('output_path', 'TEXT')]:
+            try:
+                conn.execute(f'ALTER TABLE translation_jobs ADD COLUMN {column} {definition}')
+            except sqlite3.OperationalError:
+                pass
 
         # Indexes — /api/media filters by media_type + status/encode_status on
         # every request, and /api/media/alerts filters by has_sibling_videos.
@@ -1989,6 +2005,14 @@ def _run_ffmpeg_with_progress(job_id, cmd, duration, tag):
 
 
 def run_encode_job(job_id):
+    with db() as conn:
+        job = conn.execute('SELECT filepath FROM encode_jobs WHERE id=?', (job_id,)).fetchone()
+    if job:
+        with media_mutation_lock(job['filepath']):
+            _run_encode_job(job_id)
+
+
+def _run_encode_job(job_id):
     global active_proc, active_job_id
 
     with db() as conn:
@@ -2478,7 +2502,7 @@ def _translation_client_and_model():
     return client, config.get('openai_model', 'gpt-4o-mini')
 
 
-def translate_srt_chunk(content, source_lang=''):
+def translate_srt_chunk(content, source_lang='', target_lang=None):
     """Send one SRT chunk to the active translation backend and return the translated text."""
     ready, err = _translation_backend_ready()
     if not ready:
@@ -2487,12 +2511,20 @@ def translate_srt_chunk(content, source_lang=''):
     client, model = _translation_client_and_model()
 
     src_note = f" from {source_lang}" if source_lang else ''
-    prompt = f'Translate this subtitle file{src_note} to Cuban Spanish:\n\n{content}'
+    target_name = anime_languages().get(target_lang) if target_lang else 'Cuban Spanish'
+    if not target_name:
+        raise ValueError('Unsupported target language')
+    system_prompt = _SRT_SYSTEM_PROMPT
+    if target_lang and target_lang != 'spa':
+        system_prompt = system_prompt.replace('Cuban Spanish', target_name).replace(
+            'Use authentic Cuban expressions, idioms, and vocabulary where they fit naturally.',
+            f'Use natural {target_name} dialogue, idioms, and vocabulary.')
+    prompt = f'Translate this subtitle file{src_note} to {"Cuban Spanish" if target_lang == "spa" else target_name}:\n\n{content}'
     log('info', f'[translate] → {model}: {_log_preview(prompt)}')
     response = client.chat.completions.create(
         model=model,
         messages=[
-            {'role': 'system', 'content': _SRT_SYSTEM_PROMPT},
+            {'role': 'system', 'content': system_prompt},
             {'role': 'user',   'content': prompt},
         ],
         temperature=0.3,
@@ -2505,9 +2537,9 @@ def translate_srt_chunk(content, source_lang=''):
     return restore_srt_structure(content, translated.strip())
 
 
-def translate_subtitle_file(srt_path, source_lang='', progress_cb=None, job_id=None):
+def translate_subtitle_file(srt_path, source_lang='', progress_cb=None, job_id=None, target_lang=None):
     """
-    Translate a full SRT file to Cuban Spanish, chunking if needed.
+    Translate a full SRT file, defaulting to Cuban Spanish, chunking if needed.
     progress_cb(pct: float, detail: str) is called periodically.
     Returns the translated SRT content as a string.
     """
@@ -2535,7 +2567,7 @@ def translate_subtitle_file(srt_path, source_lang='', progress_cb=None, job_id=N
         log('info', f"{_tag} translating chunk {i + 1}/{len(chunks)}…")
         if progress_cb:
             progress_cb((i / len(chunks)) * 100, f'Translating part {i + 1}/{len(chunks)}…')
-        translated_parts.append(translate_srt_chunk(chunk, source_lang))
+        translated_parts.append(translate_srt_chunk(chunk, source_lang, target_lang) if target_lang else translate_srt_chunk(chunk, source_lang))
         log('info', f"{_tag} chunk {i + 1}/{len(chunks)} done")
 
     if progress_cb:
@@ -2943,6 +2975,21 @@ def pgs_ocr(filepath: str, sub_stream_idx: int, source_lang: str,
 
 def run_translation_job(job_id):
     with db() as conn:
+        job = conn.execute('SELECT filepath, job_type, output_path FROM translation_jobs WHERE id=?', (job_id,)).fetchone()
+    if job:
+        paths = [job['filepath']]
+        if job['job_type'] == 'anime':
+            paths.append(job['output_path'] or anime_output_path(job['filepath']))
+        # Lock source and destination in a stable order, including conversions
+        # of different source containers that share the same output filename.
+        with ExitStack() as stack:
+            for lock in sorted({media_mutation_lock(path) for path in paths}, key=id):
+                stack.enter_context(lock)
+            _run_translation_job(job_id)
+
+
+def _run_translation_job(job_id):
+    with db() as conn:
         job = conn.execute(
             'SELECT * FROM translation_jobs WHERE id=?', (job_id,)
         ).fetchone()
@@ -2954,6 +3001,10 @@ def run_translation_job(job_id):
 
     if not mf:
         _fail_translation_job(job_id, 'Media record not found in DB')
+        return
+
+    if job['job_type'] == 'anime':
+        run_anime_job(job, mf)
         return
 
     filepath     = job['filepath']
@@ -3545,6 +3596,11 @@ def get_config_route():
 def update_config_route():
     global config, _tvdb_token, _tvdb_token_expires
     payload = request.json or {}
+    if 'anime_settings' in payload:
+        try:
+            payload['anime_settings'] = validate_anime_settings(payload['anime_settings'], anime_languages())
+        except (ValueError, TypeError) as error:
+            return jsonify({'error': str(error)}), 400
     # Validate threshold fields when present so a bad UI submit can't poison
     # determine_status() (which would silently mis-flag every file).
     if 'reencode_size_gb' in payload:
@@ -3743,7 +3799,7 @@ def get_media():
                     id_index[mid]['encode_progress'] = enc_row['progress']
         for tr_row in conn.execute(
             "SELECT media_file_id, status, progress FROM translation_jobs "
-            "WHERE status IN ('pending','extracting','ocr','translating','muxing')"
+            "WHERE status IN ('pending','extracting','ocr','translating','styling','muxing')"
         ).fetchall():
             if tr_row['media_file_id'] in id_index:
                 id_index[tr_row['media_file_id']]['translate_status']   = tr_row['status']
@@ -4309,6 +4365,385 @@ def cancel_all_encode():
     return jsonify({'cancelled': cancelled})
 
 
+# ── Anime subtitle styling ───────────────────────────────────────────────────
+def anime_output_path(filepath):
+    path = Path(filepath)
+    return filepath if path.suffix.lower() == '.mkv' else str(path.with_suffix('.mkv'))
+
+
+def anime_languages():
+    catalog = Path(__file__).parent / 'languages.json'
+    if not catalog.exists():
+        catalog = Path(__file__).parent / 'frontend/lib/data/iso-639-2.json'
+    with catalog.open(encoding='utf-8') as fh:
+        return {item['code']: item['name'] for item in json.load(fh)}
+
+
+def anime_sidecars(mf):
+    """Only use files belonging to this movie/episode, never adjacent episodes."""
+    path = Path(mf['filepath'])
+    result = []
+    try:
+        for sub in sorted(path.parent.iterdir()):
+            if not sub.is_file() or sub.suffix.lower() not in ('.srt', '.ass', '.ssa', '.vtt'):
+                continue
+            base = sub.stem
+            if base.lower().startswith(path.stem.lower() + '.'):
+                tokens = re.split(r'[.\-_ ]+', base[len(path.stem) + 1:])
+            elif mf['media_type'] == 'movie':
+                tokens = re.split(r'[.\-_ ]+', base)
+                if not all(_token_to_lang(t) or t.lower() in SUB_MODIFIER_TOKENS or t.isdigit() for t in tokens):
+                    continue
+            else:
+                continue
+            lang = next((_token_to_lang(t) for t in tokens if _token_to_lang(t)), '')
+            if lang:
+                result.append({'path': str(sub), 'lang': lang, 'codec': sub.suffix[1:], 'title': sub.name})
+    except OSError:
+        pass
+    return result
+
+
+def anime_file_plan(mf, settings):
+    tracks = json.loads(mf['subtitle_tracks'] or '[]')
+    audio = json.loads(mf['audio_tracks'] or '[]')
+    allowed_subs = set(settings['subtitle_languages'])
+    if settings['mode'] == 'target':
+        allowed_subs.add(settings['target_lang'])
+    keep_audio = [t for t in audio if (normalize_lang(t.get('lang')) or 'und') in settings['audio_languages']]
+    keep_subs = [t for t in tracks if (normalize_lang(t.get('lang')) or 'und') in allowed_subs]
+    sources = tracks + anime_sidecars(mf)
+    supported = lambda t: not is_image_based_subtitle(t.get('codec')) or t.get('codec') in OCR_CAPABLE_CODECS
+    reason = None
+    translate = False
+    output_path = anime_output_path(mf['filepath'])
+    converts_container = output_path != mf['filepath']
+    if Path(mf['filepath']).suffix.lower() not in VIDEO_EXTENSIONS:
+        reason = 'Rip this disc image to a video file before using Fix Anime.'
+    elif converts_container and os.path.lexists(output_path):
+        reason = f'{Path(output_path).name} already exists. Choose a different source filename to avoid overwriting it.'
+    elif audio and not keep_audio:
+        reason = 'No audio would remain. Add an existing audio language to the keep list.'
+    if settings['mode'] == 'all':
+        convert = keep_subs + [t for t in sources[len(tracks):] if t['lang'] in allowed_subs]
+        if not convert:
+            reason = reason or 'No subtitles match the kept languages. This mode never translates.'
+        elif any(not supported(t) for t in convert):
+            reason = reason or 'A kept image subtitle cannot be converted. Only PGS supports OCR.'
+        originals = []
+    else:
+        candidates = [t for t in sources if supported(t)]
+        # Prefer full dialogue in the target language, then English text, then
+        # other readable sources. A signs-only track must not mask missing dialogue.
+        def score(t):
+            partial = bool(re.search(r'forced|signs|songs', t.get('title', ''), re.I))
+            return (partial, normalize_lang(t.get('lang')) != settings['target_lang'],
+                    is_image_based_subtitle(t.get('codec')), normalize_lang(t.get('lang')) != 'eng',
+                    t.get('sub_idx', 9999))
+        candidates.sort(key=score)
+        convert = candidates[:1]
+        if not convert:
+            reason = reason or 'No readable source subtitles. Add an embedded track or a language-tagged sidecar first.'
+        else:
+            translate = normalize_lang(convert[0].get('lang')) != settings['target_lang']
+            if translate:
+                ready, error = _translation_backend_ready()
+                if not ready:
+                    reason = reason or error
+        originals = [t for t in keep_subs if translate or not convert or t is not convert[0]]
+        # MP4/MOV text subtitles cannot be stream-copied into Matroska. Style
+        # these retained tracks too, preserving their languages without AI.
+        incompatible = [t for t in originals if t.get('codec') in ('mov_text', 'text', 'ttml')]
+        convert += incompatible
+        originals = [t for t in originals if t not in incompatible]
+    return {
+        'file_id': mf['id'], 'filename': mf['filename'],
+        'label': ' · '.join(filter(None, [mf['show_name'] or mf['folder_name'], mf['season_episode']])),
+        'reason': reason, 'needs_translation': translate,
+        'convert': convert, 'keep_audio': keep_audio, 'keep_subs': originals,
+        'audio_removed': len(audio) - len(keep_audio),
+        'subtitles_removed': len(tracks) - len(keep_subs),
+        'ass_tracks': len(convert),
+        'output_filename': Path(output_path).name,
+        'output_path': output_path, 'converts_container': converts_container,
+    }
+
+
+def anime_request_files(data, conn):
+    scope = data.get('scope')
+    if scope is not None:
+        if not isinstance(scope, dict) or scope.get('kind') not in ('file', 'show', 'season') or type(scope.get('file_id')) is not int:
+            raise ValueError('Choose a movie, episode, season, or show')
+        reference = conn.execute('SELECT * FROM media_files WHERE id=?', (scope['file_id'],)).fetchone()
+        if not reference:
+            raise ValueError('Media file no longer exists')
+        if scope['kind'] == 'file':
+            return [reference]
+        if reference['media_type'] != 'show':
+            raise ValueError('This file does not belong to a show')
+        # Resolve groups against the full library, independent of UI filters.
+        query = "SELECT * FROM media_files WHERE media_type='show' AND COALESCE(NULLIF(show_name,''),folder_name)=?"
+        args = [reference['show_name'] or reference['folder_name']]
+        if scope['kind'] == 'season':
+            query += ' AND folder_name=?'
+            args.append(reference['folder_name'])
+        return conn.execute(query + ' ORDER BY filepath', args).fetchall()
+    ids = data.get('file_ids')
+    if not isinstance(ids, list) or not ids or len(ids) > 5000 or any(type(i) is not int for i in ids):
+        raise ValueError('Choose 1–5000 media files')
+    rows = []
+    for fid in dict.fromkeys(ids):
+        row = conn.execute('SELECT * FROM media_files WHERE id=?', (fid,)).fetchone()
+        if not row:
+            raise ValueError(f'Media file {fid} no longer exists')
+        rows.append(row)
+    return rows
+
+
+@app.route('/api/anime/settings', methods=['GET', 'POST'])
+def anime_settings_route():
+    if request.method == 'GET':
+        return jsonify({'settings': validate_anime_settings(config.get('anime_settings', {}), anime_languages())})
+    try:
+        settings = validate_anime_settings(request.get_json(), anime_languages())
+    except (ValueError, TypeError) as error:
+        return jsonify({'error': str(error)}), 400
+    config['anime_settings'] = settings
+    save_config()
+    return jsonify({'settings': settings})
+
+
+@app.route('/api/anime/preview', methods=['POST'])
+def anime_preview_route():
+    data = request.get_json() or {}
+    try:
+        if not isinstance(data, dict):
+            raise ValueError('Preview request must be an object')
+        settings = validate_anime_settings(data.get('settings'), anime_languages())
+        text = data.get('text', 'Even across the stars,\nI will always find my way back to you.')
+        if not isinstance(text, str) or not text.strip() or len(text) > 400:
+            raise ValueError('Preview text must contain 1–400 characters')
+        content = srt_to_ass('1\n00:00:00,000 --> 00:00:05,000\n' + text, settings)
+        with tempfile.TemporaryDirectory(prefix='anime-preview-') as directory:
+            Path(directory, 'preview.ass').write_text(content, encoding='utf-8')
+            result = subprocess.run([
+                'ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=0x172438:s=960x540',
+                '-vf', 'drawbox=x=0:y=250:w=960:h=290:color=0x263e49:t=fill,ass=preview.ass',
+                '-frames:v', '1', '-f', 'image2pipe', '-c:v', 'png', '-',
+            ], cwd=directory, capture_output=True, timeout=20)
+            if result.returncode or not result.stdout:
+                raise RuntimeError('ASS preview requires ffmpeg with libass and installed fonts')
+            return Response(result.stdout, mimetype='image/png', headers={'Cache-Control': 'no-store'})
+    except (ValueError, TypeError) as error:
+        return jsonify({'error': str(error)}), 400
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+        return jsonify({'error': str(error)}), 503
+
+
+@app.route('/api/anime/plan', methods=['POST'])
+@app.route('/api/anime/queue', methods=['POST'])
+def anime_queue_route():
+    data = request.get_json() or {}
+    try:
+        if not isinstance(data, dict):
+            raise ValueError('Anime request must be an object')
+        settings = validate_anime_settings(data.get('settings', config.get('anime_settings', {})), anime_languages())
+        queued = []
+        with db() as conn:
+            # Serialize concurrent queue submissions before checking active jobs.
+            conn.execute('BEGIN IMMEDIATE')
+            files = anime_request_files(data, conn)
+            plans = []
+            destinations = set()
+            for mf in files:
+                plan = anime_file_plan(mf, settings)
+                active = conn.execute(
+                    "SELECT id FROM translation_jobs WHERE (filepath IN (?,?) OR output_path=?) AND status NOT IN ('done','failed','cancelled')",
+                    (mf['filepath'], plan['output_path'], plan['output_path']),
+                ).fetchone()
+                encoding = conn.execute(
+                    "SELECT id FROM encode_jobs WHERE filepath IN (?,?) AND status IN ('queued','encoding')", (mf['filepath'], plan['output_path']),
+                ).fetchone()
+                if active or encoding:
+                    plan['reason'] = 'Another job is queued or running for this file. Try again after it finishes.'
+                destination_record = conn.execute('SELECT id FROM media_files WHERE filepath=? AND id!=?',
+                                                  (plan['output_path'], mf['id'])).fetchone()
+                if destination_record:
+                    plan['reason'] = 'The output MKV is already registered in the library. Rename the source to avoid a conflict.'
+                if plan['output_path'] in destinations:
+                    plan['reason'] = 'Another selected file has the same output MKV filename. Rename one source to avoid a conflict.'
+                if not plan['reason']:
+                    destinations.add(plan['output_path'])
+                if request.path.endswith('/queue') and not plan['reason']:
+                    source = plan['convert'][0]
+                    cursor = conn.execute(
+                        'INSERT INTO translation_jobs (media_file_id,filepath,source_sub_idx,source_lang,source_codec,job_type,anime_settings,target_lang,output_path) '
+                        "VALUES (?,?,?,?,?,'anime',?,?,?)",
+                        (mf['id'], mf['filepath'], source.get('sub_idx'), source.get('lang', ''),
+                         source.get('codec', ''), json.dumps(settings), settings['target_lang'], plan['output_path']),
+                    )
+                    queued.append(cursor.lastrowid)
+                plans.append({k: v for k, v in plan.items() if k not in ('convert', 'keep_audio', 'keep_subs')})
+        if request.path.endswith('/queue'):
+            config['anime_settings'] = settings
+            save_config()
+            for jid in queued:
+                translation_queue.put(jid)
+        return jsonify({'files': plans, 'queued': queued, 'count': len(queued), 'settings': settings})
+    except (ValueError, TypeError) as error:
+        return jsonify({'error': str(error)}), 400
+
+
+def run_anime_job(job, mf):
+    job_id, filepath = job['id'], job['filepath']
+
+    def progress(status, pct, detail):
+        with db() as conn:
+            row = conn.execute('SELECT status FROM translation_jobs WHERE id=?', (job_id,)).fetchone()
+            if not row or row['status'] == 'cancelled':
+                raise RuntimeError('Job cancelled')
+            conn.execute('UPDATE translation_jobs SET status=?,progress=?,progress_detail=?,started_at=COALESCE(started_at,datetime(\'now\')) WHERE id=?',
+                         (status, pct, detail, job_id))
+
+    try:
+        settings = validate_anime_settings(json.loads(job['anime_settings']), anime_languages())
+        progress('extracting', 1, 'Checking tracks and language filters…')
+        original_stat = os.stat(filepath)
+        probe = run_ffprobe(filepath)
+        if not probe:
+            raise ValueError('Could not read media tracks')
+        _, audio, subs = _streams_from_ffprobe(probe)
+        fresh = {**dict(mf), 'audio_tracks': json.dumps(audio), 'subtitle_tracks': json.dumps(subs)}
+        plan = anime_file_plan(fresh, settings)
+        if plan['reason']:
+            raise ValueError(plan['reason'])
+        with tempfile.TemporaryDirectory(prefix='.anime-', dir=str(Path(filepath).parent)) as directory:
+            outputs = []
+            for i, source in enumerate(plan['convert']):
+                base = 5 + 70 * i / len(plan['convert'])
+                tmp_srt = str(Path(directory, f'{i}.srt'))
+                source_lang = normalize_lang(source.get('lang'))
+                if source.get('path'):
+                    progress('extracting', base, f'Reading {Path(source["path"]).name}…')
+                    result = subprocess.run(['ffmpeg', '-v', 'error', '-y', '-i', source['path'], tmp_srt], capture_output=True, timeout=120)
+                    if result.returncode:
+                        raise ValueError('Could not read sidecar subtitle')
+                elif is_image_based_subtitle(source.get('codec')):
+                    progress('ocr', base, 'Reading PGS subtitle images…')
+                    content = pgs_ocr(filepath, source['sub_idx'], source_lang, job_id=job_id,
+                                      progress_cb=lambda pct, detail: progress('ocr', base + pct * .25, detail))
+                    Path(tmp_srt).write_text(content, encoding='utf-8')
+                else:
+                    progress('extracting', base, f'Extracting subtitle #{source["sub_idx"]}…')
+                    if not extract_subtitle_to_srt(filepath, source['sub_idx'], tmp_srt):
+                        raise ValueError('Could not extract subtitle')
+                if plan['needs_translation'] and i == 0:
+                    progress('translating', 25, 'Translating missing target language…')
+                    content = translate_subtitle_file(tmp_srt, source_lang, job_id=job_id,
+                        target_lang=settings['target_lang'],
+                        progress_cb=lambda pct, detail: progress('translating', 25 + pct * .5, detail))
+                    lang = settings['target_lang']
+                else:
+                    content = Path(tmp_srt).read_text(encoding='utf-8-sig')
+                    lang = source_lang or 'und'
+                progress('styling', 78, 'Applying ASS style…')
+                out = Path(directory, f'{i}.ass')
+                out.write_text(srt_to_ass(content, settings), encoding='utf-8')
+                outputs.append((str(out), lang))
+
+            progress('muxing', 85, 'Removing unwanted tracks and muxing styled ASS…')
+            output = str(Path(directory, 'output.tmp'))
+            cmd = ['ffmpeg', '-v', 'error', '-y', '-fflags', '+genpts', '-i', filepath]
+            for ass_path, _ in outputs:
+                cmd += ['-i', ass_path]
+            # Transport streams may contain data packets unsupported by MKV.
+            # Preserve video, audio, attachments, chapters, and metadata.
+            cmd += ['-map', '0:v?', '-map', '0:a?', '-map', '0:t?']
+            kept_audio_ids = {t['audio_idx'] for t in plan['keep_audio']}
+            for track in audio:
+                if track['audio_idx'] not in kept_audio_ids:
+                    cmd += ['-map', f'-0:a:{track["audio_idx"]}']
+            for track in plan['keep_subs']:
+                cmd += ['-map', f'0:s:{track["sub_idx"]}']
+            for i in range(len(outputs)):
+                cmd += ['-map', f'{i + 1}:0']
+            cmd += ['-c', 'copy', '-map_metadata', '0', '-map_chapters', '0']
+            for i, (_, lang) in enumerate(outputs, len(plan['keep_subs'])):
+                cmd += [f'-metadata:s:s:{i}', f'language={lang}',
+                        f'-metadata:s:s:{i}', f'title=Anime ASS ({lang})', f'-disposition:s:{i}', '0']
+            cmd += ['-f', 'matroska', output]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=None)
+            if result.returncode:
+                raise RuntimeError(f'ASS remux failed: {result.stderr[-500:]}')
+            check = run_ffprobe(output)
+            if not check:
+                raise RuntimeError('Cannot verify remux output; original kept')
+            videos, new_audio, new_subs = _streams_from_ffprobe(check)
+            original_videos = [s for s in probe.get('streams', []) if s.get('codec_type') == 'video']
+            if len(videos) != len(original_videos) or len(new_audio) != len(plan['keep_audio']) or len(new_subs) != len(plan['keep_subs']) + len(outputs):
+                raise RuntimeError('Remux track verification failed; original kept')
+            if any(t['codec'] not in ('ass', 'ssa') for t in new_subs[len(plan['keep_subs']):]):
+                raise RuntimeError('Styled ASS tracks missing; original kept')
+            current_stat = os.stat(filepath)
+            if (current_stat.st_size, current_stat.st_mtime_ns) != (original_stat.st_size, original_stat.st_mtime_ns):
+                raise RuntimeError('Media changed while processing; original kept')
+            info = parse_media_info(output)
+            if not info:
+                raise RuntimeError('Cannot read output metadata; original kept')
+            destination = plan['output_path']
+            info.update(filepath=destination, filename=Path(destination).name,
+                        folder_name=mf['folder_name'], media_type=mf['media_type'],
+                        show_name=mf['show_name'], season_episode=mf['season_episode'],
+                        has_sibling_videos=mf['has_sibling_videos'])
+            info['status'] = determine_status(info['size_bytes'], new_audio, new_subs, destination, mf['media_type'])
+            # Cancellation is checked immediately before the atomic replacement.
+            owns_destination = False
+            try:
+                with db() as conn:
+                    conn.execute('BEGIN IMMEDIATE')
+                    current = conn.execute('SELECT status FROM translation_jobs WHERE id=?', (job_id,)).fetchone()
+                    if not current or current['status'] == 'cancelled':
+                        return
+                    if plan['converts_container']:
+                        # Exclusive reservation prevents clobbering an output
+                        # created after planning, on Windows and Unix alike.
+                        with open(destination, 'xb'):
+                            pass
+                        owns_destination = True
+                    os.replace(output, destination)
+                    assignments = ','.join(f'{column}=?' for column in info)
+                    conn.execute(f'UPDATE media_files SET {assignments},scanned_at=datetime(\'now\') WHERE id=?',
+                                 [*info.values(), mf['id']])
+                    if plan['converts_container']:
+                        for table in ('encode_jobs', 'translation_jobs'):
+                            conn.execute(f'UPDATE {table} SET filepath=? WHERE media_file_id=?', (destination, mf['id']))
+                    conn.execute("INSERT OR REPLACE INTO processed_files (filepath,status,size,processed_at) VALUES (?,?,?,datetime('now'))",
+                                 (destination, info['status'], info['size_bytes']))
+                    detail = f'ASS styled; language filters applied → {Path(destination).name}'
+                    conn.execute("UPDATE translation_jobs SET status='done',progress=100,progress_detail=?,completed_at=datetime('now') WHERE id=?", (detail, job_id))
+            except Exception:
+                if owns_destination:
+                    os.remove(destination)
+                raise
+            if plan['converts_container']:
+                try:
+                    current_stat = os.stat(filepath)
+                    if (current_stat.st_size, current_stat.st_mtime_ns) != (original_stat.st_size, original_stat.st_mtime_ns):
+                        raise OSError('Source changed before cleanup')
+                    os.remove(filepath)
+                except OSError as error:
+                    detail = f'Completed → {Path(destination).name}; original retained: {error}'
+                    log('warn', f'[anime] {detail}')
+                    with db() as conn:
+                        conn.execute('UPDATE translation_jobs SET progress_detail=? WHERE id=?', (detail, job_id))
+        log('info', f'[anime] job {job_id} done — {Path(destination).name}')
+    except Exception as error:
+        with db() as conn:
+            current = conn.execute('SELECT status FROM translation_jobs WHERE id=?', (job_id,)).fetchone()
+        if current and current['status'] not in ('cancelled', 'done'):
+            _fail_translation_job(job_id, str(error))
+
+
 # ── Flask routes — subtitle translation ──────────────────────────────────────
 @app.route('/api/media/<int:file_id>/translate-subtitle', methods=['POST'])
 def api_translate_subtitle(file_id):
@@ -4340,7 +4775,7 @@ def api_translate_subtitle(file_id):
 
         active = conn.execute(
             "SELECT id FROM translation_jobs WHERE filepath=? "
-            "AND status IN ('pending','extracting','ocr','translating','muxing')",
+            "AND status IN ('pending','extracting','ocr','translating','styling','muxing')",
             (mf['filepath'],),
         ).fetchone()
         if active:
@@ -4385,7 +4820,7 @@ def api_extract_subtitle(file_id, sub_idx):
 
         active = conn.execute(
             "SELECT id FROM translation_jobs WHERE filepath=? "
-            "AND status IN ('pending','extracting','ocr','translating','muxing')",
+            "AND status IN ('pending','extracting','ocr','translating','styling','muxing')",
             (mf['filepath'],),
         ).fetchone()
         if active:
@@ -4630,7 +5065,7 @@ def cancel_all_translate():
     with db() as conn:
         jobs = conn.execute(
             "SELECT id FROM translation_jobs "
-            "WHERE status IN ('pending','extracting','ocr','translating','muxing')"
+            "WHERE status IN ('pending','extracting','ocr','translating','styling','muxing')"
         ).fetchall()
         for job in jobs:
             conn.execute(
@@ -4678,6 +5113,11 @@ def _recover_queued_jobs():
         encode_queue.put(row['id'])
     if rows:
         log('warn', f"[startup] re-queued {len(rows)} interrupted encode job(s)")
+    with db() as conn:
+        conn.execute("UPDATE translation_jobs SET status='pending',progress=0 WHERE status IN ('extracting','ocr','translating','styling','muxing')")
+        subtitles = conn.execute("SELECT id FROM translation_jobs WHERE status='pending' ORDER BY id").fetchall()
+    for row in subtitles:
+        translation_queue.put(row['id'])
 
 
 if __name__ == '__main__':

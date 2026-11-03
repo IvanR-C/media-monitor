@@ -5,6 +5,7 @@ export const TRANSLATE_PHASES = [
   "extracting",
   "ocr",
   "translating",
+  "styling",
   "muxing",
 ] as const;
 
@@ -17,6 +18,7 @@ export const TRANSLATE_STATUS_LABEL: Record<string, string> = {
   extracting: "Extracting",
   ocr: "OCR",
   translating: "Translating",
+  styling: "Styling ASS",
   muxing: "Muxing",
   done: "Done",
   failed: "Failed",

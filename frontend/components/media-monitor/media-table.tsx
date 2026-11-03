@@ -20,6 +20,7 @@ import {
 } from "@/components/ui/dialog";
 import { MediaDetailsDrawer } from "./media-details-drawer";
 import { LanguagePicker } from "./language-picker";
+import { FixAnimeDialog, type AnimeSelection } from "./fix-anime-dialog";
 import { languageLabel, languageSummary, normalizeLanguage } from "@/lib/languages";
 import { useTableGroupSpan } from "@/hooks/use-table-group-span";
 import { cn } from "@/lib/utils";
@@ -47,6 +48,7 @@ import {
   Search,
   Disc,
   Download,
+  Sparkles,
 } from "lucide-react";
 import {
   Tooltip,
@@ -160,6 +162,17 @@ export function MediaTable({
     null,
   );
   const [muxDialogFile, setMuxDialogFile] = useState<MediaFile | null>(null);
+  const [animeSelection, setAnimeSelection] = useState<AnimeSelection | null>(null);
+  const openAnimeFile = (file: MediaFile) => setAnimeSelection({
+    label: [file.show_name || file.folder_name, file.season_episode].filter(Boolean).join(" · "),
+    scope: { kind: "file", file_id: file.id },
+  });
+  const animeGroupMenu = (kind: "show" | "season", label: string, fileId: number) => (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild><Button aria-label={`Actions for ${label}`} variant="ghost" size="icon" className="h-7 w-7 shrink-0" onClick={e => e.stopPropagation()}><MoreHorizontal className="h-3.5 w-3.5" /></Button></DropdownMenuTrigger>
+      <DropdownMenuContent align="end"><DropdownMenuItem onClick={e => { e.stopPropagation(); setAnimeSelection({ label: `${label} · Full ${kind}`, scope: { kind, file_id: fileId } }); }}><Sparkles className="mr-2 h-3.5 w-3.5" />Fix Anime · full {kind}</DropdownMenuItem></DropdownMenuContent>
+    </DropdownMenu>
+  );
   const [sortCol, setSortCol] = useState<SortCol>("title");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
 
@@ -342,6 +355,7 @@ export function MediaTable({
           onOpenDetails={openDetails}
           onOpenAssignDialog={setAssignDialogFile}
           onOpenMuxDialog={setMuxDialogFile}
+          onFixAnime={openAnimeFile}
           onFolderScan={() => onFolderScan([file.id])}
         />
       ));
@@ -412,7 +426,7 @@ export function MediaTable({
               </button></Hint>
             </div>
           </td>
-          <td className="w-8 px-2 py-2" />
+          <td className="w-8 px-2 py-2" onClick={e => e.stopPropagation()}>{animeGroupMenu("show", showName, allShowIds[0])}</td>
         </tr>,
       );
 
@@ -475,7 +489,7 @@ export function MediaTable({
                 </button></Hint>
               </div>
             </td>
-            <td className="w-8 px-2 py-2" />
+            <td className="w-8 px-2 py-2" onClick={e => e.stopPropagation()}>{animeGroupMenu("season", `${showName} ${seasonName}`, allSeasonIds[0])}</td>
           </tr>,
         );
 
@@ -495,6 +509,7 @@ export function MediaTable({
               onOpenDetails={openDetails}
           onOpenAssignDialog={setAssignDialogFile}
               onOpenMuxDialog={setMuxDialogFile}
+              onFixAnime={openAnimeFile}
               isEpisode
             />,
           );
@@ -512,6 +527,7 @@ export function MediaTable({
             {selectedIds.size} selected
           </span>
           <div className="flex flex-wrap gap-2">
+            <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => setAnimeSelection({ label: `${selectedFiles.length} selected files`, file_ids: selectedFiles.map(file => file.id) })}><Sparkles className="mr-1 h-3 w-3" />Fix Anime</Button>
             <Button
               size="sm"
               className="h-7 text-xs"
@@ -663,6 +679,7 @@ export function MediaTable({
                 onOpenDetails={openDetails}
           onOpenAssignDialog={setAssignDialogFile}
                 onOpenMuxDialog={setMuxDialogFile}
+                onFixAnime={openAnimeFile}
                 onFolderScan={() => onFolderScan([file.id])}
               />
             ))
@@ -718,6 +735,7 @@ export function MediaTable({
                     <span className="shrink-0 text-xs text-muted-foreground">
                       {seasonMap.size}s · {totalEps}ep
                     </span>
+                    {animeGroupMenu("show", showName, allShowIds[0])}
                     <Hint content="Re-scan show"><button
                       aria-label="Re-scan show"
                       onClick={() => onFolderScan(allShowIds)}
@@ -776,6 +794,7 @@ export function MediaTable({
                               <span className="shrink-0 text-xs text-muted-foreground">
                                 {episodes.length}ep
                               </span>
+                              {animeGroupMenu("season", `${showName} ${seasonName}`, allSeasonIds[0])}
                               <Hint content="Re-scan season"><button
                                 aria-label="Re-scan season"
                                 onClick={() => onFolderScan(allSeasonIds)}
@@ -799,6 +818,7 @@ export function MediaTable({
                                   onOpenDetails={openDetails}
           onOpenAssignDialog={setAssignDialogFile}
                                   onOpenMuxDialog={setMuxDialogFile}
+                                  onFixAnime={openAnimeFile}
                                   indent
                                   isEpisode
                                 />
@@ -819,6 +839,7 @@ export function MediaTable({
         onEnqueue={onEnqueue} onRip={onRip} onTranslate={onTranslate} onDownloadSubtitle={onDownloadSubtitle}
         onRefresh={onRefresh || (() => {})} onOpenPosterSettings={onOpenPosterSettings}
       />
+      {animeSelection && <FixAnimeDialog selection={animeSelection} onClose={() => setAnimeSelection(null)} onQueued={() => onRefresh?.()} />}
       <TrackAssignDialog
         file={assignDialogFile}
         open={assignDialogFile !== null}
@@ -854,6 +875,7 @@ function MobileFileCard({
   onOpenAssignDialog,
   onOpenDetails,
   onOpenMuxDialog,
+  onFixAnime,
   indent,
   isEpisode,
   onFolderScan,
@@ -868,6 +890,7 @@ function MobileFileCard({
   onOpenAssignDialog: (file: MediaFile) => void;
   onOpenDetails: (file: MediaFile) => void;
   onOpenMuxDialog?: (file: MediaFile) => void;
+  onFixAnime: (file: MediaFile) => void;
   indent?: boolean;
   isEpisode?: boolean;
   onFolderScan?: () => void;
@@ -931,6 +954,7 @@ function MobileFileCard({
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
+            <DropdownMenuItem onClick={() => onFixAnime(file)}><Sparkles className="mr-2 h-3.5 w-3.5" />Fix Anime…</DropdownMenuItem>
             <DropdownMenuItem onClick={() => onOpenDetails(file)}><FileVideo className="mr-2 h-3.5 w-3.5" />View details</DropdownMenuItem>
             <DropdownMenuSeparator />
             {file.disc_type ? (
@@ -1054,6 +1078,7 @@ interface MediaTableRowProps {
   onOpenAssignDialog: (file: MediaFile) => void;
   onOpenDetails: (file: MediaFile) => void;
   onOpenMuxDialog?: (file: MediaFile) => void;
+  onFixAnime: (file: MediaFile) => void;
   isEpisode?: boolean;
   onFolderScan?: () => void;
 }
@@ -1069,6 +1094,7 @@ function MediaTableRow({
   onOpenAssignDialog,
   onOpenDetails,
   onOpenMuxDialog,
+  onFixAnime,
   isEpisode,
   onFolderScan,
 }: MediaTableRowProps) {
@@ -1159,6 +1185,7 @@ function MediaTableRow({
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
+            <DropdownMenuItem onClick={() => onFixAnime(file)}><Sparkles className="mr-2 h-3.5 w-3.5" />Fix Anime…</DropdownMenuItem>
             <DropdownMenuItem onClick={() => onOpenDetails(file)}><FileVideo className="mr-2 h-3.5 w-3.5" />View details</DropdownMenuItem>
             <DropdownMenuSeparator />
             {file.disc_type ? (

@@ -54,7 +54,9 @@ interface TranslationJob {
   media_type?: "movie" | "show"
   show_name?: string
   season_episode?: string
-  status: "pending" | "extracting" | "ocr" | "translating" | "muxing" | "done" | "failed" | "cancelled"
+  status: "pending" | "extracting" | "ocr" | "translating" | "styling" | "muxing" | "done" | "failed" | "cancelled"
+  job_type?: "translate" | "anime"
+  target_lang?: string
   progress?: number
   progress_detail?: string
   source_lang?: string
@@ -579,7 +581,9 @@ function TranslateJobRow({
           <span className="truncate font-medium text-foreground/90">
             {job.media_type === "show" && job.show_name ? job.show_name : job.folder_name}
           </span>
-          {job.extract_only ? (
+          {job.job_type === "anime" ? (
+            <span className="shrink-0 text-[10px] text-accent">Fix Anime · ASS</span>
+          ) : job.extract_only ? (
             <span className="shrink-0 text-[10px] text-muted-foreground uppercase">Extract only</span>
           ) : job.source_lang ? (
             <span className="shrink-0 text-[10px] text-muted-foreground uppercase">{job.source_lang} → SPA</span>
@@ -589,7 +593,7 @@ function TranslateJobRow({
           <div className="text-[10px] text-muted-foreground">{job.season_episode}</div>
         )}
         {/* Detailed status line */}
-        {isActive && (
+        {(isActive || job.job_type === "anime") && (
           <div className="mt-0.5 flex items-center gap-2">
             <span className={cn(
               "text-[10px] font-medium",
