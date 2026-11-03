@@ -1,11 +1,9 @@
 import subprocess
 import datetime
 import sys
-import os
 
-# Configuration
+# Configuration — single merged image (Flask backend + static Next.js frontend)
 BACKEND_REPO = "ivanchelo/media-monitor"
-FRONTEND_REPO = "ivanchelo/media-monitor-frontend"
 
 def get_next_version(repo):
     """
@@ -52,22 +50,14 @@ def main():
     version = get_next_version(BACKEND_REPO)
     print(f"--- Target Version: {version} ---")
 
-    # 2. Build & Push Backend (Root directory)
-    print("\nBuilding Backend...")
+    # 2. Build & Push (Root directory — Dockerfile builds the frontend static
+    #    export in its own stage, so this is the only image to produce)
+    print("\nBuilding...")
     run_command(["docker", "build", "-t", f"{BACKEND_REPO}:{version}", "-t", f"{BACKEND_REPO}:latest", "."])
 
-    print("\nPushing Backend...")
+    print("\nPushing...")
     run_command(["docker", "push", f"{BACKEND_REPO}:{version}"])
     run_command(["docker", "push", f"{BACKEND_REPO}:latest"])
-
-    # 3. Build & Push Frontend
-    print("\nBuilding Frontend...")
-    frontend_dir = os.path.join(os.getcwd(), "frontend")
-    run_command(["docker", "build", "-t", f"{FRONTEND_REPO}:{version}", "-t", f"{FRONTEND_REPO}:latest", "."], cwd=frontend_dir)
-
-    print("\nPushing Frontend...")
-    run_command(["docker", "push", f"{FRONTEND_REPO}:{version}"])
-    run_command(["docker", "push", f"{FRONTEND_REPO}:latest"])
 
     print(f"\nSuccessfully deployed version {version}!")
 
