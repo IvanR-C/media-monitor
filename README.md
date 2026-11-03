@@ -73,6 +73,15 @@ See [docs/encoding.md](docs/encoding.md) for full details.
 
 See [docs/subtitle-translation.md](docs/subtitle-translation.md) for full details.
 
+### ✨ Fix Anime
+- Movie, episode, full-season, full-show, and selected-file actions
+- Saved ASS styles with a live ffmpeg/libass preview
+- Keep selected audio/subtitle languages; remux away unwanted tracks
+- Translate a missing target language with the configured AI provider, or convert kept subtitles to ASS without translation
+- All library video formats accepted; automatic MKV remuxing for ASS with output verification and queue progress
+
+See [docs/fix-anime.md](docs/fix-anime.md) for behavior and requirements.
+
 ### 📎 External Subtitle Muxing
 - Movies with no subtitle tracks get a **Mux Subtitle File** action in their ··· menu
 - Scans the movie's directory for `.srt`, `.ass`, `.ssa`, `.vtt`, or `.sub` files
