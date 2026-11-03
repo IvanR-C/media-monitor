@@ -8,6 +8,7 @@ import ast
 import json
 import time
 import shutil
+import secrets
 import select
 import struct
 import threading
@@ -21,12 +22,17 @@ from queue import Queue
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
-from flask import Flask, render_template, request, jsonify, Response
+from flask import Flask, request, jsonify, Response, session, send_from_directory
+from werkzeug.security import generate_password_hash, check_password_hash
 import requests
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-app = Flask(__name__)
+# The Next.js dashboard is built as a static export (frontend/out/) and
+# copied into static/ by the Dockerfile — Flask serves it directly alongside
+# the API, so the whole app is one process/one container/one port.
+STATIC_DIR = os.environ.get('STATIC_DIR', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static'))
+app = Flask(__name__, static_folder=STATIC_DIR, static_url_path='')
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 CONFIG_FILE        = os.environ.get('CONFIG_FILE', '/config/config.json')
@@ -36,6 +42,48 @@ STABILIZE_INTERVAL = int(os.environ.get('STABILIZE_INTERVAL', '10'))
 STABILIZE_CHECKS   = int(os.environ.get('STABILIZE_CHECKS', '3'))
 MAX_WORKERS        = int(os.environ.get('MAX_WORKERS', '4'))
 REENCODE_SIZE_GB   = float(os.environ.get('REENCODE_SIZE_GB', '20'))
+
+# ── Auth configuration ─────────────────────────────────────────────────────────
+AUTH_FILE        = os.environ.get('AUTH_FILE', os.path.join(os.path.dirname(CONFIG_FILE), 'auth.json'))
+SECRET_KEY_FILE  = os.environ.get('SECRET_KEY_FILE', os.path.join(os.path.dirname(CONFIG_FILE), 'secret_key'))
+# Cookies default to non-Secure since many homelab deployments are plain HTTP
+# on a LAN/Tailscale network. Set COOKIE_SECURE=true when served over HTTPS.
+COOKIE_SECURE    = os.environ.get('COOKIE_SECURE', 'false').lower() == 'true'
+# '' means "derive from the request Host header" — correct for the common case
+# of a single consistent hostname. Passkeys are bound to this value: a
+# credential registered under one hostname won't verify under another.
+WEBAUTHN_RP_ID   = os.environ.get('WEBAUTHN_RP_ID', '')
+WEBAUTHN_RP_NAME = os.environ.get('WEBAUTHN_RP_NAME', 'Media Monitor')
+
+
+def _load_or_create_secret_key():
+    """Persist a random Flask session-signing key under /config so sessions
+    (and the still-pending-MFA state they carry) survive container restarts."""
+    try:
+        os.makedirs(os.path.dirname(SECRET_KEY_FILE), exist_ok=True)
+        if os.path.exists(SECRET_KEY_FILE):
+            key = open(SECRET_KEY_FILE, encoding='utf-8').read().strip()
+            if key:
+                return key
+        key = secrets.token_hex(32)
+        with open(SECRET_KEY_FILE, 'w', encoding='utf-8') as f:
+            f.write(key)
+        try:
+            os.chmod(SECRET_KEY_FILE, 0o600)
+        except OSError:
+            pass
+        return key
+    except Exception as e:
+        print(f"[auth] secret key error: {e} — using an ephemeral key (sessions won't survive a restart)")
+        return secrets.token_hex(32)
+
+
+app.secret_key = _load_or_create_secret_key()
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax',
+    SESSION_COOKIE_SECURE=COOKIE_SECURE,
+)
 
 VIDEO_EXTENSIONS = (
     '.mkv', '.mp4', '.avi', '.mov', '.m4v',
@@ -365,6 +413,16 @@ def init_db():
                 completed_at    TEXT,
                 created_at      TEXT DEFAULT (datetime('now'))
             );
+
+            CREATE TABLE IF NOT EXISTS webauthn_credentials (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                credential_id TEXT UNIQUE NOT NULL,
+                public_key    TEXT NOT NULL,
+                sign_count    INTEGER DEFAULT 0,
+                name          TEXT,
+                created_at    TEXT DEFAULT (datetime('now')),
+                last_used_at  TEXT
+            );
         ''')
         # Migration: add source_codec to existing databases
         try:
@@ -392,6 +450,340 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_translate_status    ON translation_jobs(status);
             CREATE INDEX IF NOT EXISTS idx_translate_media     ON translation_jobs(media_file_id);
         ''')
+
+
+# ── Authentication (single admin account + optional passkey MFA) ──────────────
+import base64
+import webauthn
+from webauthn.helpers.structs import (
+    AttestationConveyancePreference,
+    AuthenticatorSelectionCriteria,
+    PublicKeyCredentialDescriptor,
+    ResidentKeyRequirement,
+    UserVerificationRequirement,
+)
+
+auth_state = {
+    'username':            '',
+    'password_hash':       '',
+    'user_id':             '',   # base64url random id, stable per install — WebAuthn user handle
+    'require_passkey_mfa': False,
+}
+
+# Endpoints reachable before a session exists — everything else under /api/
+# requires a prior successful login (see _require_auth below).
+_PUBLIC_AUTH_PATHS = {
+    '/api/auth/status',
+    '/api/auth/setup',
+    '/api/auth/login',
+    '/api/auth/logout',
+    '/api/auth/passkeys/login/options',
+    '/api/auth/passkeys/login/verify',
+}
+
+# Simple per-IP backoff against password guessing. Not a substitute for
+# network-level protection, but cheap insurance for an instance reachable
+# off the LAN (e.g. over Tailscale or a reverse proxy).
+_LOGIN_LOCKOUT_THRESHOLD = 5
+_LOGIN_LOCKOUT_SECONDS   = 30
+_login_failures      = {}   # ip -> (consecutive_fail_count, last_fail_ts)
+_login_failures_lock = threading.Lock()
+
+
+def load_auth():
+    global auth_state
+    try:
+        if os.path.exists(AUTH_FILE):
+            with open(AUTH_FILE, encoding='utf-8') as f:
+                auth_state.update(json.load(f))
+    except Exception as e:
+        print(f"[auth] load error: {e}")
+
+
+def save_auth():
+    try:
+        os.makedirs(os.path.dirname(AUTH_FILE), exist_ok=True)
+        with open(AUTH_FILE, 'w', encoding='utf-8') as f:
+            json.dump(auth_state, f, indent=2)
+        try:
+            os.chmod(AUTH_FILE, 0o600)
+        except OSError:
+            pass
+    except Exception as e:
+        print(f"[auth] save error: {e}")
+
+
+def _login_locked_out(ip):
+    with _login_failures_lock:
+        count, last = _login_failures.get(ip, (0, 0.0))
+        return count >= _LOGIN_LOCKOUT_THRESHOLD and (time.time() - last) < _LOGIN_LOCKOUT_SECONDS
+
+
+def _record_login_failure(ip):
+    with _login_failures_lock:
+        count, _ = _login_failures.get(ip, (0, 0.0))
+        _login_failures[ip] = (count + 1, time.time())
+
+
+def _record_login_success(ip):
+    with _login_failures_lock:
+        _login_failures.pop(ip, None)
+
+
+def _b64_decode(s):
+    """Decode a (possibly unpadded) base64url string to bytes."""
+    return base64.urlsafe_b64decode(s + '=' * (-len(s) % 4))
+
+
+def _b64_encode(b):
+    """Encode bytes to an unpadded base64url string."""
+    return base64.urlsafe_b64encode(b).decode().rstrip('=')
+
+
+def _webauthn_rp_id():
+    return WEBAUTHN_RP_ID or request.host.split(':')[0]
+
+
+def _webauthn_origin():
+    return request.headers.get('Origin') or request.url_root.rstrip('/')
+
+
+def _get_passkeys():
+    with db() as conn:
+        return conn.execute('SELECT * FROM webauthn_credentials ORDER BY created_at').fetchall()
+
+
+def _credential_descriptors(rows):
+    return [PublicKeyCredentialDescriptor(id=_b64_decode(r['credential_id'])) for r in rows]
+
+
+def _ensure_user_id():
+    if not auth_state.get('user_id'):
+        auth_state['user_id'] = _b64_encode(secrets.token_bytes(16))
+        save_auth()
+    return _b64_decode(auth_state['user_id'])
+
+
+@app.route('/api/auth/status')
+def auth_status():
+    passkeys = _get_passkeys()
+    return jsonify({
+        'setup_required':      not auth_state.get('password_hash'),
+        'authenticated':       bool(session.get('authenticated')),
+        'mfa_required':        bool(session.get('mfa_pending')),
+        'username':            auth_state.get('username') or None,
+        'passkey_count':       len(passkeys),
+        'require_passkey_mfa': bool(auth_state.get('require_passkey_mfa')),
+    })
+
+
+@app.route('/api/auth/setup', methods=['POST'])
+def auth_setup():
+    if auth_state.get('password_hash'):
+        return jsonify({'error': 'Already set up'}), 403
+    payload  = request.json or {}
+    username = (payload.get('username') or '').strip()
+    password = payload.get('password') or ''
+    if not username or len(password) < 8:
+        return jsonify({'error': 'Username is required and password must be at least 8 characters'}), 400
+    auth_state['username']      = username
+    auth_state['password_hash'] = generate_password_hash(password)
+    _ensure_user_id()
+    save_auth()
+    session.clear()
+    session['authenticated'] = True
+    return jsonify({'status': 'ok'})
+
+
+@app.route('/api/auth/login', methods=['POST'])
+def auth_login():
+    ip = request.remote_addr or 'unknown'
+    if _login_locked_out(ip):
+        return jsonify({'error': 'Too many attempts. Try again shortly.'}), 429
+    payload  = request.json or {}
+    username = (payload.get('username') or '').strip()
+    password = payload.get('password') or ''
+    if (not auth_state.get('password_hash')
+            or username != auth_state.get('username')
+            or not check_password_hash(auth_state['password_hash'], password)):
+        _record_login_failure(ip)
+        return jsonify({'error': 'Invalid username or password'}), 401
+    _record_login_success(ip)
+    session.clear()
+    if auth_state.get('require_passkey_mfa') and _get_passkeys():
+        session['mfa_pending'] = True
+        return jsonify({'status': 'mfa_required'})
+    session['authenticated'] = True
+    return jsonify({'status': 'ok'})
+
+
+@app.route('/api/auth/logout', methods=['POST'])
+def auth_logout():
+    session.clear()
+    return jsonify({'status': 'ok'})
+
+
+@app.route('/api/auth/change-password', methods=['POST'])
+def auth_change_password():
+    payload      = request.json or {}
+    current_pw   = payload.get('current_password') or ''
+    new_password = payload.get('new_password') or ''
+    if not check_password_hash(auth_state.get('password_hash', ''), current_pw):
+        return jsonify({'error': 'Current password is incorrect'}), 401
+    if len(new_password) < 8:
+        return jsonify({'error': 'New password must be at least 8 characters'}), 400
+    auth_state['password_hash'] = generate_password_hash(new_password)
+    save_auth()
+    return jsonify({'status': 'ok'})
+
+
+@app.route('/api/auth/mfa', methods=['POST'])
+def auth_set_mfa():
+    """Toggle whether a registered passkey is required as a 2nd factor after password."""
+    payload = request.json or {}
+    enable  = bool(payload.get('require_passkey_mfa'))
+    if enable and not _get_passkeys():
+        return jsonify({'error': 'Register a passkey before enabling passkey MFA'}), 400
+    auth_state['require_passkey_mfa'] = enable
+    save_auth()
+    return jsonify({'status': 'ok', 'require_passkey_mfa': enable})
+
+
+@app.route('/api/auth/passkeys')
+def list_passkeys():
+    rows = _get_passkeys()
+    return jsonify({'passkeys': [
+        {'id': r['id'], 'name': r['name'] or f"Passkey #{r['id']}",
+         'created_at': r['created_at'], 'last_used_at': r['last_used_at']}
+        for r in rows
+    ]})
+
+
+@app.route('/api/auth/passkeys/<int:cred_id>', methods=['DELETE'])
+def delete_passkey(cred_id):
+    with db() as conn:
+        conn.execute('DELETE FROM webauthn_credentials WHERE id=?', (cred_id,))
+    # Can't require a 2nd factor we no longer have any credential for.
+    if not _get_passkeys():
+        auth_state['require_passkey_mfa'] = False
+        save_auth()
+    return jsonify({'status': 'ok'})
+
+
+@app.route('/api/auth/passkeys/register/options', methods=['POST'])
+def passkey_register_options():
+    options = webauthn.generate_registration_options(
+        rp_id=_webauthn_rp_id(),
+        rp_name=WEBAUTHN_RP_NAME,
+        user_id=_ensure_user_id(),
+        user_name=auth_state.get('username') or 'admin',
+        user_display_name=auth_state.get('username') or 'admin',
+        attestation=AttestationConveyancePreference.NONE,
+        authenticator_selection=AuthenticatorSelectionCriteria(
+            resident_key=ResidentKeyRequirement.PREFERRED,
+            user_verification=UserVerificationRequirement.PREFERRED,
+        ),
+        exclude_credentials=_credential_descriptors(_get_passkeys()),
+    )
+    session['webauthn_challenge'] = _b64_encode(options.challenge)
+    return Response(webauthn.options_to_json(options), mimetype='application/json')
+
+
+@app.route('/api/auth/passkeys/register/verify', methods=['POST'])
+def passkey_register_verify():
+    challenge_b64 = session.pop('webauthn_challenge', None)
+    if not challenge_b64:
+        return jsonify({'error': 'No pending passkey registration'}), 400
+    payload    = request.get_json(silent=True) or {}
+    name       = (payload.get('name') or '').strip()[:100] or None
+    credential = payload.get('credential')
+    try:
+        verified = webauthn.verify_registration_response(
+            credential=credential,
+            expected_challenge=_b64_decode(challenge_b64),
+            expected_rp_id=_webauthn_rp_id(),
+            expected_origin=_webauthn_origin(),
+        )
+    except Exception as e:
+        return jsonify({'error': f'Passkey registration failed: {e}'}), 400
+
+    with db() as conn:
+        conn.execute(
+            'INSERT INTO webauthn_credentials (credential_id, public_key, sign_count, name) '
+            'VALUES (?,?,?,?)',
+            (_b64_encode(verified.credential_id), _b64_encode(verified.credential_public_key),
+             verified.sign_count, name),
+        )
+    return jsonify({'status': 'ok'})
+
+
+@app.route('/api/auth/passkeys/login/options', methods=['POST'])
+def passkey_login_options():
+    if not session.get('mfa_pending'):
+        return jsonify({'error': 'No login in progress'}), 400
+    options = webauthn.generate_authentication_options(
+        rp_id=_webauthn_rp_id(),
+        allow_credentials=_credential_descriptors(_get_passkeys()),
+        user_verification=UserVerificationRequirement.PREFERRED,
+    )
+    session['webauthn_challenge'] = _b64_encode(options.challenge)
+    return Response(webauthn.options_to_json(options), mimetype='application/json')
+
+
+@app.route('/api/auth/passkeys/login/verify', methods=['POST'])
+def passkey_login_verify():
+    if not session.get('mfa_pending'):
+        return jsonify({'error': 'No login in progress'}), 400
+    challenge_b64 = session.pop('webauthn_challenge', None)
+    if not challenge_b64:
+        return jsonify({'error': 'No pending passkey challenge'}), 400
+    payload    = request.get_json(silent=True) or {}
+    credential = payload.get('credential') or {}
+    cred_id    = credential.get('id')
+    if not cred_id:
+        return jsonify({'error': 'Malformed passkey response'}), 400
+
+    with db() as conn:
+        row = conn.execute(
+            'SELECT * FROM webauthn_credentials WHERE credential_id=?', (cred_id,)
+        ).fetchone()
+    if not row:
+        return jsonify({'error': 'Unknown passkey'}), 400
+
+    try:
+        verified = webauthn.verify_authentication_response(
+            credential=credential,
+            expected_challenge=_b64_decode(challenge_b64),
+            expected_rp_id=_webauthn_rp_id(),
+            expected_origin=_webauthn_origin(),
+            credential_public_key=_b64_decode(row['public_key']),
+            credential_current_sign_count=row['sign_count'],
+        )
+    except Exception as e:
+        return jsonify({'error': f'Passkey verification failed: {e}'}), 400
+
+    with db() as conn:
+        conn.execute(
+            "UPDATE webauthn_credentials SET sign_count=?, last_used_at=datetime('now') WHERE id=?",
+            (verified.new_sign_count, row['id']),
+        )
+    session.pop('mfa_pending', None)
+    session['authenticated'] = True
+    return jsonify({'status': 'ok'})
+
+
+@app.before_request
+def _require_auth():
+    path = request.path
+    if not path.startswith('/api/'):
+        return None  # static SPA shell/assets — the frontend gates itself on /api/auth/status
+    if path == '/api/health' or path in _PUBLIC_AUTH_PATHS:
+        return None
+    if not auth_state.get('password_hash'):
+        return jsonify({'error': 'setup_required'}), 401
+    if not session.get('authenticated'):
+        return jsonify({'error': 'authentication_required'}), 401
+    return None
 
 
 # ── Language helpers ──────────────────────────────────────────────────────────
@@ -3122,7 +3514,14 @@ def start_monitoring():
 # ── Flask routes — existing ───────────────────────────────────────────────────
 @app.route('/')
 def index():
-    return render_template('index.html', config=config)
+    index_path = os.path.join(app.static_folder or '', 'index.html')
+    if not os.path.exists(index_path):
+        return (
+            'Frontend build not found. Run `pnpm build` in frontend/ (output: '
+            'frontend/out/) or set STATIC_DIR to point at a built export, then restart.',
+            503,
+        )
+    return send_from_directory(app.static_folder, 'index.html')
 
 
 @app.route('/api/config', methods=['GET'])
@@ -4192,6 +4591,7 @@ if __name__ == '__main__':
     init_db()
     _migrate_db()
     load_config()
+    load_auth()
     os.makedirs(WATCH_DIR, exist_ok=True)
 
     _recover_queued_jobs()

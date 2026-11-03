@@ -105,21 +105,27 @@ For audio, only the **highest-quality** track per language is kept (e.g. TrueHD 
 
 ## 🚀 Quick Start
 
+Media Monitor ships as a single image — the Next.js dashboard is built as
+static files and served directly by the Flask backend, so there's one
+container and one port.
+
 ### Option A — Docker Hub (recommended)
 
-No build step required. Pull the pre-built images and start.
+No build step required. Pull the pre-built image and start.
 
 **1. Create a `docker-compose.yml`** (or download the one from this repo):
 
 ```yaml
 services:
-  backend:
+  media-monitor:
     image: ivanchelo/media-monitor:latest
-    container_name: media-monitor-backend
+    container_name: media-monitor
     restart: unless-stopped
+    ports:
+      - "5000:5000"
     volumes:
       - /path/to/your/media:/watch        # read/write — needed for in-place encoding
-      - ./config:/config                   # persistent config and database
+      - ./config:/config                   # persistent config, database, and auth state
     environment:
       - WATCH_DIR=/watch
       - PORT=5000
@@ -136,23 +142,16 @@ services:
       # - OPENAI_MODEL=gpt-4o-mini
       # - TVDB_API_KEY=your-tvdb-key
 
+      # Auth — see "Authentication" below
+      # - COOKIE_SECURE=true               # set this if served over HTTPS
+      # - WEBAUTHN_RP_ID=media.example.com # only needed if you use more than one hostname
+
     deploy:
       resources:
         reservations:
           devices:
             - count: all
               capabilities: [gpu, video]   # remove if no NVIDIA GPU
-
-  frontend:
-    image: ivanchelo/media-monitor-frontend:latest
-    container_name: media-monitor-frontend
-    restart: unless-stopped
-    ports:
-      - "3000:3000"
-    environment:
-      - BACKEND_URL=http://backend:5000
-    depends_on:
-      - backend
 ```
 
 **2. Start the stack:**
@@ -161,7 +160,7 @@ services:
 docker compose up -d
 ```
 
-**3. Open the UI at [http://localhost:3000](http://localhost:3000)**
+**3. Open the UI at [http://localhost:5000](http://localhost:5000)** and create the admin account on first launch.
 
 ---
 
@@ -172,21 +171,14 @@ docker compose up -d
 git clone https://github.com/your-username/media-monitor.git
 cd media-monitor
 
-# Build and start both containers
-docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+# Build, then start with the image you just built
+docker build -t ivanchelo/media-monitor:latest .
+docker compose up -d
 ```
 
-Or build each image manually:
-
-```bash
-# Backend
-docker build -t media-monitor-backend .
-
-# Frontend
-docker build -t media-monitor-frontend ./frontend
-```
-
-> **Note on build time:** The backend image installs `tesseract-ocr-all` (all language packs for OCR) which is approximately 1 GB. First builds will take several minutes depending on your connection.
+> **Note on build time:** The image installs `tesseract-ocr-all` (all language packs for OCR, ~1 GB) and builds the frontend in its own Node stage. First builds will take several minutes depending on your connection.
+>
+> On every push to `main`, a GitHub Actions workflow builds and publishes this image to Docker Hub automatically — Option A pulls that, so you only need this if you're testing local changes before they're pushed.
 
 ---
 
@@ -226,26 +218,50 @@ All environment variables can also be set directly in `docker-compose.yml`:
 | `TVDB_API_KEY` | — | TheTVDB API key for poster art |
 | `DB_FILE` | `/config/processed.db` | SQLite database path |
 | `CONFIG_FILE` | `/config/config.json` | Config file path |
+| `AUTH_FILE` | `/config/auth.json` | Admin username/password hash + MFA setting |
+| `COOKIE_SECURE` | `false` | Set `true` when served over HTTPS so session cookies get the `Secure` flag |
+| `WEBAUTHN_RP_ID` | _(auto)_ | Passkey relying-party ID. Auto-detected from the request's hostname — set this only if you access the dashboard under more than one hostname |
+
+---
+
+## 🔐 Authentication
+
+The dashboard requires sign-in. On first launch you'll be asked to create a single admin
+username/password — there's no multi-user support, this is a single-household tool.
+
+From **Settings → Account & Security** you can:
+- Change the admin password
+- Register one or more **passkeys** (a hardware security key, your phone, or your OS's
+  biometrics/PIN) via WebAuthn
+- Require a passkey as a second factor after your password, once at least one is registered
+
+> Passkeys are bound to the hostname you register them under — a Tailscale IP one day and a
+> hostname the next will not share a passkey. Register from the same hostname you'll sign in
+> from, and use `WEBAUTHN_RP_ID` if you need one passkey to work across equivalent hostnames.
+> WebAuthn also requires a secure context (HTTPS, or `localhost`) — plain HTTP over a LAN IP
+> won't be able to complete the passkey step.
 
 ---
 
 ## 🏗️ Architecture
 
 ```
-┌─────────────────────────────────┐     ┌─────────────────────────────────┐
-│  Frontend  (port 3000)          │     │  Backend  (port 5000)           │
-│  Next.js 16 · React 19          │────▶│  Python 3.11 · Flask            │
-│  TypeScript · Tailwind · shadcn  │     │                                 │
-└─────────────────────────────────┘     │  ┌─ File watcher (watchdog)     │
-                                        │  ├─ Media analyzer (ffprobe)     │
-                                        │  ├─ Encode worker (ffmpeg/NVENC) │
-                                        │  ├─ Translate worker (OpenAI)    │
-                                        │  ├─ OCR engine (Tesseract)       │
-                                        │  └─ SQLite database              │
-                                        └─────────────────────────────────┘
-                                                       │
-                                              /watch volume
-                                        (your media directory)
+┌───────────────────────────────────────────────────┐
+│  Media Monitor  (port 5000)                        │
+│  Python 3.11 · Flask · waitress                    │
+│                                                     │
+│  ┌─ Static dashboard (Next.js SPA, pre-built)      │
+│  ├─ Auth (password + optional passkey/WebAuthn MFA)│
+│  ├─ File watcher (watchdog)                        │
+│  ├─ Media analyzer (ffprobe)                       │
+│  ├─ Encode worker (ffmpeg/NVENC)                    │
+│  ├─ Translate worker (OpenAI / local AI)            │
+│  ├─ OCR engine (Tesseract)                          │
+│  └─ SQLite database                                 │
+└───────────────────────────────────────────────────┘
+                       │
+              /watch volume
+        (your media directory)
 ```
 
 **Backend workers run in separate threads:**
@@ -290,23 +306,22 @@ All environment variables can also be set directly in `docker-compose.yml`:
 
 ```
 .
-├── app.py                    # Backend: Flask API, file watcher, workers
+├── app.py                    # Flask API, auth, file watcher, workers — serves the built frontend too
 ├── requirements.txt          # Python dependencies
-├── Dockerfile                # Backend container
-├── docker-compose.yml        # Production stack (Docker Hub images)
+├── Dockerfile                # Multi-stage: builds frontend/ (Node), then the Python runtime image
+├── docker-compose.yml        # Production stack (single image, Docker Hub)
 ├── entrypoint.sh             # Container entrypoint
-├── templates/
-│   └── index.html            # Legacy web UI (superseded by Next.js frontend)
 ├── frontend/
 │   ├── app/
 │   │   └── page.tsx          # Main page (Library + Settings views)
 │   ├── components/
-│   │   └── media-monitor/    # All UI components
-│   ├── Dockerfile            # Frontend container (multi-stage Next.js build)
+│   │   └── media-monitor/    # All UI components (incl. auth-gate, account-security-card)
+│   ├── next.config.mjs       # output: 'export' — static SPA, no Node needed at runtime
 │   └── package.json
 ├── config/                   # Created automatically on first run
 │   ├── config.json           # Saved settings
-│   └── processed.db          # SQLite database
+│   ├── auth.json             # Admin credentials (hashed) + MFA setting
+│   └── processed.db          # SQLite database (incl. registered passkeys)
 └── docs/
     ├── current_state.md      # Project state and known gaps
     ├── encoding.md           # Encoding feature walkthrough
@@ -323,8 +338,7 @@ All environment variables can also be set directly in `docker-compose.yml`:
 - [ ] CPU encoding fallback (software HEVC via libx265)
 - [ ] VOBSUB (DVD subtitle) OCR support
 - [ ] Batch encode/translate from the UI
-- [ ] User authentication for the web UI
-- [ ] Production WSGI server (replace Flask dev server)
+- [ ] Multi-user accounts (currently a single admin account)
 - [ ] Retry logic for failed notifications
 - [ ] File logging (complement in-memory log buffer)
 
@@ -335,7 +349,7 @@ All environment variables can also be set directly in `docker-compose.yml`:
 **Files not detected:**
 - Verify the volume mount in `docker-compose.yml` (`/path/to/your/media:/watch`)
 - Check that the file extension is supported (`.mkv`, `.mp4`, `.avi`, `.mov`, `.m4v`, `.m2ts`, `.mts`, `.mpg`, `.mpeg`, `.vob`, `.webm`, `.wmv`, `.flv`, `.3gp`)
-- Check container logs: `docker logs media-monitor-backend`
+- Check container logs: `docker logs media-monitor`
 
 **Encoding fails immediately:**
 - Confirm your NVIDIA driver is installed on the host: `nvidia-smi`
@@ -348,14 +362,17 @@ All environment variables can also be set directly in `docker-compose.yml`:
 - Check your OpenAI account has available credits
 - For PGS OCR jobs: the `ocr` phase runs before translation — progress will show "OCR frame N/N" first
 
-**Backend unreachable (frontend shows connection error):**
-- Confirm both containers are running: `docker compose ps`
-- Confirm `BACKEND_URL=http://backend:5000` is set in the frontend service
+**Locked out / passkey won't verify at login:**
+- Passkeys only validate under the hostname they were registered with (see "Authentication"
+  above) — if you changed how you access the dashboard, sign in with your password and register
+  a new passkey from the new hostname
+- If you're fully locked out, stop the container and remove the `require_passkey_mfa` setting
+  from `config/auth.json`, or delete `config/auth.json` entirely to redo first-run setup
+  (you'll lose the saved admin account, but not your library data)
 
 **Container logs:**
 ```bash
-docker logs media-monitor-backend  -f
-docker logs media-monitor-frontend -f
+docker logs media-monitor -f
 ```
 
 ---
