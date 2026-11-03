@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -18,16 +18,16 @@ import {
   DialogDescription,
   DialogFooter,
 } from "@/components/ui/dialog";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { MediaDetailsDrawer } from "./media-details-drawer";
+import { LanguagePicker } from "./language-picker";
+import { FixAnimeDialog, type AnimeSelection } from "./fix-anime-dialog";
+import { languageLabel, languageSummary, normalizeLanguage } from "@/lib/languages";
+import { useTableGroupSpan } from "@/hooks/use-table-group-span";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import {
+  Check,
+  X,
   MoreHorizontal,
   Play,
   Languages,
@@ -48,11 +48,13 @@ import {
   Search,
   Disc,
   Download,
+  Sparkles,
 } from "lucide-react";
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
+  Hint,
 } from "@/components/ui/tooltip";
 import { Skeleton } from "@/components/ui/skeleton";
 import type {
@@ -78,21 +80,7 @@ const IMAGE_CODECS = new Set([
 // Image codecs we can OCR+translate (PGS only for now)
 const OCR_CODECS = new Set(["hdmv_pgs_subtitle"]);
 
-const LANG_OPTIONS = [
-  { value: "__none__", label: "— Unknown —" },
-  { value: "eng", label: "English" },
-  { value: "spa", label: "Spanish" },
-  { value: "jpn", label: "Japanese" },
-  { value: "deu", label: "German" },
-  { value: "fra", label: "French" },
-  { value: "por", label: "Portuguese" },
-  { value: "ita", label: "Italian" },
-  { value: "zho", label: "Chinese" },
-  { value: "kor", label: "Korean" },
-  { value: "rus", label: "Russian" },
-  { value: "ara", label: "Arabic" },
-  { value: "hin", label: "Hindi" },
-];
+
 
 type SortCol =
   | "title"
@@ -127,6 +115,10 @@ interface MediaTableProps {
   /** Unfiltered library size, used to distinguish "library empty" from "filter empty". */
   totalFiles?: number;
   isScanning?: boolean;
+  revealKey?: string;
+  onResetFilters?: () => void;
+  onRefresh?: () => void;
+  onOpenPosterSettings?: () => void;
 }
 
 export function MediaTable({
@@ -150,7 +142,18 @@ export function MediaTable({
   loading,
   totalFiles,
   isScanning,
+  revealKey,
+  onResetFilters,
+  onRefresh,
+  onOpenPosterSettings,
 }: MediaTableProps) {
+  const groupSpan = useTableGroupSpan();
+  const [detailsFile, setDetailsFile] = useState<MediaFile | null>(null);
+  const detailsTrigger = useRef<HTMLElement | null>(null);
+  const openDetails = (file: MediaFile) => {
+    detailsTrigger.current = Array.from(document.querySelectorAll<HTMLElement>(`[data-details-file="${file.id}"]`)).find(element => element.getClientRects().length > 0) || document.activeElement as HTMLElement;
+    setDetailsFile(file);
+  };
   const [expandedShows, setExpandedShows] = useState<Set<string>>(new Set());
   const [expandedSeasons, setExpandedSeasons] = useState<Set<string>>(
     new Set(),
@@ -159,6 +162,17 @@ export function MediaTable({
     null,
   );
   const [muxDialogFile, setMuxDialogFile] = useState<MediaFile | null>(null);
+  const [animeSelection, setAnimeSelection] = useState<AnimeSelection | null>(null);
+  const openAnimeFile = (file: MediaFile) => setAnimeSelection({
+    label: [file.show_name || file.folder_name, file.season_episode].filter(Boolean).join(" · "),
+    scope: { kind: "file", file_id: file.id },
+  });
+  const animeGroupMenu = (kind: "show" | "season", label: string, fileId: number) => (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild><Button aria-label={`Actions for ${label}`} variant="ghost" size="icon" className="h-7 w-7 shrink-0" onClick={e => e.stopPropagation()}><MoreHorizontal className="h-3.5 w-3.5" /></Button></DropdownMenuTrigger>
+      <DropdownMenuContent align="end"><DropdownMenuItem onClick={e => { e.stopPropagation(); setAnimeSelection({ label: `${label} · Full ${kind}`, scope: { kind, file_id: fileId } }); }}><Sparkles className="mr-2 h-3.5 w-3.5" />Fix Anime · full {kind}</DropdownMenuItem></DropdownMenuContent>
+    </DropdownMenu>
+  );
   const [sortCol, setSortCol] = useState<SortCol>("title");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
 
@@ -188,7 +202,7 @@ export function MediaTable({
     });
   };
 
-  const allSelected = files.length > 0 && selectedIds.size === files.length;
+  const allSelected = files.length > 0 && files.every(file => selectedIds.has(file.id));
 
   const selectedFiles = files.filter((f) => selectedIds.has(f.id));
   const isTranslatable = (codec: string) => !IMAGE_CODECS.has(codec);
@@ -264,6 +278,15 @@ export function MediaTable({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sortedFiles, mediaType]);
 
+  useEffect(() => {
+    if (mediaType !== "show" || !revealKey) return;
+    setExpandedShows(new Set(showMap.keys()));
+    setExpandedSeasons(new Set(Array.from(showMap).flatMap(([show, seasons]) =>
+      Array.from(seasons.keys(), season => `${show}::${season}`))));
+    // Expand matches when the user changes a search/filter, not during polling.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revealKey, mediaType]);
+
   // Empty states are only shown after the first load completes. While loading
   // we render skeleton rows inside the table frame so headers don't shift.
   if (!loading && files.length === 0) {
@@ -307,6 +330,7 @@ export function MediaTable({
           Try clearing the search box or switching the filter pill above to
           “All”.
         </div>
+        <Button variant="outline" size="sm" onClick={onResetFilters}>Clear search & filters</Button>
       </div>
     );
   }
@@ -328,8 +352,10 @@ export function MediaTable({
           onRip={() => onRip(file.id)}
           onTranslate={onTranslate}
           onDownloadSubtitle={onDownloadSubtitle}
+          onOpenDetails={openDetails}
           onOpenAssignDialog={setAssignDialogFile}
           onOpenMuxDialog={setMuxDialogFile}
+          onFixAnime={openAnimeFile}
           onFolderScan={() => onFolderScan([file.id])}
         />
       ));
@@ -357,6 +383,7 @@ export function MediaTable({
         >
           <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
             <Checkbox
+              aria-label={`Select all episodes of ${showName}`}
               checked={
                 anySelected
                   ? allShowIds.every((id) => selectedIds.has(id))
@@ -372,8 +399,9 @@ export function MediaTable({
               }}
             />
           </td>
-          <td className="px-3 py-2" colSpan={8}>
+          <td className="px-3 py-2" colSpan={groupSpan}>
             <div className="flex items-center gap-2">
+              <button type="button" aria-label={`${isExpanded ? "Collapse" : "Expand"} ${showName}`} aria-expanded={isExpanded} onClick={e => { e.stopPropagation(); toggleShow(showName); }} className="flex min-w-0 flex-1 flex-wrap items-center gap-2 text-left focus-visible:ring-2 focus-visible:ring-ring">
               {isExpanded ? (
                 <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
               ) : (
@@ -384,8 +412,10 @@ export function MediaTable({
                 {seasonMap.size} season{seasonMap.size !== 1 ? "s" : ""} ·{" "}
                 {totalEps} ep{totalEps !== 1 ? "s" : ""}
               </span>
-              <button
-                title="Re-scan this show"
+              {Array.from(seasonMap.values()).flat().some(file => file.status !== "OK") && <span className="text-[11px] text-warning">{Array.from(seasonMap.values()).flat().filter(file => file.status !== "OK").length} need attention</span>}
+              </button>
+              <Hint content="Re-scan this show"><button
+                aria-label="Re-scan this show"
                 onClick={(e) => {
                   e.stopPropagation();
                   onFolderScan(allShowIds);
@@ -393,10 +423,10 @@ export function MediaTable({
                 className="ml-auto rounded p-1 text-muted-foreground/50 hover:bg-secondary/60 hover:text-foreground"
               >
                 <FolderSync className="h-3 w-3" />
-              </button>
+              </button></Hint>
             </div>
           </td>
-          <td className="w-8 px-2 py-2" />
+          <td className="w-8 px-2 py-2" onClick={e => e.stopPropagation()}>{animeGroupMenu("show", showName, allShowIds[0])}</td>
         </tr>,
       );
 
@@ -416,6 +446,7 @@ export function MediaTable({
           >
             <td className="px-3 py-2 pl-8" onClick={(e) => e.stopPropagation()}>
               <Checkbox
+                aria-label={`Select ${showName} ${seasonName}`}
                 checked={
                   anySeasonSel
                     ? allSeasonIds.every((id) => selectedIds.has(id))
@@ -431,8 +462,9 @@ export function MediaTable({
                 }}
               />
             </td>
-            <td className="px-3 py-2 pl-6" colSpan={8}>
+            <td className="px-3 py-2 pl-6" colSpan={groupSpan}>
               <div className="flex items-center gap-2">
+                <button type="button" aria-label={`${isSeasonExpanded ? "Collapse" : "Expand"} ${showName} ${seasonName}`} aria-expanded={isSeasonExpanded} onClick={e => { e.stopPropagation(); toggleSeason(seasonKey); }} className="flex min-w-0 flex-1 items-center gap-2 text-left focus-visible:ring-2 focus-visible:ring-ring">
                 {isSeasonExpanded ? (
                   <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
                 ) : (
@@ -444,8 +476,9 @@ export function MediaTable({
                 <span className="text-xs text-muted-foreground">
                   {episodes.length} ep{episodes.length !== 1 ? "s" : ""}
                 </span>
-                <button
-                  title="Re-scan this season"
+                </button>
+                <Hint content="Re-scan this season"><button
+                  aria-label="Re-scan this season"
                   onClick={(e) => {
                     e.stopPropagation();
                     onFolderScan(allSeasonIds);
@@ -453,10 +486,10 @@ export function MediaTable({
                   className="ml-auto rounded p-1 text-muted-foreground/50 hover:bg-secondary/60 hover:text-foreground"
                 >
                   <FolderSync className="h-3 w-3" />
-                </button>
+                </button></Hint>
               </div>
             </td>
-            <td className="w-8 px-2 py-2" />
+            <td className="w-8 px-2 py-2" onClick={e => e.stopPropagation()}>{animeGroupMenu("season", `${showName} ${seasonName}`, allSeasonIds[0])}</td>
           </tr>,
         );
 
@@ -473,8 +506,10 @@ export function MediaTable({
               onRip={() => onRip(ep.id)}
               onTranslate={onTranslate}
               onDownloadSubtitle={onDownloadSubtitle}
-              onOpenAssignDialog={setAssignDialogFile}
+              onOpenDetails={openDetails}
+          onOpenAssignDialog={setAssignDialogFile}
               onOpenMuxDialog={setMuxDialogFile}
+              onFixAnime={openAnimeFile}
               isEpisode
             />,
           );
@@ -487,11 +522,12 @@ export function MediaTable({
   return (
     <div className="flex h-full flex-col overflow-hidden rounded-lg border border-border/50">
       {selectedIds.size > 0 && (
-        <div className="flex shrink-0 items-center justify-between border-b border-border/50 bg-accent/5 px-4 py-2">
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border/50 bg-accent/5 px-4 py-2">
           <span className="text-sm text-muted-foreground">
             {selectedIds.size} selected
           </span>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => setAnimeSelection({ label: `${selectedFiles.length} selected files`, file_ids: selectedFiles.map(file => file.id) })}><Sparkles className="mr-1 h-3 w-3" />Fix Anime</Button>
             <Button
               size="sm"
               className="h-7 text-xs"
@@ -543,22 +579,12 @@ export function MediaTable({
       {/* ── Desktop table (sm+) ───────────────────────────────────────────────── */}
       <div className="hidden flex-1 overflow-auto sm:block">
         <table className="w-full table-fixed text-sm">
-          <colgroup>
-            <col className="w-10" />
-            <col className="w-[22%]" />
-            <col className="hidden lg:table-column w-[22%]" />
-            <col className="w-[10%]" />
-            <col className="hidden md:table-column w-[9%]" />
-            <col className="hidden lg:table-column w-[7%]" />
-            <col className="hidden xl:table-column w-[6%]" />
-            <col className="hidden xl:table-column w-[6%]" />
-            <col className="w-[14%]" />
-            <col className="w-8" />
-          </colgroup>
+
           <thead className="sticky top-0 z-10 bg-secondary/80 backdrop-blur-sm">
             <tr>
-              <th className="px-3 py-2 text-left">
+              <th className="w-10 px-3 py-2 text-left">
                 <Checkbox
+                  aria-label="Select all visible files"
                   checked={allSelected}
                   onCheckedChange={onToggleSelectAll}
                 />
@@ -576,10 +602,11 @@ export function MediaTable({
                 sortCol={sortCol}
                 sortDir={sortDir}
                 onSort={handleSort}
-                className="hidden lg:table-cell"
+                className="hidden w-[18%] 2xl:table-cell"
               />
               <SortHeader
                 col="size"
+                className="w-28"
                 label="Size"
                 sortCol={sortCol}
                 sortDir={sortDir}
@@ -591,7 +618,7 @@ export function MediaTable({
                 sortCol={sortCol}
                 sortDir={sortDir}
                 onSort={handleSort}
-                className="hidden md:table-cell"
+                className="hidden w-28 md:table-cell"
               />
               <SortHeader
                 col="codec"
@@ -599,7 +626,7 @@ export function MediaTable({
                 sortCol={sortCol}
                 sortDir={sortDir}
                 onSort={handleSort}
-                className="hidden lg:table-cell"
+                className="hidden w-20 lg:table-cell"
               />
               <SortHeader
                 col="audio"
@@ -607,7 +634,7 @@ export function MediaTable({
                 sortCol={sortCol}
                 sortDir={sortDir}
                 onSort={handleSort}
-                className="hidden xl:table-cell"
+                className="hidden w-28 xl:table-cell"
               />
               <SortHeader
                 col="subs"
@@ -615,16 +642,17 @@ export function MediaTable({
                 sortCol={sortCol}
                 sortDir={sortDir}
                 onSort={handleSort}
-                className="hidden xl:table-cell"
+                className="hidden w-28 xl:table-cell"
               />
               <SortHeader
                 col="status"
+                className="w-36"
                 label="Status"
                 sortCol={sortCol}
                 sortDir={sortDir}
                 onSort={handleSort}
               />
-              <th className="px-2 py-2" />
+              <th className="w-10 px-2 py-2"><span className="sr-only">Actions</span></th>
             </tr>
           </thead>
           <tbody className="divide-y divide-border/20">{renderRows()}</tbody>
@@ -648,8 +676,10 @@ export function MediaTable({
                 onRip={() => onRip(file.id)}
                 onTranslate={onTranslate}
                 onDownloadSubtitle={onDownloadSubtitle}
-                onOpenAssignDialog={setAssignDialogFile}
+                onOpenDetails={openDetails}
+          onOpenAssignDialog={setAssignDialogFile}
                 onOpenMuxDialog={setMuxDialogFile}
+                onFixAnime={openAnimeFile}
                 onFolderScan={() => onFolderScan([file.id])}
               />
             ))
@@ -675,6 +705,7 @@ export function MediaTable({
                   <div className="flex items-center gap-2 bg-secondary/30 px-3 py-2.5">
                     <span onClick={(e) => e.stopPropagation()}>
                       <Checkbox
+                        aria-label={`Select all episodes of ${showName}`}
                         checked={
                           anySelected
                             ? allChecked
@@ -689,6 +720,7 @@ export function MediaTable({
                     </span>
                     <button
                       className="flex min-w-0 flex-1 items-center gap-1.5"
+                      aria-expanded={isExpanded}
                       onClick={() => toggleShow(showName)}
                     >
                       {isExpanded ? (
@@ -696,20 +728,21 @@ export function MediaTable({
                       ) : (
                         <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                       )}
-                      <span className="truncate font-medium text-foreground">
+                      <span className="min-w-0 truncate font-medium text-foreground">
                         {showName}
                       </span>
                     </button>
                     <span className="shrink-0 text-xs text-muted-foreground">
                       {seasonMap.size}s · {totalEps}ep
                     </span>
-                    <button
-                      title="Re-scan show"
+                    {animeGroupMenu("show", showName, allShowIds[0])}
+                    <Hint content="Re-scan show"><button
+                      aria-label="Re-scan show"
                       onClick={() => onFolderScan(allShowIds)}
                       className="rounded p-1 text-muted-foreground/50 hover:bg-secondary/60 hover:text-foreground"
                     >
                       <FolderSync className="h-3.5 w-3.5" />
-                    </button>
+                    </button></Hint>
                   </div>
 
                   {isExpanded &&
@@ -731,6 +764,7 @@ export function MediaTable({
                             <div className="flex items-center gap-2 border-t border-border/20 bg-secondary/10 py-2 pl-8 pr-3">
                               <span onClick={(e) => e.stopPropagation()}>
                                 <Checkbox
+                                  aria-label={`Select ${showName} ${seasonName}`}
                                   checked={
                                     anySeasonSel
                                       ? allSeasonChk
@@ -745,6 +779,7 @@ export function MediaTable({
                               </span>
                               <button
                                 className="flex min-w-0 flex-1 items-center gap-1.5"
+                                aria-expanded={isSeasonExpanded}
                                 onClick={() => toggleSeason(seasonKey)}
                               >
                                 {isSeasonExpanded ? (
@@ -759,13 +794,14 @@ export function MediaTable({
                               <span className="shrink-0 text-xs text-muted-foreground">
                                 {episodes.length}ep
                               </span>
-                              <button
-                                title="Re-scan season"
+                              {animeGroupMenu("season", `${showName} ${seasonName}`, allSeasonIds[0])}
+                              <Hint content="Re-scan season"><button
+                                aria-label="Re-scan season"
                                 onClick={() => onFolderScan(allSeasonIds)}
                                 className="rounded p-1 text-muted-foreground/50 hover:bg-secondary/60 hover:text-foreground"
                               >
                                 <FolderSync className="h-3 w-3" />
-                              </button>
+                              </button></Hint>
                             </div>
 
                             {isSeasonExpanded &&
@@ -779,8 +815,10 @@ export function MediaTable({
                                   onRip={() => onRip(ep.id)}
                                   onTranslate={onTranslate}
                                   onDownloadSubtitle={onDownloadSubtitle}
-                                  onOpenAssignDialog={setAssignDialogFile}
+                                  onOpenDetails={openDetails}
+          onOpenAssignDialog={setAssignDialogFile}
                                   onOpenMuxDialog={setMuxDialogFile}
+                                  onFixAnime={openAnimeFile}
                                   indent
                                   isEpisode
                                 />
@@ -794,6 +832,14 @@ export function MediaTable({
             })}
       </div>
 
+      <MediaDetailsDrawer
+        file={detailsFile ? files.find(file => file.id === detailsFile.id) || detailsFile : null}
+        onClose={() => setDetailsFile(null)} onRestoreFocus={() => detailsTrigger.current?.focus()}
+        onManageTracks={setAssignDialogFile} onAddSubtitle={setMuxDialogFile}
+        onEnqueue={onEnqueue} onRip={onRip} onTranslate={onTranslate} onDownloadSubtitle={onDownloadSubtitle}
+        onRefresh={onRefresh || (() => {})} onOpenPosterSettings={onOpenPosterSettings}
+      />
+      {animeSelection && <FixAnimeDialog selection={animeSelection} onClose={() => setAnimeSelection(null)} onQueued={() => onRefresh?.()} />}
       <TrackAssignDialog
         file={assignDialogFile}
         open={assignDialogFile !== null}
@@ -827,7 +873,9 @@ function MobileFileCard({
   onTranslate,
   onDownloadSubtitle,
   onOpenAssignDialog,
+  onOpenDetails,
   onOpenMuxDialog,
+  onFixAnime,
   indent,
   isEpisode,
   onFolderScan,
@@ -840,7 +888,9 @@ function MobileFileCard({
   onTranslate: (id: number, subIdx: number) => void;
   onDownloadSubtitle: (id: number, subIdx: number, isOcr: boolean) => void;
   onOpenAssignDialog: (file: MediaFile) => void;
+  onOpenDetails: (file: MediaFile) => void;
   onOpenMuxDialog?: (file: MediaFile) => void;
+  onFixAnime: (file: MediaFile) => void;
   indent?: boolean;
   isEpisode?: boolean;
   onFolderScan?: () => void;
@@ -860,22 +910,21 @@ function MobileFileCard({
       )}
     >
       <div
-        className={cn("flex items-start gap-2 px-3 py-2.5", indent && "pl-10")}
+        className={cn("flex items-start gap-2 px-3 py-2.5", indent && "pl-16")}
       >
         {/* Checkbox */}
         <span className="mt-0.5 shrink-0" onClick={(e) => e.stopPropagation()}>
-          <Checkbox checked={isSelected} onCheckedChange={onToggleSelect} />
+          <Checkbox aria-label={`Select ${file.show_name || file.folder_name} ${file.season_episode || ""}`} checked={isSelected} onCheckedChange={onToggleSelect} />
         </span>
 
         {/* Main info */}
         <div className="min-w-0 flex-1">
           <div className="flex items-start justify-between gap-2">
-            <span
-              className="truncate text-sm font-medium leading-tight text-foreground"
-              title={title}
+            <Hint content={title}><button type="button" onClick={() => onOpenDetails(file)} data-details-file={file.id} aria-label={`View details for ${file.show_name || title} ${file.season_episode || ""}`}
+              className="min-w-0 truncate text-left text-sm font-medium leading-tight text-foreground hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               {title}
-            </span>
+            </button></Hint>
             <span className="shrink-0 tabular-nums text-xs text-muted-foreground">
               {formatSize(file.size_gb)}
             </span>
@@ -893,17 +942,21 @@ function MobileFileCard({
             )}
             <RowStatus file={file} />
           </div>
+          {file.status !== "UNPROCESSABLE" && <button type="button" aria-label={`Manage tracks for ${file.show_name || title} ${file.season_episode || ""}`} onClick={() => onOpenAssignDialog(file)} className="mt-1.5 text-left text-[10px] text-muted-foreground hover:text-accent focus-visible:ring-2 focus-visible:ring-ring">Audio {languageSummary(file.audio_tracks)} · Subs {languageSummary(file.subtitle_tracks)}</button>}
         </div>
 
         {/* Action menu — none apply to unprocessable disc images */}
         {file.status !== "UNPROCESSABLE" && (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0">
+            <Button aria-label={`Actions for ${file.show_name || file.folder_name} ${file.season_episode || ""}`} variant="ghost" size="icon" className="h-8 w-8 shrink-0">
               <MoreHorizontal className="h-3.5 w-3.5" />
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
+            <DropdownMenuItem onClick={() => onFixAnime(file)}><Sparkles className="mr-2 h-3.5 w-3.5" />Fix Anime…</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => onOpenDetails(file)}><FileVideo className="mr-2 h-3.5 w-3.5" />View details</DropdownMenuItem>
+            <DropdownMenuSeparator />
             {file.disc_type ? (
               <DropdownMenuItem onClick={onRip}>
                 <Disc className="mr-2 h-3.5 w-3.5" />
@@ -918,7 +971,7 @@ function MobileFileCard({
             <DropdownMenuSeparator />
             <DropdownMenuItem onClick={() => onOpenAssignDialog(file)}>
               <Tag className="mr-2 h-3.5 w-3.5" />
-              {file.disc_type ? "Adjust Tracks" : "Assign Languages"}
+              Manage tracks & languages
             </DropdownMenuItem>
             {onFolderScan && (
               <>
@@ -939,7 +992,7 @@ function MobileFileCard({
                   >
                     <Languages className="mr-2 h-3.5 w-3.5" />
                     {OCR_CODECS.has(t.codec) ? "OCR + Translate" : "Translate"} #{t.sub_idx}
-                    {t.lang ? ` (${t.lang.toUpperCase()})` : ""}
+                    {` · ${languageLabel(t.lang)}`}
                   </DropdownMenuItem>,
                   <DropdownMenuItem
                     key={`download-${t.sub_idx}`}
@@ -987,7 +1040,7 @@ function SortHeader({
 }) {
   const active = sortCol === col;
   return (
-    <th
+    <th aria-sort={active ? sortDir === "asc" ? "ascending" : "descending" : "none"}
       className={cn(
         "cursor-pointer select-none px-3 py-2 text-left text-[11px] font-medium uppercase tracking-wider transition-colors",
         active
@@ -995,9 +1048,8 @@ function SortHeader({
           : "text-muted-foreground hover:text-foreground",
         className,
       )}
-      onClick={() => onSort(col)}
     >
-      <span className="flex items-center gap-1">
+      <button type="button" aria-label={`Sort by ${label}`} onClick={() => onSort(col)} className="flex w-full items-center gap-1 text-left uppercase focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
         {label}
         {active ? (
           sortDir === "asc" ? (
@@ -1008,7 +1060,7 @@ function SortHeader({
         ) : (
           <ArrowUpDown className="h-2.5 w-2.5 opacity-30" />
         )}
-      </span>
+      </button>
     </th>
   );
 }
@@ -1024,7 +1076,9 @@ interface MediaTableRowProps {
   onTranslate: (id: number, subIdx: number) => void;
   onDownloadSubtitle: (id: number, subIdx: number, isOcr: boolean) => void;
   onOpenAssignDialog: (file: MediaFile) => void;
+  onOpenDetails: (file: MediaFile) => void;
   onOpenMuxDialog?: (file: MediaFile) => void;
+  onFixAnime: (file: MediaFile) => void;
   isEpisode?: boolean;
   onFolderScan?: () => void;
 }
@@ -1038,7 +1092,9 @@ function MediaTableRow({
   onTranslate,
   onDownloadSubtitle,
   onOpenAssignDialog,
+  onOpenDetails,
   onOpenMuxDialog,
+  onFixAnime,
   isEpisode,
   onFolderScan,
 }: MediaTableRowProps) {
@@ -1053,22 +1109,21 @@ function MediaTableRow({
         isSelected && "bg-accent/5",
       )}
     >
-      <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
-        <Checkbox checked={isSelected} onCheckedChange={onToggleSelect} />
+      <td className={cn("px-3 py-2", isEpisode && "pl-12")} onClick={(e) => e.stopPropagation()}>
+        <Checkbox aria-label={`Select ${file.show_name || file.folder_name} ${file.season_episode || ""}`} checked={isSelected} onCheckedChange={onToggleSelect} />
       </td>
-      <td className={cn("overflow-hidden px-3 py-2", isEpisode && "pl-10")}>
+      <td className={cn("overflow-hidden px-3 py-2", isEpisode && "pl-18")}>
         <div className="flex items-center gap-1.5">
-          <div
-            className="truncate font-medium text-foreground"
-            title={
+          <Hint content={
               isEpisode ? file.season_episode || file.filename : file.folder_name
-            }
+            }><button type="button" onClick={() => onOpenDetails(file)} data-details-file={file.id} aria-label={`View details for ${file.show_name || file.folder_name} ${file.season_episode || ""}`}
+            className="min-w-0 truncate text-left font-medium text-foreground hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             {isEpisode ? file.season_episode || file.filename : file.folder_name}
-          </div>
+          </button></Hint>
           {onFolderScan && (
-            <button
-              title="Re-scan this movie folder"
+            <Hint content="Re-scan this movie folder"><button
+              aria-label="Re-scan this movie folder"
               onClick={(e) => {
                 e.stopPropagation();
                 onFolderScan();
@@ -1076,24 +1131,27 @@ function MediaTableRow({
               className="ml-auto shrink-0 rounded p-0.5 text-muted-foreground/30 hover:bg-secondary/60 hover:text-foreground"
             >
               <FolderSync className="h-3 w-3" />
-            </button>
+            </button></Hint>
           )}
         </div>
+        {file.status !== "UNPROCESSABLE" && <button type="button" aria-label={`Manage tracks for ${file.show_name || file.folder_name} ${file.season_episode || ""}`} onClick={() => onOpenAssignDialog(file)} className="mt-1 block max-w-full truncate text-left text-[10px] text-muted-foreground hover:text-accent focus-visible:ring-2 focus-visible:ring-ring xl:hidden">
+          Audio {languageSummary(file.audio_tracks)} · Subs {languageSummary(file.subtitle_tracks)}
+        </button>}
       </td>
-      <td className="hidden overflow-hidden px-3 py-2 lg:table-cell">
-        <span
+      <td className="hidden overflow-hidden px-3 py-2 2xl:table-cell">
+        <Hint content={file.filename}><span
           className="block truncate font-mono text-[11px] text-muted-foreground"
-          title={file.filename}
+
         >
           {file.filename}
-        </span>
+        </span></Hint>
       </td>
       <td className="px-3 py-2">
         <div className="text-xs">
-          <span className="font-medium">{formatSize(file.size_gb)}</span>
+          <span className="whitespace-nowrap font-medium">{formatSize(file.size_gb)}</span>
           {file.estimated_size_gb && !file.encode_status && (
-            <span className="ml-1 text-success">
-              → {formatSize(file.estimated_size_gb)}
+            <span className="mt-0.5 block whitespace-nowrap text-[10px] text-success">
+              est. {formatSize(file.estimated_size_gb)}
             </span>
           )}
         </div>
@@ -1122,11 +1180,14 @@ function MediaTableRow({
         {file.status !== "UNPROCESSABLE" && (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="icon" className="h-6 w-6">
+            <Button aria-label={`Actions for ${file.show_name || file.folder_name} ${file.season_episode || ""}`} variant="ghost" size="icon" className="h-8 w-8">
               <MoreHorizontal className="h-3.5 w-3.5" />
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
+            <DropdownMenuItem onClick={() => onFixAnime(file)}><Sparkles className="mr-2 h-3.5 w-3.5" />Fix Anime…</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => onOpenDetails(file)}><FileVideo className="mr-2 h-3.5 w-3.5" />View details</DropdownMenuItem>
+            <DropdownMenuSeparator />
             {file.disc_type ? (
               <DropdownMenuItem onClick={onRip}>
                 <Disc className="mr-2 h-3.5 w-3.5" />
@@ -1141,7 +1202,7 @@ function MediaTableRow({
             <DropdownMenuSeparator />
             <DropdownMenuItem onClick={() => onOpenAssignDialog(file)}>
               <Tag className="mr-2 h-3.5 w-3.5" />
-              {file.disc_type ? "Adjust Tracks" : "Assign Languages"}
+              Manage tracks & languages
             </DropdownMenuItem>
             {translatableSubTracks.length > 0 && (
               <>
@@ -1153,7 +1214,7 @@ function MediaTableRow({
                   >
                     <Languages className="mr-2 h-3.5 w-3.5" />
                     {OCR_CODECS.has(t.codec) ? "OCR + Translate" : "Translate"} #{t.sub_idx}
-                    {t.lang ? ` (${t.lang.toUpperCase()})` : ""}
+                    {` · ${languageLabel(t.lang)}`}
                   </DropdownMenuItem>,
                   <DropdownMenuItem
                     key={`download-${t.sub_idx}`}
@@ -1201,7 +1262,7 @@ function StatusBadge({
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span className={cn(BADGE_BASE, tone)}>
+        <span tabIndex={0} className={cn(BADGE_BASE, "cursor-help focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring", tone)}>
           <Icon className="h-3 w-3" />
           {label}
         </span>
@@ -1365,7 +1426,7 @@ function RowStatusInner({ file }: { file: MediaFile }) {
           tone="bg-destructive/20 text-destructive"
           icon={AlertTriangle}
           label="Re-encode"
-          tooltip="File is larger than the configured threshold. Re-encoding will shrink it while preserving quality."
+          tooltip="File is larger than the configured threshold. Re-encoding can reduce size; output quality depends on encoder settings."
         />
       )}
       {hasRemux && (
@@ -1381,7 +1442,7 @@ function RowStatusInner({ file }: { file: MediaFile }) {
           tone="bg-sky-500/15 text-sky-400"
           icon={Languages}
           label="Missing Sub"
-          tooltip="No subtitle track in your target language. Translate an existing track or mux a subtitle file."
+          tooltip="One or more required subtitle languages are missing. Translate an existing track or mux a subtitle file."
         />
       )}
     </div>
@@ -1397,22 +1458,14 @@ function formatSize(gb: number): string {
 }
 
 function TrackBadges({ tracks }: { tracks: AudioTrack[] | SubtitleTrack[] }) {
-  if (tracks.length === 0)
-    return <span className="text-xs text-muted-foreground">-</span>;
-  const hasUnknown = tracks.some((t) => !t.lang);
-  return (
-    <span
-      className={cn(
-        "inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium",
-        hasUnknown
-          ? "bg-warning/20 text-warning"
-          : "bg-secondary text-muted-foreground",
-      )}
-      title={tracks.map((t) => `${t.codec} ${t.lang || "?"}`).join("\n")}
-    >
-      {tracks.length}
-    </span>
-  );
+  if (!tracks.length) return <span className="text-xs text-muted-foreground">None</span>;
+  const active = tracks.filter(t => t.action !== "drop");
+  const unknown = active.some(t => !normalizeLanguage(t.lang));
+  return <Hint content={<div className="space-y-1">{tracks.map((track, i) => <div key={i}>
+    <span className="font-medium">{languageLabel(track.lang)}</span> · {track.codec}
+    {"channels" in track && track.channels ? ` · ${track.channels}ch` : ""}
+    {track.action === "drop" ? " · marked for removal" : ""}
+  </div>)}</div>}><span tabIndex={0} className={cn("inline-flex cursor-help rounded px-1.5 py-1 text-[10px] font-medium focus-visible:ring-2 focus-visible:ring-ring", unknown ? "bg-warning/15 text-warning" : "bg-secondary text-muted-foreground")}>{languageSummary(tracks)}</span></Hint>;
 }
 
 // ── Track Assign Dialog ────────────────────────────────────────────────────────
@@ -1436,39 +1489,13 @@ function TrackRow({
   onActionChange: (v: "keep" | "drop") => void;
 }) {
   return (
-    <div className="flex items-center gap-2 border-b border-border/20 py-1.5 last:border-0">
-      <span
-        className="w-36 shrink-0 truncate font-mono text-[11px] text-muted-foreground"
-        title={label}
-      >
-        {label}
-      </span>
-      <Select
-        value={lang || "__none__"}
-        onValueChange={(v) => onLangChange(v === "__none__" ? "" : v)}
-      >
-        <SelectTrigger className="h-7 flex-1 text-xs">
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          {LANG_OPTIONS.map((o) => (
-            <SelectItem key={o.value} value={o.value}>
-              {o.label}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-      <button
-        onClick={() => onActionChange(action === "drop" ? "keep" : "drop")}
-        className={cn(
-          "shrink-0 rounded px-2 py-0.5 text-[10px] font-medium transition-colors",
-          action === "drop"
-            ? "bg-destructive/20 text-destructive hover:bg-destructive/30"
-            : "bg-secondary text-muted-foreground hover:bg-secondary/60",
-        )}
-      >
-        {action === "drop" ? "Drop" : "Keep"}
-      </button>
+    <div className={cn("grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 border-b border-border/30 py-2 last:border-0 sm:grid-cols-[minmax(0,1fr)_minmax(150px,1fr)_auto]", action === "drop" && "bg-destructive/5")}>
+      <Hint content={label}><span className="col-span-2 truncate font-mono text-xs text-muted-foreground sm:col-span-1">{label}</span></Hint>
+      <LanguagePicker label={`Language for ${label}`} value={lang} onChange={onLangChange} disabled={action === "drop"} />
+      <div role="group" aria-label={`Keep or drop ${label}`} className="inline-flex rounded-md border border-border/50 p-0.5">
+        <button type="button" aria-label={`Keep ${label}`} aria-pressed={action === "keep"} onClick={() => onActionChange("keep")} className={cn("inline-flex h-8 items-center gap-1 rounded px-2 text-xs focus-visible:ring-2 focus-visible:ring-ring", action === "keep" ? "bg-accent/15 text-accent" : "text-muted-foreground")}><Check className="h-3 w-3" />Keep</button>
+        <button type="button" aria-label={`Drop ${label}`} aria-pressed={action === "drop"} onClick={() => onActionChange("drop")} className={cn("inline-flex h-8 items-center gap-1 rounded px-2 text-xs focus-visible:ring-2 focus-visible:ring-ring", action === "drop" ? "bg-destructive/20 text-destructive" : "text-muted-foreground")}><X className="h-3 w-3" />Drop</button>
+      </div>
     </div>
   );
 }
@@ -1494,17 +1521,23 @@ function TrackAssignDialog({
     if (!file) return;
     const am = new Map<number, TrackState>();
     for (const t of file.audio_tracks)
-      am.set(t.audio_idx, { lang: t.lang || "", action: t.action || "keep" });
+      am.set(t.audio_idx, { lang: normalizeLanguage(t.lang), action: t.action || "keep" });
     setAudioState(am);
     const sm = new Map<number, TrackState>();
     for (const t of file.subtitle_tracks)
-      sm.set(t.sub_idx, { lang: t.lang || "", action: t.action || "keep" });
+      sm.set(t.sub_idx, { lang: normalizeLanguage(t.lang), action: t.action || "keep" });
     setSubState(sm);
   }, [file]);
 
   if (!file) return null;
 
+  const dropped = [...audioState.values(), ...subState.values()].filter(t => t.action === "drop").length;
+  const noAudio = file.audio_tracks.length > 0 && [...audioState.values()].every(t => t.action === "drop");
+  const changed = [...file.audio_tracks.map(t => ({ initial: t, current: audioState.get(t.audio_idx) })),
+    ...file.subtitle_tracks.map(t => ({ initial: t, current: subState.get(t.sub_idx) }))]
+    .some(({initial, current}) => current && (current.lang !== normalizeLanguage(initial.lang) || current.action !== (initial.action || "keep")));
   const handleSave = async () => {
+    if (!changed || noAudio) return;
     setSaving(true);
     try {
       const audio = file.audio_tracks.map((t) => ({
@@ -1536,17 +1569,18 @@ function TrackAssignDialog({
     <Dialog
       open={open}
       onOpenChange={(o) => {
-        if (!o) onClose();
+        if (!o && !saving) onClose();
       }}
     >
-      <DialogContent className="max-w-md">
-        <DialogHeader>
-          <DialogTitle>Assign Track Languages</DialogTitle>
+      <DialogContent className="flex max-h-[90dvh] flex-col overflow-hidden sm:max-w-2xl">
+        <DialogHeader className="shrink-0 pr-6">
+          <DialogTitle>Manage tracks & languages</DialogTitle>
           <DialogDescription className="truncate text-xs">
-            {file.folder_name}
+            {file.show_name ? `${file.show_name} · ${file.season_episode}` : file.folder_name}
           </DialogDescription>
         </DialogHeader>
-        <div className="mt-1 max-h-[60vh] space-y-4 overflow-y-auto pr-1">
+        <p className="shrink-0 text-xs leading-relaxed text-muted-foreground">{file.disc_type ? "Track choices apply when you rip this disc." : "Saving queues a remux. Language tags are updated and dropped tracks are removed from the file; video is copied without re-encoding."}</p>
+        <div className="mt-1 min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
           {file.audio_tracks.length > 0 && (
             <div>
               <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
@@ -1557,7 +1591,7 @@ function TrackAssignDialog({
                 return (
                   <TrackRow
                     key={t.audio_idx}
-                    label={`#${t.audio_idx} · ${t.codec}${t.channels ? ` · ${t.channels}ch` : ""}`}
+                    label={`#${t.audio_idx} · ${t.codec.toUpperCase()}${t.channels ? ` · ${t.channels}ch` : ""}${t.title ? ` · ${t.title}` : ""}`}
                     lang={s?.lang ?? t.lang ?? ""}
                     action={s?.action ?? "keep"}
                     onLangChange={(v) => updateAudio(t.audio_idx, { lang: v })}
@@ -1579,7 +1613,7 @@ function TrackAssignDialog({
                 return (
                   <TrackRow
                     key={t.sub_idx}
-                    label={`#${t.sub_idx} · ${t.codec}${IMAGE_CODECS.has(t.codec) ? " (img)" : ""}`}
+                    label={`#${t.sub_idx} · ${t.codec === "hdmv_pgs_subtitle" ? "PGS" : t.codec.toUpperCase()}${IMAGE_CODECS.has(t.codec) ? " (image)" : ""}${t.title ? ` · ${t.title}` : ""}`}
                     lang={s?.lang ?? t.lang ?? ""}
                     action={s?.action ?? "keep"}
                     onLangChange={(v) => updateSub(t.sub_idx, { lang: v })}
@@ -1596,12 +1630,15 @@ function TrackAssignDialog({
               </p>
             )}
         </div>
-        <DialogFooter className="mt-4">
+        <div role="status" className={cn("shrink-0 text-xs", noAudio ? "text-destructive" : "text-muted-foreground")}>
+          {noAudio ? "Keep at least one audio track." : `${dropped} track${dropped === 1 ? "" : "s"} marked for removal${changed ? " · Unsaved changes" : " · No changes"}`}
+        </div>
+        <DialogFooter className="mt-2 shrink-0">
           <Button variant="ghost" onClick={onClose} disabled={saving}>
             Cancel
           </Button>
-          <Button onClick={handleSave} disabled={saving}>
-            {saving ? "Saving…" : "Save Assignments"}
+          <Button onClick={handleSave} disabled={saving || !changed || noAudio}>
+            {saving ? "Saving…" : file.disc_type ? "Save track choices" : "Save & queue remux"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -1687,9 +1724,9 @@ function MuxSubtitleDialog({
       <DialogContent className="max-w-md min-w-0 overflow-hidden">
         <DialogHeader className="min-w-0">
           <DialogTitle>Mux Subtitle File</DialogTitle>
-          <DialogDescription className="block truncate text-xs" title={file.folder_name ?? undefined}>
+          <Hint content={file.folder_name ?? undefined}><DialogDescription className="block truncate text-xs" >
             {file.folder_name}
-          </DialogDescription>
+          </DialogDescription></Hint>
         </DialogHeader>
 
         <div className="mt-1 min-w-0 space-y-4">
@@ -1727,9 +1764,9 @@ function MuxSubtitleDialog({
                         onChange={() => setSelectedSub(sub)}
                         className="shrink-0 accent-primary"
                       />
-                      <span className="min-w-0 flex-1 truncate font-mono text-[11px]" title={sub}>
+                      <Hint content={sub}><span className="min-w-0 flex-1 truncate font-mono text-[11px]" >
                         {basename(sub)}
-                      </span>
+                      </span></Hint>
                     </label>
                   ))}
                 </div>
@@ -1739,18 +1776,7 @@ function MuxSubtitleDialog({
                 <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
                   Language
                 </p>
-                <Select value={selectedLang} onValueChange={setSelectedLang}>
-                  <SelectTrigger className="h-8 text-sm">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {LANG_OPTIONS.filter((o) => o.value !== "__none__").map((o) => (
-                      <SelectItem key={o.value} value={o.value}>
-                        {o.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <LanguagePicker label="Subtitle file language" value={selectedLang} onChange={setSelectedLang} allowUnknown={false} />
               </div>
             </>
           )}

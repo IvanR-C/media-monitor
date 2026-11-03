@@ -7,6 +7,7 @@ import { MediaTable } from "./media-table";
 import { CombinedQueue } from "./encode-queue";
 import { AppLogs } from "./app-logs";
 import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
 
 export type MediaType = "movie" | "show";
 export type FilterType =
@@ -76,6 +77,7 @@ interface LibraryStatsData {
 }
 
 interface MediaLibraryTabProps {
+  onOpenPosterSettings?: () => void;
   scan: {
     isScanning: boolean;
     scanProgress?: { scanned: number; total: number };
@@ -85,7 +87,7 @@ interface MediaLibraryTabProps {
   };
 }
 
-export function MediaLibraryTab({ scan }: MediaLibraryTabProps) {
+export function MediaLibraryTab({ scan, onOpenPosterSettings }: MediaLibraryTabProps) {
   const { isScanning, scanProgress, lastScanResult, onScan, onFolderScan } =
     scan;
   const [mediaType, setMediaType] = useState<MediaType>("movie");
@@ -97,7 +99,8 @@ export function MediaLibraryTab({ scan }: MediaLibraryTabProps) {
   // switches, filter pills, and search all derive from this in-memory list, so
   // no network round-trip is needed for any of those interactions.
   const [allFiles, setAllFiles] = useState<MediaFile[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [debouncedSearch, setDebouncedSearch] = useState("");
 
   // Debounce search input — only the in-memory filter recomputes, no network.
@@ -120,11 +123,14 @@ export function MediaLibraryTab({ scan }: MediaLibraryTabProps) {
     if (showSpinner) setLoading(true);
     try {
       const r = await fetch(`/api/media?type=all`, { signal: ac.signal });
+      if (!r.ok) throw new Error(`Library request failed (${r.status})`);
       const data = await r.json();
       if (inflightRef.current !== ac) return;
       setAllFiles(data.files ?? []);
+      setLoadError(false);
     } catch (e) {
       if ((e as { name?: string })?.name === "AbortError") return;
+      setLoadError(true);
       if (!silent) toast.error("Failed to load media library");
     } finally {
       if (inflightRef.current === ac) {
@@ -213,6 +219,15 @@ export function MediaLibraryTab({ scan }: MediaLibraryTabProps) {
     }
     return f;
   }, [typedFiles, filter, debouncedSearch]);
+
+  // Bulk actions only act on visible rows; a filter or tab switch cannot retain hidden selections.
+  useEffect(() => {
+    const visible = new Set(files.map(file => file.id));
+    setSelectedIds(previous => {
+      const next = new Set([...previous].filter(id => visible.has(id)));
+      return next.size === previous.size ? previous : next;
+    });
+  }, [files]);
 
   // Auto-refresh every 3 s while any encode or translation job is active.
   // Polls the full library (silent) so all derived state stays current.
@@ -410,7 +425,7 @@ export function MediaLibraryTab({ scan }: MediaLibraryTabProps) {
     }
     // Switch to the "queued" filter so the user can watch the just-queued
     // remux progress, then pull the freshest server state in.
-    setFilter("queued");
+    if (data.remux_job_id) setFilter("queued");
     fetchMedia(true);
   };
 
@@ -532,18 +547,18 @@ export function MediaLibraryTab({ scan }: MediaLibraryTabProps) {
   };
 
   const toggleSelectAll = () => {
-    if (selectedIds.size === files.length) setSelectedIds(new Set());
+    if (files.every(file => selectedIds.has(file.id))) setSelectedIds(new Set());
     else setSelectedIds(new Set(files.map((f) => f.id)));
   };
 
   const clearSelection = () => setSelectedIds(new Set());
 
   return (
-    <div className="flex min-h-[420px] flex-col md:h-[calc(100vh-152px)]">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+    <div className="flex min-h-[420px] flex-col md:h-[calc(100dvh-104px)]">
+      <div className="flex shrink-0 flex-col gap-3">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-4">
-          <MediaTypeSwitch value={mediaType} onChange={setMediaType} />
-          <LibrarySummary stats={stats} />
+          <MediaTypeSwitch value={mediaType} onChange={value => { setMediaType(value); setFilter("all"); setSearchQuery(""); setSelectedIds(new Set()); }} />
+          <LibrarySummary stats={stats} mediaType={mediaType} showCount={new Set(typedFiles.map(file => file.show_name || file.folder_name)).size} />
         </div>
         <FilterBar
           value={filter}
@@ -558,10 +573,14 @@ export function MediaLibraryTab({ scan }: MediaLibraryTabProps) {
         />
       </div>
 
+      {loadError && <div role="alert" className="mt-3 flex items-center justify-between gap-3 text-sm text-destructive"><span>Couldn’t refresh the library. {allFiles.length ? "Showing the last loaded files." : "Check the backend connection."}</span><Button size="sm" variant="outline" onClick={() => fetchMedia()}>Retry</Button></div>}
+      {(filter !== "all" || searchQuery) && <div className="mt-2 flex items-center gap-3 text-xs text-muted-foreground"><span>{files.length} of {typedFiles.length} files shown</span><button type="button" className="text-accent hover:underline" onClick={() => { setFilter("all"); setSearchQuery(""); }}>Clear search & filters</button></div>}
       {/* Scrollable table area */}
       <div className="mt-4 min-h-0 flex-1 overflow-hidden">
         <MediaTable
           files={files}
+          onRefresh={() => fetchMedia(true)}
+          onOpenPosterSettings={onOpenPosterSettings}
           selectedIds={selectedIds}
           onToggleSelect={toggleSelect}
           onSelectMany={selectMany}
@@ -581,11 +600,13 @@ export function MediaLibraryTab({ scan }: MediaLibraryTabProps) {
           loading={loading}
           totalFiles={stats.total_files}
           isScanning={isScanning}
+          revealKey={filter !== "all" || debouncedSearch ? `${filter}:${debouncedSearch}` : ""}
+          onResetFilters={() => { setFilter("all"); setSearchQuery(""); }}
         />
       </div>
 
       {/* Terminal-style bottom panel */}
-      <div className="mt-3 shrink-0">
+      <div id="library-queue" tabIndex={-1} className="mt-3 shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
         <CombinedQueue />
         <AppLogs show={showLogs} onToggle={() => setShowLogs(!showLogs)} />
       </div>
@@ -599,14 +620,14 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1e12).toFixed(2)} TB`;
 }
 
-function LibrarySummary({ stats }: { stats: LibraryStatsData }) {
+function LibrarySummary({ stats, mediaType, showCount }: { stats: LibraryStatsData; mediaType: MediaType; showCount: number }) {
   return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 whitespace-nowrap text-xs text-muted-foreground">
       <span>
-        Total files{" "}
+        {mediaType === "show" ? `${showCount} shows · ` : ""}
         <span className="font-medium text-foreground">
           {stats.total_files.toLocaleString()}
-        </span>
+        </span>{mediaType === "show" ? " episodes" : " movies"}
       </span>
       <span className="hidden h-3 w-px bg-border/70 sm:block" />
       <span>

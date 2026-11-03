@@ -1,4 +1,6 @@
 "use client"
+import { Hint } from "@/components/ui/tooltip";
+
 
 import { useState, useEffect, useRef } from "react"
 import { Button } from "@/components/ui/button"
@@ -88,15 +90,15 @@ export function AppLogs({ show, onToggle }: AppLogsProps) {
               <Trash2 className="mr-1 h-2.5 w-2.5" />
               Clear
             </Button>
-            <Button
+            <Hint content="Open logs in a larger view"><Button
               variant="ghost"
               size="icon"
               className="h-5 w-5 text-muted-foreground hover:text-foreground"
               onClick={(e) => { e.stopPropagation(); setIsModalOpen(true) }}
-              title="Open logs in a larger view"
+              aria-label="Open logs in a larger view"
             >
               <Maximize2 className="h-2.5 w-2.5" />
-            </Button>
+            </Button></Hint>
           </div>
         )}
       </button>

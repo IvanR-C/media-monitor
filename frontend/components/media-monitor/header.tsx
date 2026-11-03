@@ -4,6 +4,7 @@ import { useState, useEffect } from "react"
 import { Library, Settings, LogOut } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
+import { Hint } from "@/components/ui/tooltip"
 
 interface HeaderProps {
   activeView: "library" | "settings"
@@ -53,19 +54,20 @@ export function Header({ activeView, onViewChange, isScanning }: HeaderProps) {
           <span className="hidden truncate text-base font-semibold tracking-tight text-foreground sm:inline">
             Media Monitor
           </span>
-          <div
-            title={
+          <Hint content={
               health === 'ok'       ? 'Backend connected' :
               health === 'error'    ? 'Backend unreachable' :
               'Checking backend…'
-            }
+            }><div
+            tabIndex={0}
+            aria-label="Backend connection status"
             className={cn(
               "h-2 w-2 shrink-0 rounded-full transition-colors",
               health === 'ok'       && "bg-success",
               health === 'error'    && "bg-destructive animate-pulse",
               health === 'checking' && "bg-muted-foreground animate-pulse",
             )}
-          />
+          /></Hint>
         </div>
 
         <nav className="flex shrink-0 items-center gap-1 rounded-lg border border-border/50 bg-secondary/40 p-1">
@@ -82,7 +84,7 @@ export function Header({ activeView, onViewChange, isScanning }: HeaderProps) {
             <Library className="h-4 w-4" />
             <span>Library</span>
             {isScanning && (
-              <span className="h-2 w-2 rounded-full bg-accent animate-pulse" title="Scan in progress" />
+              <Hint content="Scan in progress"><span className="h-2 w-2 rounded-full bg-accent animate-pulse" /></Hint>
             )}
           </button>
           <button
@@ -100,15 +102,15 @@ export function Header({ activeView, onViewChange, isScanning }: HeaderProps) {
           </button>
         </nav>
 
-        <Button
+        <Hint content="Sign out"><Button
           variant="ghost"
           size="icon-sm"
           onClick={handleLogout}
-          title="Sign out"
+          aria-label="Sign out"
           className="shrink-0 text-muted-foreground hover:text-foreground"
         >
           <LogOut className="h-4 w-4" />
-        </Button>
+        </Button></Hint>
       </div>
     </header>
   )
