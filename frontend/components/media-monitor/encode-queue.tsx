@@ -57,6 +57,7 @@ interface TranslationJob {
   progress_detail?: string
   source_lang?: string
   error_text?: string
+  extract_only?: number
 }
 
 const ACTIVE_ENCODE_STATUSES = new Set(["queued", "encoding"])
@@ -575,9 +576,11 @@ function TranslateJobRow({
           <span className="truncate font-medium text-foreground/90">
             {job.media_type === "show" && job.show_name ? job.show_name : job.folder_name}
           </span>
-          {job.source_lang && (
+          {job.extract_only ? (
+            <span className="shrink-0 text-[10px] text-muted-foreground uppercase">Extract only</span>
+          ) : job.source_lang ? (
             <span className="shrink-0 text-[10px] text-muted-foreground uppercase">{job.source_lang} → SPA</span>
-          )}
+          ) : null}
         </div>
         {job.media_type === "show" && job.season_episode && (
           <div className="text-[10px] text-muted-foreground">{job.season_episode}</div>
