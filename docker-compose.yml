@@ -1,14 +1,20 @@
 services:
   media-monitor:
+    # `image:` pulls the published image (e.g. for a Portainer Git-repository
+    # stack); `build: .` lets `docker compose up -d --build` build it locally
+    # instead — Compose tags that local build with the same name, so either
+    # workflow works from this one file.
+    image: ivanchelo/media-monitor:latest
     build: .
     container_name: media-monitor
     restart: unless-stopped
     ports:
-      - "5000:5000"
+      - "${HOST_PORT:-5000}:5000"
     volumes:
-      # Mount your media directory (read-only recommended)
-      - "E:/test:/watch:ro"
-      # Persistent config and database
+      # Read/write — encoding replaces files in-place. Override MEDIA_PATH
+      # (env var or Portainer stack variable) instead of editing this file.
+      - "${MEDIA_PATH:-E:/test}:/watch"
+      # Persistent config, database, and auth state
       - ./config:/config
     environment:
       # Optional: Override defaults
@@ -17,7 +23,7 @@ services:
       - MAX_WORKERS=4
       - STABILIZE_INTERVAL=10
       - STABILIZE_CHECKS=3
-      
+
       # Optional: Set via environment instead of web UI
       # - NTFY_SERVER=https://ntfy.sh
       # - NTFY_TOPIC=my-media-notifications
@@ -31,9 +37,13 @@ services:
       # set this if you use more than one (otherwise it's auto-detected).
       # - WEBAUTHN_RP_ID=media.example.com
 
-    # Optional: Resource limits
-    # deploy:
-    #   resources:
-    #     limits:
-    #       cpus: '2'
-    #       memory: 1G
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - count: all
+              capabilities: [gpu, video]   # remove this whole `deploy:` block if no NVIDIA GPU
+        # Optional: resource limits
+        # limits:
+        #   cpus: '2'
+        #   memory: 1G
