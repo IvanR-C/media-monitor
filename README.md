@@ -76,6 +76,7 @@ See [docs/subtitle-translation.md](docs/subtitle-translation.md) for full detail
 ### ✨ Fix Anime
 - Movie, episode, full-season, full-show, and selected-file actions
 - Saved ASS styles with a live ffmpeg/libass preview
+- Preserve PGS text regions, source placement, and timed position changes through OCR and translation
 - Keep selected audio/subtitle languages; remux away unwanted tracks
 - Translate a missing target language with the configured AI provider, or convert kept subtitles to ASS without translation
 - All library video formats accepted; automatic MKV remuxing for ASS with output verification and queue progress

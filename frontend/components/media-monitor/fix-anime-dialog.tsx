@@ -33,6 +33,7 @@ interface AnimeSettings {
   alignment: number;
   bold: boolean;
   italic: boolean;
+  preserve_pgs_placement: boolean;
 }
 
 interface FilePlan {
@@ -70,6 +71,7 @@ export function FixAnimeDialog({ selection, onClose, onQueued }: {
   const [previewError, setPreviewError] = useState("");
   const [previewBusy, setPreviewBusy] = useState(true);
   const [sample, setSample] = useState("Even across the stars,\nI will always find my way back to you.");
+  const [previewScene, setPreviewScene] = useState("style");
   const payload = JSON.stringify({ scope: selection.scope, file_ids: selection.file_ids, settings });
   const planning = planKey !== payload;
   const eligible = planning ? [] : plan.filter(file => !file.reason);
@@ -103,7 +105,7 @@ export function FixAnimeDialog({ selection, onClose, onQueued }: {
     const timer = setTimeout(async () => {
       try {
         const response = await fetch("/api/anime/preview", { method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ settings, text: sample }), signal: controller.signal });
+          body: JSON.stringify({ settings, text: sample, scene: previewScene }), signal: controller.signal });
         if (!response.ok) { await jsonResponse(response); return; }
         const blob = await response.blob();
         if (!controller.signal.aborted) {
@@ -115,7 +117,7 @@ export function FixAnimeDialog({ selection, onClose, onQueued }: {
       } finally { if (!controller.signal.aborted) setPreviewBusy(false); }
     }, 500);
     return () => { clearTimeout(timer); controller.abort(); if (objectUrl) URL.revokeObjectURL(objectUrl); };
-  }, [settings, sample]);
+  }, [settings, sample, previewScene]);
 
   function update<K extends keyof AnimeSettings>(key: K, value: AnimeSettings[K]) {
     setSettings(previous => previous && { ...previous, [key]: value });
@@ -145,7 +147,7 @@ export function FixAnimeDialog({ selection, onClose, onQueued }: {
   }
 
   return <Dialog open onOpenChange={open => { if (!open && !saving) onClose(); }}>
-    <DialogContent className="flex max-h-[92dvh] flex-col gap-0 overflow-hidden p-0 sm:max-w-5xl" showCloseButton={!saving}>
+    <DialogContent className="flex max-h-[92dvh] flex-col gap-0 overflow-hidden p-0 sm:max-w-5xl lg:h-[92dvh]" showCloseButton={!saving}>
       <DialogHeader className="shrink-0 border-b border-border/60 px-5 py-4">
         <DialogTitle className="flex items-center gap-2"><Sparkles className="h-4 w-4 text-accent" />Fix Anime</DialogTitle>
         <DialogDescription className="pr-6">{selection.label} · Style subtitles and keep the languages you want.</DialogDescription>
@@ -153,9 +155,9 @@ export function FixAnimeDialog({ selection, onClose, onQueued }: {
       {!settings ? <div className="p-10 text-center text-sm text-muted-foreground">
         {loadError ? <div role="alert">{loadError}<Button variant="outline" size="sm" className="ml-3" onClick={() => setReload(v => v + 1)}>Retry</Button></div> : <><Loader2 className="mx-auto mb-2 h-5 w-5 animate-spin" />Loading saved settings…</>}
       </div> : <>
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          <div className="grid gap-6 p-5 lg:grid-cols-[1fr_1.05fr]">
-            <fieldset disabled={saving} className="min-w-0 space-y-5">
+        <div className="min-h-0 flex-1 overflow-y-auto lg:overflow-hidden">
+          <div className="grid gap-6 p-5 lg:h-full lg:min-h-0 lg:grid-cols-[1fr_1.05fr]">
+            <fieldset disabled={saving} className="min-w-0 space-y-5 lg:min-h-0 lg:overflow-y-auto lg:pr-2">
               <div className="space-y-2">
                 <Label htmlFor="anime-mode">Subtitle workflow</Label>
                 <select id="anime-mode" value={settings.mode} onChange={e => update("mode", e.target.value as AnimeSettings["mode"])} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm">
@@ -195,9 +197,11 @@ export function FixAnimeDialog({ selection, onClose, onQueued }: {
                   <label className="flex items-center gap-2 text-xs"><Checkbox checked={settings.bold} onCheckedChange={v => update("bold", v === true)} />Bold</label>
                   <label className="flex items-center gap-2 text-xs"><Checkbox checked={settings.italic} onCheckedChange={v => update("italic", v === true)} />Italic</label>
                 </div>
+                <label className="flex items-center gap-2 text-sm"><Checkbox checked={settings.preserve_pgs_placement} onCheckedChange={v => update("preserve_pgs_placement", v === true)} />Preserve original placement (PGS)</label>
+                <p className="text-xs leading-relaxed text-muted-foreground">Keep separate text regions and each original position change while applying your font and outline. Position and margin above apply to text subtitles, or to PGS when this option is off. Fonts and translated text fitting the source space remain approximate.</p>
               </div>
             </fieldset>
-            <div className="min-w-0 space-y-4 lg:sticky lg:top-0 lg:self-start">
+            <div className="min-w-0 space-y-4 lg:min-h-0 lg:overflow-y-auto lg:pr-2">
               <div className="flex items-center justify-between"><h3 className="text-sm font-medium">Subtitle preview</h3><span className="text-[10px] uppercase tracking-wide text-muted-foreground">ASS · 1920 × 1080</span></div>
               <div className="relative aspect-video overflow-hidden rounded-lg border border-border bg-[#172438]" aria-busy={previewBusy}>
                 {preview && !previewError && <img src={preview} alt="Rendered preview of your ASS subtitle style on a sample background" className="h-full w-full object-contain" />}
@@ -205,7 +209,8 @@ export function FixAnimeDialog({ selection, onClose, onQueued }: {
                   {previewBusy ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Rendering ASS…</> : previewError}
                 </div>}
               </div>
-              <p className="text-xs leading-relaxed text-muted-foreground">Rendered with libass on the server using installed fonts. Missing fonts use a fallback. Preview uses sample dialogue; custom signs and typesetting are flattened in converted tracks.</p>
+              <div className="space-y-2"><Label htmlFor="anime-preview-scene">Preview scene</Label><select id="anime-preview-scene" value={previewScene} disabled={saving} onChange={e => setPreviewScene(e.target.value)} className="h-9 w-full rounded-md border border-input bg-background px-2 text-xs"><option value="style">Style sample</option><option value="pgs_top">PGS example · top of screen</option><option value="pgs_bottom">PGS example · bottom of screen</option><option value="pgs_right">PGS example · right side</option></select></div>
+              <p className="text-xs leading-relaxed text-muted-foreground">Rendered with libass using server fonts; missing fonts use a fallback. PGS examples simulate source placement so you can compare the preservation setting. Actual PGS output follows each cue’s source position and timing. Other typesetting and graphical effects are flattened.</p>
               <div className="space-y-2"><Label htmlFor="anime-sample">Preview dialogue</Label><textarea id="anime-sample" value={sample} disabled={saving} maxLength={400} rows={2} onChange={e => setSample(e.target.value)} className="w-full resize-y rounded-md border border-input bg-input px-3 py-2 text-sm" /></div>
               <div className="rounded-lg border border-border/70 bg-secondary/20 p-4">
                 <h3 className="mb-2 text-sm font-medium">Review before running</h3>
