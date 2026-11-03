@@ -5,7 +5,7 @@ import re
 
 
 DEFAULT_SETTINGS = {
-    'target_lang': 'spa', 'font_name': 'Noto Sans', 'font_size': 54,
+    'target_lang': '', 'font_name': 'Noto Sans', 'font_size': 54,
     'primary_color': '#FFFFFF', 'outline_color': '#15151F',
     'shadow_color': '#000000', 'outline': 2.5, 'shadow': 1.5,
     'margin_v': 48, 'alignment': 2, 'bold': True, 'italic': False,
@@ -28,7 +28,8 @@ def validate_settings(value, languages):
         if not isinstance(values, list) or not values or not all(isinstance(v, str) and v in languages for v in values):
             raise ValueError(f'{key} must contain at least one supported language')
         result[key] = list(dict.fromkeys(values))
-    if result['target_lang'] not in languages or result['target_lang'] in ('und', 'mis', 'mul', 'zxx'):
+    if not isinstance(result['target_lang'], str) or (result['target_lang'] and
+            (result['target_lang'] not in languages or result['target_lang'] in ('und', 'mis', 'mul', 'zxx'))):
         raise ValueError('Choose a supported target subtitle language')
     font = result['font_name']
     if not isinstance(font, str) or not font.strip() or len(font) > 80 or re.search(r'[,\r\n{}\\]', font):

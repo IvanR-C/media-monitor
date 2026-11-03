@@ -1,4 +1,5 @@
-"""Run an isolated, fictional UI preview on http://127.0.0.1:5001.
+"""Run an isolated, fictional UI preview on http://127.0.0.1:5001 (pass a port, e.g.
+`python scripts/preview.py 5002`, or set PREVIEW_PORT, to use another one).
 
 Build frontend/ first. No production files, media workers, or account credentials
 are loaded. State is kept only in config/settings-preview/.
@@ -38,7 +39,7 @@ def main():
         session['authenticated'] = True
 
     mod.app.before_request_funcs[None].insert(0, preview_session)
-    mod.app.run(host='127.0.0.1', port=5001, debug=False)
+    mod.app.run(host='127.0.0.1', port=int(sys.argv[1] if len(sys.argv) > 1 else os.environ.get('PREVIEW_PORT', '5001')), debug=False)
 
 
 if __name__ == '__main__':

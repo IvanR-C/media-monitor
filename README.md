@@ -50,26 +50,29 @@ See the [Library UX review](docs/ux/library/review.md) for captured findings and
 - Empty library shows a prominent **Scan Library** button to get started quickly
 
 ### ⚡ GPU-Accelerated Encoding
-- One-click queue to re-encode any file to HEVC (H.265) using NVIDIA NVENC
-- In-place encoding: the original file is replaced on success
+- One-click queue to re-encode any file, by default to HEVC (H.265) with NVIDIA NVENC
+- Quality profiles (High quality, Balanced, Smaller files, or a custom value), speed preset, and maximum resolution (or keep the original), shared by encodes and disc rips
+- Other encoders (H.264/AV1 on NVENC, Intel Quick Sync, AMD AMF, or CPU x264/x265/SVT-AV1) can be selected when a self-test shows they work on your server
+- Replace the original after verification (with optional `.bak` backups and retention), or write a separate output file
 - Live progress: percentage, encoding speed, and estimated time remaining
 - Automatic detection of stuck jobs with timeout recovery
 - Cancel any queued or in-progress job
 - Shows file size savings after completion
 
-> **Requires an NVIDIA GPU and the NVIDIA Container Toolkit.** CPU encoding is not currently supported but is planned for a future release.
+> The default encoder **requires an NVIDIA GPU and the NVIDIA Container Toolkit**. Settings → Encoding lists only the encoders that work on your server, including slower CPU encoders.
 
 See [docs/encoding.md](docs/encoding.md) for full details.
 
 ### 💬 Subtitle Translation
-- Translate any subtitle track to **Cuban Spanish** using the OpenAI API
+- Translate subtitle tracks to a language you choose using OpenAI or a local AI server such as Ollama
 - **Text subtitles** (SRT, ASS, SSA): extracted directly and sent to the model
 - **Image subtitles** (PGS / Blu-ray): OCR'd first with Tesseract (using the track's language tag to pick the right language pack), then translated
-- Output is saved as a `.es.srt` file alongside the video **and** muxed into the MKV as a new track
+- Output uses a language-tagged sidecar (for example `.fra.srt`) while muxing. The sidecar is removed after a successful mux unless **Keep translated sidecar** is on
 - Job queue with live progress and per-step status (`extracting` → `ocr` → `translating` → `muxing`)
-- Requires an OpenAI API key (uses `gpt-4o-mini` by default, configurable)
+- Configure provider, model, chunk size, temperature, local thinking mode, and saved-chunk reuse in Settings
+- OpenAI requires an API key; local AI uses your own compatible server
 
-> The target translation language is currently hardcoded to **Cuban Spanish**. Support for configuring the target language from the UI is planned for a future release.
+> Choose a target language in **Settings → AI translation** before translating. No language or regional dialect is selected by default. Optional regional style and custom instructions let each user choose their own translation preferences.
 
 See [docs/subtitle-translation.md](docs/subtitle-translation.md) for full details.
 
@@ -93,16 +96,16 @@ See [docs/fix-anime.md](docs/fix-anime.md) for behavior and requirements.
 See [docs/media-library.md](docs/media-library.md) for full details.
 
 ### 🔤 Language Filtering (Encoding)
-During encoding, only tracks in the approved language sets are kept in the output file:
+**Settings → Tracks & languages** decides which tracks survive encoding and disc rips:
+searchable audio and subtitle keep lists (defaults: audio English · Japanese · Spanish,
+subtitles English · Spanish), **Keep all languages**, untagged-track handling, and a
+fallback so a file never loses all its audio. For audio, choose either the best track per
+language, ranked by a codec order you set and then by channel count, or all matching
+tracks. Commentary is dropped by default, and you can set a default audio language.
+Keep/Drop choices you change in the track editor always override the rules. Each file's
+details drawer previews exactly which tracks will be kept, and why.
 
-| Track type | Kept languages |
-|---|---|
-| Audio | English · Spanish · Japanese |
-| Subtitles | English · Spanish |
-
-For audio, only the **highest-quality** track per language is kept (e.g. TrueHD is kept over AC-3 for the same language). All other tracks are dropped from the encoded output.
-
-> These language lists are currently hardcoded. Per-user configuration from the UI is planned for a future release.
+See [docs/processing-settings.md](docs/processing-settings.md) for every setting, precedence rule, and upgrade note.
 
 ### 📊 Real-Time Logs
 - In-app log viewer streamed from the backend
@@ -210,7 +213,9 @@ docker compose up -d
 
 All settings can be configured from the **Settings** view after first launch:
 
-Use the section navigation for **AI translation**, **Notifications**, **Library**, and **Account & security**.
+Use the section navigation for **AI translation**, **Tracks & languages**, **Encoding**, **Output files**,
+**Notifications**, **Library**, and **Account & security**. Queued jobs keep the settings they were
+queued with. See [docs/processing-settings.md](docs/processing-settings.md).
 Configuration toggles and selections apply immediately; text and number fields save after a short typing pause.
 The save indicator shows pending changes, successful saves, and failures with a retry action. Invalid fields
 show an inline message and are not submitted. Changing library rules automatically refreshes file statuses.
@@ -223,6 +228,10 @@ Password changes and passkey actions use their own explicit buttons.
 | **OpenAI API key** | Required for subtitle translation |
 | **OpenAI model** | Default: `gpt-4o-mini`. Use `gpt-4o` for higher accuracy |
 | **TVDB API key** | Optional — fetch poster art for notification embeds |
+| **Notification events** | Per provider: new media, needs attention, job completed, job failed, disc image found; Ntfy priority per event |
+| **Required subtitles** | Languages a file must have to avoid MISSING LANG. An empty selection requires none |
+| **Folder rules** | Explicit movie/show folders and excluded folders inside the watch folder |
+| **New file detection** | Check interval and unchanged-check count before a copied file is processed |
 
 Settings are persisted to `/config/config.json` inside the container and survive restarts.
 
@@ -235,8 +244,8 @@ All environment variables can also be set directly in `docker-compose.yml`:
 | `WATCH_DIR` | `/watch` | Directory to monitor for new files |
 | `PORT` | `5000` | Backend API port (internal) |
 | `MAX_WORKERS` | `4` | Parallel file processing threads |
-| `STABILIZE_INTERVAL` | `10` | Seconds between file size checks |
-| `STABILIZE_CHECKS` | `3` | Consecutive stable checks before processing |
+| `STABILIZE_INTERVAL` | `10` | Seconds between file size checks — initial value only; Settings → Library overrides it once saved |
+| `STABILIZE_CHECKS` | `3` | Consecutive stable checks before processing — initial value only; Settings → Library overrides it once saved |
 | `REENCODE_SIZE_GB` | `20` | Files above this size (GB) are flagged RE-ENCODE |
 | `NTFY_SERVER` | — | e.g. `https://ntfy.sh` |
 | `NTFY_TOPIC` | — | Your ntfy topic name |
@@ -361,7 +370,7 @@ From **Settings → Account & Security** you can:
 
 ## 🗺️ Roadmap
 
-- [ ] Configurable target translation language (currently hardcoded to Cuban Spanish)
+- [x] Configurable translation language, regional style, and model preferences
 - [ ] Configurable approved audio/subtitle language lists in the UI
 - [ ] CPU encoding fallback (software HEVC via libx265)
 - [ ] VOBSUB (DVD subtitle) OCR support

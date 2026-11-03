@@ -8,6 +8,7 @@ import { CombinedQueue } from "./encode-queue";
 import { AppLogs } from "./app-logs";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { normalizeLanguage } from "@/lib/languages";
 
 export type MediaType = "movie" | "show";
 export type FilterType =
@@ -439,8 +440,23 @@ export function MediaLibraryTab({ scan, onOpenPosterSettings }: MediaLibraryTabP
 
   const OCR_SUB_CODECS = new Set(["hdmv_pgs_subtitle"]);
 
+  const loadTranslationTarget = async () => {
+    try {
+      const response = await fetch('/api/config');
+      if (!response.ok) throw new Error('Could not load translation preferences');
+      const settings = await response.json();
+      if (!settings.translation_target_lang) throw new Error('Choose a target language in Settings → AI translation first');
+      return settings.translation_target_lang as string;
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not load translation preferences');
+      return '';
+    }
+  };
+
   const handleTranslateSelected = async () => {
     if (selectedIds.size === 0) return;
+    const destination = await loadTranslationTarget();
+    if (!destination) return;
     let queued = 0;
     let skipped = 0;
     for (const id of selectedIds) {
@@ -456,16 +472,13 @@ export function MediaLibraryTab({ scan, onOpenPosterSettings }: MediaLibraryTabP
         skipped++;
         continue;
       }
-      // Prefer first non-eng/spa track, fall back to first text track
-      const target =
-        textSubs.find(
-          (t) => !["eng", "spa"].includes((t.lang ?? "").toLowerCase()),
-        ) ?? textSubs[0];
+      const target = textSubs.find(t => normalizeLanguage(t.lang) !== destination);
+      if (!target) { skipped++; continue; }
       try {
         const r = await fetch(`/api/media/${id}/translate-subtitle`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sub_idx: target.sub_idx }),
+          body: JSON.stringify({ sub_idx: target.sub_idx, target_lang: destination }),
         });
         if (r.ok) queued++;
         else skipped++;
@@ -484,6 +497,8 @@ export function MediaLibraryTab({ scan, onOpenPosterSettings }: MediaLibraryTabP
 
   const handleOcrTranslateSelected = async () => {
     if (selectedIds.size === 0) return;
+    const destination = await loadTranslationTarget();
+    if (!destination) return;
     let queued = 0;
     let skipped = 0;
     for (const id of selectedIds) {
@@ -499,16 +514,13 @@ export function MediaLibraryTab({ scan, onOpenPosterSettings }: MediaLibraryTabP
         skipped++;
         continue;
       }
-      // Prefer first non-eng/spa track, fall back to first OCR-capable track
-      const target =
-        ocrSubs.find(
-          (t) => !["eng", "spa"].includes((t.lang ?? "").toLowerCase()),
-        ) ?? ocrSubs[0];
+      const target = ocrSubs.find(t => normalizeLanguage(t.lang) !== destination);
+      if (!target) { skipped++; continue; }
       try {
         const r = await fetch(`/api/media/${id}/translate-subtitle`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sub_idx: target.sub_idx }),
+          body: JSON.stringify({ sub_idx: target.sub_idx, target_lang: destination }),
         });
         if (r.ok) queued++;
         else skipped++;

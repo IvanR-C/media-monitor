@@ -12,7 +12,13 @@ type Details = MediaFile & {
   filepath: string; duration_seconds: number; format_name?: string
   missing_subtitle_langs: string[]; sidecar_subtitle_langs: string[]; reencode_threshold_gib: number
   posters_enabled: boolean; poster_lookup_available: boolean
-  encoding_preview: { audio_tracks: AudioTrack[]; subtitle_tracks: SubtitleTrack[]; excluded_tracks: number }
+  translation_target_lang?: string
+  encoding_preview: {
+    audio_tracks: AudioTrack[]; subtitle_tracks: SubtitleTrack[]; excluded_tracks: number
+    decisions?: { kind: "audio" | "subtitle"; index: number; lang: string; codec: string; channels?: number; title?: string; kept: boolean; reason: string }[]
+    video?: { label: string; profile: string; quality: number; preset: string; output_height: number; scaled: boolean }
+    output?: { policy: "replace" | "separate"; path: string | null; backup: boolean }
+  }
 }
 const IMAGE_SUBS = new Set(["hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "dvb_teletext", "eia_608"])
 const activeTranslation = (status?: string) => !!status && !["done", "failed", "cancelled"].includes(status)
@@ -154,13 +160,13 @@ export function MediaDetailsDrawer({ file, onClose, onManageTracks, onAddSubtitl
             </div>
           </section>
           <section aria-label="File information"><h3 className="mb-3 text-xs font-medium uppercase tracking-wider text-muted-foreground">File</h3><dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-xs"><Info label="Size">{formatBytes(current.size_bytes || 0)}</Info><Info label="Container">{current.format_name || "Unknown"}</Info><Info label="Resolution">{current.video_width && current.video_height ? `${current.video_width} × ${current.video_height}` : "Unknown"}</Info><Info label="Runtime">{duration(current.duration_seconds)}</Info></dl><p className="mt-4 break-all rounded-md bg-secondary/35 px-3 py-2 font-mono text-[10px] leading-relaxed text-muted-foreground">{current.filepath}</p>{current.estimated_size_gb && <p className="mt-2 text-xs text-muted-foreground">Estimated after encoding: {current.estimated_size_gb.toFixed(1)} GB. Actual results vary.</p>}</section>
-          {!unsupported && (oversized || file?.disc_type) && <section aria-label="Encoding track preview" className="border-y border-border/40 py-4"><h3 className="mb-3 text-xs font-medium uppercase tracking-wider text-muted-foreground">What encoding keeps</h3><div className="space-y-2 text-xs leading-relaxed"><p><span className="text-muted-foreground">Audio: </span>{current.encoding_preview.audio_tracks.map(track => `${languageLabel(track.lang)} (${track.codec.toUpperCase()})`).join(", ") || "None"}</p><p><span className="text-muted-foreground">Subtitles: </span>{current.encoding_preview.subtitle_tracks.map(track => languageLabel(track.lang)).join(", ") || "None"}</p>{current.encoding_preview.excluded_tracks > 0 && <p className="text-warning">{current.encoding_preview.excluded_tracks} track{current.encoding_preview.excluded_tracks === 1 ? " is" : "s are"} excluded by the current encoding rules.</p>}<p className="text-muted-foreground">Encoding keeps the best approved audio track per language. Remux Keep/Drop choices are shown separately below.</p></div></section>}
+          {!unsupported && (oversized || file?.disc_type) && <EncodingPreview preview={current.encoding_preview} disc={!!file?.disc_type} />}
           <section aria-label="Audio tracks"><div className="mb-2 flex items-center justify-between gap-3"><h3 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Audio · {current.audio_tracks.length}</h3>{canAct && !busy && <button type="button" onClick={() => launch(() => onManageTracks(file!))} className="text-xs text-accent hover:underline">Manage tracks</button>}</div><TrackList tracks={current.audio_tracks} /></section>
           <section aria-label="Subtitle tracks"><div className="mb-2 flex items-center justify-between gap-3"><h3 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Subtitles · {current.subtitle_tracks.length}</h3>{canAct && !busy && <button type="button" onClick={() => launch(() => onAddSubtitle(file!))} className="text-xs text-accent hover:underline">Add subtitle file</button>}</div><TrackList tracks={current.subtitle_tracks} renderActions={track => {
             const sub = track as SubtitleTrack
             const image = IMAGE_SUBS.has(sub.codec)
             const supported = !image || sub.codec === "hdmv_pgs_subtitle"
-            return supported && sub.action !== "drop" ? <div className="mt-2 flex flex-wrap gap-3"><button type="button" disabled={busy} onClick={() => launch(() => onTranslate(file!.id, sub.sub_idx))} className="inline-flex items-center gap-1 text-[11px] text-accent hover:underline disabled:opacity-40"><Languages className="h-3 w-3" />{image ? "OCR & translate to Spanish" : "Translate to Spanish"}</button><button type="button" disabled={busy} onClick={() => launch(() => onDownloadSubtitle(file!.id, sub.sub_idx, image))} className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-40"><Download className="h-3 w-3" />{image ? "OCR & download" : "Download"}</button></div> : null
+            return supported && sub.action !== "drop" ? <div className="mt-2 flex flex-wrap gap-3"><button type="button" disabled={busy} onClick={() => launch(() => onTranslate(file!.id, sub.sub_idx))} className="inline-flex items-center gap-1 text-[11px] text-accent hover:underline disabled:opacity-40"><Languages className="h-3 w-3" />{image ? "OCR & translate" : "Translate"}{details?.translation_target_lang ? ` to ${languageLabel(details?.translation_target_lang)}` : " · choose language in Settings"}</button><button type="button" disabled={busy} onClick={() => launch(() => onDownloadSubtitle(file!.id, sub.sub_idx, image))} className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-40"><Download className="h-3 w-3" />{image ? "OCR & download" : "Download"}</button></div> : null
           }} /></section>
         </div>}
       </div>
@@ -172,4 +178,23 @@ function Reason({ children }: { children: ReactNode }) { return <div className="
 function Info({ label, children }: { label: string; children: ReactNode }) { return <div><dt className="text-muted-foreground">{label}</dt><dd className="mt-1 text-foreground">{children}</dd></div> }
 function TrackList({ tracks, renderActions }: { tracks: (AudioTrack | SubtitleTrack)[]; renderActions?: (track: AudioTrack | SubtitleTrack) => ReactNode }) {
   return tracks.length ? <div className="divide-y divide-border/30">{tracks.map((track, index) => <div key={index} className="py-3"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className={cn("text-sm", track.action === "drop" && "text-muted-foreground line-through")}>{languageLabel(track.lang)} <span className="ml-1 font-mono text-[10px] text-muted-foreground">{track.lang?.toUpperCase() || "UND"}</span></p><p className="mt-1 text-xs text-muted-foreground">#{"audio_idx" in track ? track.audio_idx : track.sub_idx} · {track.codec === "hdmv_pgs_subtitle" ? "PGS · Image subtitles" : track.codec.toUpperCase()}{"channels" in track && track.channels ? ` · ${track.channels}ch` : ""}{track.title ? ` · ${track.title}` : ""}</p></div><span className={cn("shrink-0 rounded px-1.5 py-1 text-[10px]", track.action === "drop" ? "bg-destructive/10 text-destructive" : "bg-secondary text-muted-foreground")}>{track.action === "drop" ? "Drop on remux" : "Keep on remux"}</span></div>{renderActions?.(track)}</div>)}</div> : <p className="py-3 text-xs text-muted-foreground">No embedded tracks found.</p>
+}
+
+const PROFILE_LABELS: Record<string, string> = { quality: "High quality", balanced: "Balanced", compact: "Smaller files", custom: "Custom" }
+
+function EncodingPreview({ preview, disc }: { preview: Details["encoding_preview"]; disc: boolean }) {
+  const decisions = preview.decisions || []
+  const describe = (d: (typeof decisions)[number]) => [languageLabel(d.lang), d.codec.toUpperCase(), d.kind === "audio" && d.channels ? `${d.channels}ch` : "", d.title].filter(Boolean).join(" · ")
+  return <section aria-label="Encoding track preview" className="border-y border-border/40 py-4">
+    <h3 className="mb-3 text-xs font-medium uppercase tracking-wider text-muted-foreground">{disc ? "What ripping keeps" : "What encoding keeps"}</h3>
+    {preview.video && <p className="mb-3 text-xs text-muted-foreground">{preview.video.label} · {PROFILE_LABELS[preview.video.profile] || preview.video.profile} (quality {preview.video.quality}) · preset {preview.video.preset.toUpperCase()}{preview.video.output_height ? ` · ${preview.video.output_height}p${preview.video.scaled ? " (scaled down)" : ""}` : ""}</p>}
+    <ul className="space-y-1.5 text-xs">
+      {decisions.map(d => <li key={`${d.kind}-${d.index}`} className="flex items-start gap-2">
+        <span className={cn("mt-0.5 shrink-0 rounded px-1.5 py-px text-[10px] font-medium uppercase", d.kept ? "bg-accent/15 text-accent" : "bg-secondary text-muted-foreground")}>{d.kept ? "Keep" : "Drop"}</span>
+        <span className="min-w-0"><span className="text-muted-foreground">{d.kind === "audio" ? "Audio" : "Subtitle"} #{d.index} </span>{describe(d)}<span className="block text-[11px] text-muted-foreground">{d.reason}</span></span>
+      </li>)}
+    </ul>
+    {!disc && preview.output && <p className="mt-3 break-all text-xs text-muted-foreground">{preview.output.policy === "separate" ? `Writes a new file: ${preview.output.path ? preview.output.path.split(/[\\/]/).pop() : "next free name"}. The original is kept.` : `Replaces the original after verification${preview.output.backup ? "; the original is kept as a .bak backup" : ""}.`}</p>}
+    <p className="mt-2 text-xs text-muted-foreground">Rules come from Settings → Tracks & languages and Encoding. Keep/Drop choices you change in the track editor override them.</p>
+  </section>
 }
