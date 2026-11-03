@@ -1,8 +1,9 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { Library, Settings } from "lucide-react"
+import { Library, Settings, LogOut } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { Button } from "@/components/ui/button"
 
 interface HeaderProps {
   activeView: "library" | "settings"
@@ -12,6 +13,14 @@ interface HeaderProps {
 
 export function Header({ activeView, onViewChange, isScanning }: HeaderProps) {
   const [health, setHealth] = useState<'checking' | 'ok' | 'error'>('checking')
+
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' })
+    } finally {
+      window.location.reload()
+    }
+  }
 
   useEffect(() => {
     let inflight: AbortController | null = null
@@ -90,6 +99,16 @@ export function Header({ activeView, onViewChange, isScanning }: HeaderProps) {
             <span>Settings</span>
           </button>
         </nav>
+
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          onClick={handleLogout}
+          title="Sign out"
+          className="shrink-0 text-muted-foreground hover:text-foreground"
+        >
+          <LogOut className="h-4 w-4" />
+        </Button>
       </div>
     </header>
   )

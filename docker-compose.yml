@@ -23,7 +23,14 @@ services:
       # - NTFY_TOPIC=my-media-notifications
       # - DISCORD_WEBHOOK=https://discord.com/api/webhooks/...
       # - TVDB_API_KEY=your-api-key
-    
+
+      # Optional: Auth. Set COOKIE_SECURE=true if this is served over HTTPS
+      # (e.g. behind a reverse proxy) so session cookies get the Secure flag.
+      # - COOKIE_SECURE=true
+      # Passkeys are bound to the hostname you access the dashboard with —
+      # set this if you use more than one (otherwise it's auto-detected).
+      # - WEBAUTHN_RP_ID=media.example.com
+
     # Optional: Resource limits
     # deploy:
     #   resources:

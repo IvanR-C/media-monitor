@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { AccountSecurityCard } from "@/components/media-monitor/account-security-card"
 import { toast } from "sonner"
 import {
   Activity,
@@ -518,6 +519,8 @@ export function SettingsTab() {
           </div>
         </CardContent>
       </Card>
+
+      <AccountSecurityCard />
 
       {/* Save/Reload Buttons */}
       <div className="flex gap-3">
