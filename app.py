@@ -2708,131 +2708,10 @@ def _decode_rle(rle: bytes, width: int, height: int) -> list:
     return pixels[:expected]
 
 
-def _parse_pgs(sup_bytes: bytes):
-    """
-    Parse a raw PGS (.sup) bytestring.
-    Yields (start_ms: int, end_ms: int, image: PIL.Image.Image) for each
-    subtitle event.  The caller owns the Image objects.
-    """
-    from PIL import Image as PilImage
-
-    SEG_PDS, SEG_ODS, SEG_PCS, SEG_END = 0x14, 0x15, 0x16, 0x80
-    MAGIC = b'PG'
-
-    data = sup_bytes
-    pos, n = 0, len(data)
-
-    # Persistent state (palette survives display-set boundaries)
-    palette: dict = {}   # entry_id -> (R, G, B, A)
-    # Per-display-set state
-    objects: dict = {}   # object_id -> {'w', 'h', 'rle'}
-    pcs_pts: int  = 0
-    pcs_objs: list = []
-
-    pending = None  # (start_ms, PilImage) – currently displayed subtitle
-
-    def pts_ms(pts: int) -> int:
-        return pts * 1000 // 90000
-
-    while pos + 13 <= n:
-        if data[pos:pos + 2] != MAGIC:
-            pos += 1
-            continue
-
-        pts      = struct.unpack_from('>I', data, pos + 2)[0]
-        seg_type = data[pos + 10]
-        seg_size = struct.unpack_from('>H', data, pos + 11)[0]
-
-        if pos + 13 + seg_size > n:
-            break
-        seg = data[pos + 13: pos + 13 + seg_size]
-        pos += 13 + seg_size
-
-        # ── PDS: palette definition ───────────────────────────────────────────
-        if seg_type == SEG_PDS and len(seg) >= 2:
-            i = 2   # skip palette_id, version
-            while i + 4 < len(seg):
-                eid = seg[i]
-                Y, Cr, Cb, T = seg[i+1], seg[i+2], seg[i+3], seg[i+4]
-                r = max(0, min(255, round(Y + 1.402   * (Cr - 128))))
-                g = max(0, min(255, round(Y - 0.34414 * (Cb - 128) - 0.71414 * (Cr - 128))))
-                b = max(0, min(255, round(Y + 1.772   * (Cb - 128))))
-                palette[eid] = (r, g, b, T)
-                i += 5
-
-        # ── ODS: object (bitmap) data ─────────────────────────────────────────
-        elif seg_type == SEG_ODS and len(seg) >= 4:
-            obj_id   = struct.unpack_from('>H', seg, 0)[0]
-            seq_flag = seg[3]
-            if seq_flag & 0x80:          # first (or only) fragment
-                if len(seg) < 11:
-                    continue
-                width  = struct.unpack_from('>H', seg, 7)[0]
-                height = struct.unpack_from('>H', seg, 9)[0]
-                objects[obj_id] = {'w': width, 'h': height, 'rle': bytearray(seg[11:])}
-            elif obj_id in objects:      # continuation fragment
-                objects[obj_id]['rle'].extend(seg[4:])
-
-        # ── PCS: presentation composition ────────────────────────────────────
-        elif seg_type == SEG_PCS and len(seg) >= 11:
-            pcs_pts  = pts_ms(pts)
-            n_objs   = seg[10]
-            pcs_objs = []
-            if n_objs > 0:
-                off = 11
-                for _ in range(n_objs):
-                    if off + 7 >= len(seg):
-                        break
-                    oid     = struct.unpack_from('>H', seg, off)[0]
-                    cropped = bool(seg[off + 3] & 0x80)
-                    pcs_objs.append(oid)
-                    off += 8 + (8 if cropped else 0)
-
-        # ── END: display-set boundary ─────────────────────────────────────────
-        elif seg_type == SEG_END:
-            if pcs_objs:
-                # Render the first object in this display set
-                for oid in pcs_objs:
-                    if oid not in objects:
-                        continue
-                    obj = objects[oid]
-                    w, h = obj['w'], obj['h']
-                    if w == 0 or h == 0:
-                        continue
-
-                    pix_indices = _decode_rle(bytes(obj['rle']), w, h)
-
-                    raw = bytearray(w * h * 4)
-                    for idx, ci in enumerate(pix_indices):
-                        r, g, b, a = palette.get(ci, (0, 0, 0, 0))
-                        off = idx * 4
-                        raw[off], raw[off+1], raw[off+2], raw[off+3] = r, g, b, a
-
-                    img = PilImage.frombytes('RGBA', (w, h), bytes(raw))
-
-                    # Close any previous pending subtitle (overridden by new one)
-                    if pending:
-                        s_ms, s_img = pending
-                        yield s_ms, pcs_pts, s_img
-
-                    pending = (pcs_pts, img)
-                    break   # only first object; multi-object sets are very rare
-
-            else:
-                # PCS had no objects → "clear" event ends the current subtitle
-                if pending:
-                    s_ms, s_img = pending
-                    yield s_ms, pcs_pts, s_img
-                    pending = None
-
-            # Reset per-display-set state; palette is intentionally kept
-            objects  = {}
-            pcs_objs = []
-
-    # Flush a subtitle that was never explicitly cleared
-    if pending:
-        s_ms, s_img = pending
-        yield s_ms, s_ms + 3000, s_img
+def _parse_pgs(sup_bytes: bytes, include_layout=False):
+    """Parse all timed PGS objects; optionally retain their source placement."""
+    from pgs_subtitles import parse_pgs
+    yield from parse_pgs(sup_bytes, _decode_rle, include_layout=include_layout)
 
 
 def _preprocess_for_ocr(img):
@@ -2890,16 +2769,47 @@ def _ms_to_srt_ts(ms: int) -> str:
     return f'{h:02d}:{m:02d}:{s:02d},{ms_:03d}'
 
 
+def _pgs_text_regions(gray, image_size, tess_lang):
+    """OCR separate text paragraphs and map their boxes back before resizing."""
+    import pytesseract
+    result = pytesseract.image_to_data(gray, lang=tess_lang, config='--psm 11',
+                                      output_type=pytesseract.Output.DICT)
+    groups = {}
+    for i, word in enumerate(result['text']):
+        if not word.strip() or float(result['conf'][i]) < 0:
+            continue
+        key = (result['block_num'][i], result['par_num'][i])
+        groups.setdefault(key, []).append(i)
+    regions = []
+    sx, sy = image_size[0] / gray.width, image_size[1] / gray.height
+    for indices in groups.values():
+        lines = {}
+        for i in indices:
+            lines.setdefault(result['line_num'][i], []).append(result['text'][i].strip())
+        text = '\n'.join(' '.join(words) for words in lines.values())
+        left = min(result['left'][i] for i in indices)
+        top = min(result['top'][i] for i in indices)
+        right = max(result['left'][i] + result['width'][i] for i in indices)
+        bottom = max(result['top'][i] + result['height'][i] for i in indices)
+        if right > left and bottom > top:
+            regions.append((text, (left * sx, top * sy, (right - left) * sx, (bottom - top) * sy)))
+    return sorted(regions, key=lambda item: (item[1][1], item[1][0]))
+
+
 def pgs_ocr(filepath: str, sub_stream_idx: int, source_lang: str,
-            job_id=None, progress_cb=None) -> str:
+            job_id=None, progress_cb=None, layout_out=None) -> str:
     """
     Extract the PGS subtitle track at sub_stream_idx from filepath,
     OCR every frame with Tesseract, and return a complete SRT string.
 
     progress_cb(pct: float, detail: str) is called periodically during OCR.
     Raises RuntimeError on unrecoverable failures.
+    If layout_out is a list, fill it with one source-coordinate region per SRT
+    cue. Layout never goes to the AI provider or through the SRT text itself.
     """
     import pytesseract
+    import hashlib
+    from pgs_subtitles import iter_segments
 
     tag      = f'[ocr] job {job_id}' if job_id is not None else '[ocr]'
     tess_lang = TESS_LANG_MAP.get((source_lang or '').lower(), 'eng')
@@ -2927,49 +2837,55 @@ def pgs_ocr(filepath: str, sub_stream_idx: int, source_lang: str,
         with open(sup_path, 'rb') as fh:
             sup_bytes = fh.read()
 
-    frames = list(_parse_pgs(sup_bytes))
-    log('info', f'{tag} parsed {len(frames)} subtitle frame(s) — OCR lang={tess_lang}')
-
-    if not frames:
-        raise RuntimeError('No subtitle frames found in PGS track')
+    total = sum(segment[10] for _, kind, segment in iter_segments(sup_bytes)
+                if kind == 0x16 and len(segment) >= 11)
+    log('info', f'{tag} parsing up to {total} subtitle object(s) — OCR lang={tess_lang}')
+    if layout_out is not None:
+        layout_out.clear()
 
     # 3 ── OCR each frame
     srt_blocks: list = []
-    for i, (start_ms, end_ms, img) in enumerate(frames):
-        if progress_cb and i % max(1, len(frames) // 20) == 0:
-            progress_cb(i / len(frames) * 100, f'OCR frame {i + 1}/{len(frames)}…')
-
-        gray = _preprocess_for_ocr(img)
-
+    cache = {}
+    readable_frames = frame_count = 0
+    for i, (start_ms, end_ms, img, layout) in enumerate(_parse_pgs(sup_bytes, include_layout=True)):
+        frame_count += 1
         try:
-            # PSM 6: assume a single uniform block of text (clean subtitle image)
-            text = pytesseract.image_to_string(
-                gray, lang=tess_lang, config='--psm 6',
-            ).strip()
-        except Exception as exc:
-            log('warn', f'{tag} OCR error on frame {i + 1}: {exc}')
-            text = ''
-
-        if not text:
-            continue
-
-        # A single frame can contain visually separated text clusters (e.g. an
-        # on-screen chart/caption overlay), which Tesseract renders as a blank
-        # line inside its own output. Left alone, that blank line is indistinguishable
-        # from a real SRT block separator and corrupts parsing downstream — collapse
-        # it so one frame always yields exactly one SRT block.
-        text = re.sub(r'\n\s*\n+', '\n', text)
-
-        srt_blocks.append(
-            f'{len(srt_blocks) + 1}\n'
-            f'{_ms_to_srt_ts(start_ms)} --> {_ms_to_srt_ts(end_ms)}\n'
-            f'{text}'
-        )
+            if progress_cb and i % max(1, total // 20) == 0:
+                progress_cb(min(99, i / max(1, total) * 100), f'OCR frame {i + 1}/{total}…')
+            key = (img.size, hashlib.sha256(img.tobytes()).digest())
+            if key not in cache:
+                gray = _preprocess_for_ocr(img)
+                try:
+                    if layout_out is not None:
+                        regions = _pgs_text_regions(gray, img.size, tess_lang)
+                    else:
+                        text = pytesseract.image_to_string(gray, lang=tess_lang, config='--psm 6').strip()
+                        regions = [(text, (0, 0, img.width, img.height))] if text else []
+                except Exception as exc:
+                    log('warn', f'{tag} OCR error on frame {i + 1}: {exc}')
+                    regions = []
+                finally:
+                    gray.close()
+                # Reused moving objects need one OCR pass; bound cached text.
+                if len(cache) >= 128:
+                    cache.pop(next(iter(cache)))
+                cache[key] = regions
+            regions = cache[key]
+            readable_frames += bool(regions)
+            for text, (x, y, width, height) in regions:
+                text = re.sub(r'\n\s*\n+', '\n', text)
+                cue_id = len(srt_blocks) + 1
+                srt_blocks.append(f'{cue_id}\n{_ms_to_srt_ts(start_ms)} --> {_ms_to_srt_ts(end_ms)}\n{text}')
+                if layout_out is not None:
+                    layout_out.append({**layout, 'cue_id': cue_id, 'x': layout['x'] + x,
+                                       'y': layout['y'] + y, 'width': width, 'height': height})
+        finally:
+            img.close()
 
     if not srt_blocks:
         raise RuntimeError('OCR produced no readable text from subtitle images')
 
-    log('info', f'{tag} OCR complete — {len(srt_blocks)}/{len(frames)} frame(s) yielded text')
+    log('info', f'{tag} OCR complete — {readable_frames}/{frame_count} frame(s), {len(srt_blocks)} text region(s)')
     return '\n\n'.join(srt_blocks)
 
 
@@ -4523,7 +4439,17 @@ def anime_preview_route():
         text = data.get('text', 'Even across the stars,\nI will always find my way back to you.')
         if not isinstance(text, str) or not text.strip() or len(text) > 400:
             raise ValueError('Preview text must contain 1–400 characters')
-        content = srt_to_ass('1\n00:00:00,000 --> 00:00:05,000\n' + text, settings)
+        scene = data.get('scene', 'style')
+        samples = {'pgs_top': (200, 100, 800, 100), 'pgs_bottom': (560, 920, 800, 100),
+                   'pgs_right': (1420, 420, 420, 140)}
+        if scene not in ('style', *samples):
+            raise ValueError('Unknown subtitle preview scene')
+        layouts = None
+        if scene in samples:
+            x, y, width, height = samples[scene]
+            layouts = [{'cue_id': 1, 'x': x, 'y': y, 'width': width, 'height': height,
+                        'screen_width': 1920, 'screen_height': 1080}]
+        content = srt_to_ass('1\n00:00:00,000 --> 00:00:05,000\n' + text, settings, layouts=layouts)
         with tempfile.TemporaryDirectory(prefix='anime-preview-') as directory:
             Path(directory, 'preview.ass').write_text(content, encoding='utf-8')
             result = subprocess.run([
@@ -4594,6 +4520,27 @@ def anime_queue_route():
         return jsonify({'error': str(error)}), 400
 
 
+def translate_anime_subtitle_file(srt_path, source_lang, layouts=None, **kwargs):
+    """Translate repeated moving text once, then restore every original cue."""
+    if layouts is None:
+        return translate_subtitle_file(srt_path, source_lang, **kwargs)
+    blocks = _parse_srt_blocks(Path(srt_path).read_text(encoding='utf-8-sig'))
+    unique, lookup, indices = [], {}, []
+    for _, timing, lines in blocks:
+        key = tuple(lines)
+        if key not in lookup:
+            lookup[key] = len(unique)
+            unique.append(f'{len(unique) + 1}\n{timing}\n' + '\n'.join(lines))
+        indices.append(lookup[key])
+    compact = '\n\n'.join(unique)
+    compact_path = str(Path(srt_path).with_suffix('.unique.srt'))
+    Path(compact_path).write_text(compact, encoding='utf-8')
+    translated = translate_subtitle_file(compact_path, source_lang, **kwargs)
+    translated_blocks = _parse_srt_blocks(restore_srt_structure(compact, translated))
+    return '\n\n'.join(f'{number}\n{timing}\n' + '\n'.join(translated_blocks[index][2])
+                       for (number, timing, _), index in zip(blocks, indices))
+
+
 def run_anime_job(job, mf):
     job_id, filepath = job['id'], job['filepath']
 
@@ -4623,6 +4570,7 @@ def run_anime_job(job, mf):
                 base = 5 + 70 * i / len(plan['convert'])
                 tmp_srt = str(Path(directory, f'{i}.srt'))
                 source_lang = normalize_lang(source.get('lang'))
+                layouts = None
                 if source.get('path'):
                     progress('extracting', base, f'Reading {Path(source["path"]).name}…')
                     result = subprocess.run(['ffmpeg', '-v', 'error', '-y', '-i', source['path'], tmp_srt], capture_output=True, timeout=120)
@@ -4630,8 +4578,10 @@ def run_anime_job(job, mf):
                         raise ValueError('Could not read sidecar subtitle')
                 elif is_image_based_subtitle(source.get('codec')):
                     progress('ocr', base, 'Reading PGS subtitle images…')
+                    layouts = [] if settings['preserve_pgs_placement'] else None
                     content = pgs_ocr(filepath, source['sub_idx'], source_lang, job_id=job_id,
-                                      progress_cb=lambda pct, detail: progress('ocr', base + pct * .25, detail))
+                                      progress_cb=lambda pct, detail: progress('ocr', base + pct * .25, detail),
+                                      layout_out=layouts)
                     Path(tmp_srt).write_text(content, encoding='utf-8')
                 else:
                     progress('extracting', base, f'Extracting subtitle #{source["sub_idx"]}…')
@@ -4639,7 +4589,7 @@ def run_anime_job(job, mf):
                         raise ValueError('Could not extract subtitle')
                 if plan['needs_translation'] and i == 0:
                     progress('translating', 25, 'Translating missing target language…')
-                    content = translate_subtitle_file(tmp_srt, source_lang, job_id=job_id,
+                    content = translate_anime_subtitle_file(tmp_srt, source_lang, layouts=layouts, job_id=job_id,
                         target_lang=settings['target_lang'],
                         progress_cb=lambda pct, detail: progress('translating', 25 + pct * .5, detail))
                     lang = settings['target_lang']
@@ -4648,7 +4598,7 @@ def run_anime_job(job, mf):
                     lang = source_lang or 'und'
                 progress('styling', 78, 'Applying ASS style…')
                 out = Path(directory, f'{i}.ass')
-                out.write_text(srt_to_ass(content, settings), encoding='utf-8')
+                out.write_text(srt_to_ass(content, settings, layouts=layouts), encoding='utf-8')
                 outputs.append((str(out), lang))
 
             progress('muxing', 85, 'Removing unwanted tracks and muxing styled ASS…')
