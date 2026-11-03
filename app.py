@@ -21,7 +21,7 @@ from queue import Queue
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, Response
 import requests
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -139,6 +139,12 @@ def log(level: str, msg: str):
         _log_buffer.append({'seq': _log_seq, 'ts': ts, 'level': level, 'msg': msg})
 
 
+def _log_preview(text, limit=400):
+    """Collapse whitespace and truncate long text for a single-line log entry."""
+    flat = ' '.join(text.split())
+    return flat if len(flat) <= limit else f'{flat[:limit]}… (+{len(flat) - limit} more chars)'
+
+
 def detect_media_type(filepath):
     """Return (media_type, show_name, season_episode) for a given filepath."""
     parts = Path(filepath).parts
@@ -172,6 +178,13 @@ config = {
     'enable_posters':    True,
     'openai_api_key':    os.environ.get('OPENAI_API_KEY', ''),
     'openai_model':      os.environ.get('OPENAI_MODEL', 'gpt-4o-mini'),
+    'openai_chunk_size': 350,    # SRT blocks per request
+    # Translation backend selection — 'openai' or 'local_ai' (self-hosted, OpenAI-
+    # compatible server such as Ollama). Exactly one is active at a time.
+    'translate_backend':   os.environ.get('TRANSLATE_BACKEND', 'openai'),
+    'local_ai_base_url':   '',   # e.g. http://100.x.x.x:11434/v1 — must include /v1
+    'local_ai_model':      '',   # e.g. qwen2.5:7b
+    'local_ai_chunk_size': 25,   # SRT blocks per request — local models have far less context than gpt-4o-mini
     # Thresholds — overridable via /api/config and the dashboard UI.
     # reencode_size_gb: files larger than this many GiB are flagged RE-ENCODE.
     # required_sub_langs: subtitle languages (ISO 639-2) that must all be present
@@ -356,6 +369,12 @@ def init_db():
         # Migration: add source_codec to existing databases
         try:
             conn.execute('ALTER TABLE translation_jobs ADD COLUMN source_codec TEXT')
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        # Migration: add extract_only (download-only jobs — extract/OCR but skip
+        # translate+mux) to existing databases
+        try:
+            conn.execute('ALTER TABLE translation_jobs ADD COLUMN extract_only INTEGER DEFAULT 0')
         except sqlite3.OperationalError:
             pass  # column already exists
 
@@ -2026,25 +2045,56 @@ def restore_srt_structure(source_content, translated_content):
     return '\n\n'.join(repaired)
 
 
-def translate_srt_chunk(content, source_lang=''):
-    """Send one SRT chunk to the OpenAI API and return the translated text."""
-    api_key = config.get('openai_api_key', '')
-    if not api_key:
-        raise ValueError('OpenAI API key not configured')
+def _translation_backend_ready():
+    """Return (ok, error_message) for whichever translation backend is active."""
+    backend = config.get('translate_backend', 'openai')
+    if backend == 'local_ai':
+        if not config.get('local_ai_base_url'):
+            return False, 'Local AI base URL not configured. Add it in the Dashboard settings.'
+        if not config.get('local_ai_model'):
+            return False, 'Local AI model not configured. Add it in the Dashboard settings.'
+        return True, None
+    if not config.get('openai_api_key'):
+        return False, 'OpenAI API key not configured. Add it in the Dashboard settings.'
+    return True, None
 
+
+def _translation_client_and_model():
+    """Build the OpenAI-SDK-compatible client and model name for the active backend."""
     from openai import OpenAI
-    client = OpenAI(api_key=api_key)
+    backend = config.get('translate_backend', 'openai')
+    if backend == 'local_ai':
+        client = OpenAI(
+            api_key='ollama',
+            base_url=config['local_ai_base_url'].rstrip('/'),
+            timeout=600.0,   # local inference is much slower than the OpenAI API per token
+        )
+        return client, config.get('local_ai_model', '')
+    client = OpenAI(api_key=config.get('openai_api_key', ''))
+    return client, config.get('openai_model', 'gpt-4o-mini')
+
+
+def translate_srt_chunk(content, source_lang=''):
+    """Send one SRT chunk to the active translation backend and return the translated text."""
+    ready, err = _translation_backend_ready()
+    if not ready:
+        raise ValueError(err)
+
+    client, model = _translation_client_and_model()
 
     src_note = f" from {source_lang}" if source_lang else ''
+    prompt = f'Translate this subtitle file{src_note} to Cuban Spanish:\n\n{content}'
+    log('info', f'[translate] → {model}: {_log_preview(prompt)}')
     response = client.chat.completions.create(
-        model=config.get('openai_model', 'gpt-4o-mini'),
+        model=model,
         messages=[
             {'role': 'system', 'content': _SRT_SYSTEM_PROMPT},
-            {'role': 'user',   'content': f'Translate this subtitle file{src_note} to Cuban Spanish:\n\n{content}'},
+            {'role': 'user',   'content': prompt},
         ],
         temperature=0.3,
     )
     translated = response.choices[0].message.content.strip()
+    log('info', f'[translate] ← {model}: {_log_preview(translated)}')
     # Strip any markdown code fences GPT adds despite instructions
     translated = re.sub(r'^```[a-z]*\n?', '', translated, flags=re.MULTILINE)
     translated = re.sub(r'\n?```$',        '', translated, flags=re.MULTILINE)
@@ -2063,7 +2113,12 @@ def translate_subtitle_file(srt_path, source_lang='', progress_cb=None, job_id=N
     if not content.strip():
         raise ValueError('Extracted subtitle file is empty')
 
-    chunks = chunk_srt_content(content)
+    backend    = config.get('translate_backend', 'openai')
+    max_blocks = (
+        config.get('local_ai_chunk_size', 25) if backend == 'local_ai'
+        else config.get('openai_chunk_size', 350)
+    )
+    chunks     = chunk_srt_content(content, max_blocks=max_blocks)
     if not chunks:
         raise ValueError('Could not parse subtitle content into blocks')
 
@@ -2462,6 +2517,13 @@ def pgs_ocr(filepath: str, sub_stream_idx: int, source_lang: str,
         if not text:
             continue
 
+        # A single frame can contain visually separated text clusters (e.g. an
+        # on-screen chart/caption overlay), which Tesseract renders as a blank
+        # line inside its own output. Left alone, that blank line is indistinguishable
+        # from a real SRT block separator and corrupts parsing downstream — collapse
+        # it so one frame always yields exactly one SRT block.
+        text = re.sub(r'\n\s*\n+', '\n', text)
+
         srt_blocks.append(
             f'{len(srt_blocks) + 1}\n'
             f'{_ms_to_srt_ts(start_ms)} --> {_ms_to_srt_ts(end_ms)}\n'
@@ -2549,6 +2611,24 @@ def run_translation_job(job_id):
                 extracted_lines = sum(1 for _ in _f)
             log('info', f"[translate] job {job_id} subtitle extracted — "
                         f"{extracted_lines} lines, {extracted_size / 1024:.1f} KB")
+
+        if job['extract_only']:
+            # Download-only job — stop after extraction, no translate/mux. Move the
+            # temp SRT out of the media folder into a spot the download route owns,
+            # so it survives independently of the video file and doesn't get mistaken
+            # for a real sidecar subtitle by Plex/media scanners.
+            extracted_dir = os.path.join(os.path.dirname(CONFIG_FILE), 'extracted')
+            os.makedirs(extracted_dir, exist_ok=True)
+            out_path = os.path.join(extracted_dir, f'job{job_id}.srt')
+            shutil.move(tmp_srt, out_path)
+            with db() as conn:
+                conn.execute(
+                    "UPDATE translation_jobs SET status='done', srt_path=?, progress=100, "
+                    "progress_detail='Ready to download', completed_at=datetime('now') WHERE id=?",
+                    (out_path, job_id),
+                )
+            log('info', f"[translate] job {job_id} extract-only complete — ready to download")
+            return
 
         # 2 ── Translate
         # Progress range: text=10–85 %, image=20–85 % (OCR already used 5–20 %)
@@ -3069,6 +3149,24 @@ def update_config_route():
         if not isinstance(langs, list) or not all(isinstance(l, str) for l in langs):
             return jsonify({'error': 'required_sub_langs must be a list of strings'}), 400
         payload['required_sub_langs'] = sorted({normalize_lang(l) for l in langs if l})
+    if 'translate_backend' in payload and payload['translate_backend'] not in ('openai', 'local_ai'):
+        return jsonify({'error': "translate_backend must be 'openai' or 'local_ai'"}), 400
+    if 'local_ai_chunk_size' in payload:
+        try:
+            v = int(payload['local_ai_chunk_size'])
+            if v <= 0 or v > 350:
+                raise ValueError('out of range')
+            payload['local_ai_chunk_size'] = v
+        except (TypeError, ValueError):
+            return jsonify({'error': 'local_ai_chunk_size must be a positive integer ≤ 350'}), 400
+    if 'openai_chunk_size' in payload:
+        try:
+            v = int(payload['openai_chunk_size'])
+            if v <= 0 or v > 2000:
+                raise ValueError('out of range')
+            payload['openai_chunk_size'] = v
+        except (TypeError, ValueError):
+            return jsonify({'error': 'openai_chunk_size must be a positive integer ≤ 2000'}), 400
     config.update(payload)
     save_config()
     return jsonify({'status': 'success', 'config': config})
@@ -3092,6 +3190,27 @@ def test_discord():
         }
         r = requests.post(config['discord_webhook'], json={'embeds': [embed]}, timeout=10)
         return jsonify({'status': 'success', 'message': f'HTTP {r.status_code}'})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/test/local-ai', methods=['POST'])
+def test_local_ai():
+    payload  = request.json or {}
+    base_url = (payload.get('local_ai_base_url') or config.get('local_ai_base_url', '')).rstrip('/')
+    model    = payload.get('local_ai_model') or config.get('local_ai_model', '')
+    if not base_url:
+        return jsonify({'status': 'error', 'message': 'Base URL not set'}), 400
+    try:
+        r = requests.get(f'{base_url}/models', timeout=10)
+        r.raise_for_status()
+        models = [m.get('id', '') for m in r.json().get('data', [])]
+        if model and model not in models:
+            return jsonify({
+                'status': 'success',
+                'message': f'Connected ({len(models)} model(s) found), but "{model}" was not in the list — check it has been pulled.',
+            })
+        return jsonify({'status': 'success', 'message': f'Connected — {len(models)} model(s) available'})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
@@ -3612,7 +3731,6 @@ def get_encode_jobs():
             FROM encode_jobs ej
             LEFT JOIN media_files mf ON ej.media_file_id = mf.id
             ORDER BY ej.created_at DESC
-            LIMIT 100
         ''').fetchall()
 
     jobs = []
@@ -3707,10 +3825,9 @@ def api_translate_subtitle(file_id):
     if sub_idx is None:
         return jsonify({'error': 'sub_idx is required'}), 400
 
-    if not config.get('openai_api_key'):
-        return jsonify({
-            'error': 'OpenAI API key not configured. Add it in the Dashboard settings.'
-        }), 400
+    ready, err = _translation_backend_ready()
+    if not ready:
+        return jsonify({'error': err}), 400
 
     with db() as conn:
         mf = conn.execute('SELECT * FROM media_files WHERE id=?', (file_id,)).fetchone()
@@ -3747,6 +3864,75 @@ def api_translate_subtitle(file_id):
 
     translation_queue.put(job_id)
     return jsonify({'status': 'queued', 'job_id': job_id})
+
+
+@app.route('/api/media/<int:file_id>/subtitle/<int:sub_idx>/extract', methods=['POST'])
+def api_extract_subtitle(file_id, sub_idx):
+    """Queue a download-only extraction (and OCR, if needed) of a subtitle track —
+    no translation, no muxing. Runs through the same job queue/worker as translation
+    so a slow OCR pass never blocks an HTTP request (large PGS tracks or big remux
+    files can take well over a minute — synchronous extraction used to time out with
+    a proxy 'socket hang up' on those). Poll /api/translate/jobs for status, then
+    GET /api/translate/jobs/<job_id>/download once status is 'done'."""
+    with db() as conn:
+        mf = conn.execute('SELECT * FROM media_files WHERE id=?', (file_id,)).fetchone()
+        if not mf:
+            return jsonify({'error': 'File not found'}), 404
+
+        sub_tracks = json.loads(mf['subtitle_tracks'] or '[]')
+        track      = next((t for t in sub_tracks if t['sub_idx'] == sub_idx), None)
+        if not track:
+            return jsonify({'error': f'Subtitle track {sub_idx} not found'}), 404
+
+        codec = track.get('codec', '')
+        if is_image_based_subtitle(codec) and codec not in OCR_CAPABLE_CODECS:
+            return jsonify({
+                'error': f"Track #{sub_idx} ({codec}) cannot be OCR'd. "
+                         f"Only PGS (hdmv_pgs_subtitle) image tracks are supported."
+            }), 400
+
+        active = conn.execute(
+            "SELECT id FROM translation_jobs WHERE filepath=? "
+            "AND status IN ('pending','extracting','ocr','translating','muxing')",
+            (mf['filepath'],),
+        ).fetchone()
+        if active:
+            return jsonify({'error': 'A translation/extraction job is already running for this file'}), 400
+
+        cursor = conn.execute(
+            'INSERT INTO translation_jobs '
+            '(media_file_id, filepath, source_sub_idx, source_lang, source_codec, extract_only) '
+            'VALUES (?,?,?,?,?,1)',
+            (file_id, mf['filepath'], sub_idx, track.get('lang', ''), codec),
+        )
+        job_id = cursor.lastrowid
+
+    translation_queue.put(job_id)
+    return jsonify({'status': 'queued', 'job_id': job_id})
+
+
+@app.route('/api/translate/jobs/<int:job_id>/download')
+def download_extracted_subtitle(job_id):
+    with db() as conn:
+        job = conn.execute('SELECT * FROM translation_jobs WHERE id=?', (job_id,)).fetchone()
+    if not job:
+        return jsonify({'error': 'Job not found'}), 404
+    if job['status'] != 'done' or not job['srt_path'] or not os.path.exists(job['srt_path']):
+        return jsonify({'error': 'Extraction not finished, failed, or already downloaded'}), 400
+
+    with open(job['srt_path'], encoding='utf-8', errors='replace') as f:
+        content = f.read()
+    try:
+        os.remove(job['srt_path'])
+    except OSError:
+        pass
+
+    download_name = f"{Path(job['filepath']).stem}.sub{job['source_sub_idx']}.{job['source_lang'] or 'und'}.srt"
+    return Response(
+        content,
+        mimetype='application/x-subrip',
+        headers={'Content-Disposition': f'attachment; filename="{download_name}"'},
+    )
 
 
 @app.route('/api/translate/cancel/<int:job_id>', methods=['POST'])
@@ -3896,9 +4082,20 @@ def clear_encode_jobs():
 def clear_translation_jobs():
     """Delete translation jobs that are in a terminal state (done/failed/cancelled)."""
     with db() as conn:
+        # Extract-only jobs that were never downloaded still have their .srt sitting
+        # in the extracted/ dir — remove it so clearing the list also frees the file.
+        leftover = conn.execute(
+            "SELECT srt_path FROM translation_jobs "
+            "WHERE status IN ('done', 'failed', 'cancelled') AND extract_only=1 AND srt_path IS NOT NULL"
+        ).fetchall()
         result = conn.execute(
             "DELETE FROM translation_jobs WHERE status IN ('done', 'failed', 'cancelled')"
         )
+    for row in leftover:
+        try:
+            os.remove(row['srt_path'])
+        except OSError:
+            pass
     return jsonify({'deleted': result.rowcount})
 
 
@@ -3911,7 +4108,6 @@ def get_translation_jobs():
             FROM translation_jobs tj
             LEFT JOIN media_files mf ON tj.media_file_id = mf.id
             ORDER BY tj.created_at DESC
-            LIMIT 50
         ''').fetchall()
     return jsonify({
         'jobs':   [dict(r) for r in rows],

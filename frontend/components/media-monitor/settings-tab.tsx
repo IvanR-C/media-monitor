@@ -45,6 +45,11 @@ export function SettingsTab() {
     tvdb_api_key: "",
     openai_api_key: "",
     openai_model: "gpt-4o-mini",
+    openai_chunk_size: 350,
+    translate_backend: "openai",
+    local_ai_base_url: "",
+    local_ai_model: "",
+    local_ai_chunk_size: 25,
     reencode_size_gb: 20,
     required_sub_langs: ["eng", "spa"] as string[],
   })
@@ -158,6 +163,24 @@ export function SettingsTab() {
       else toast.error(data.message || "Failed")
     } catch {
       toast.error("Failed to send test notification")
+    }
+  }
+
+  const handleTestLocalAi = async () => {
+    try {
+      const r = await fetch('/api/test/local-ai', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          local_ai_base_url: config.local_ai_base_url,
+          local_ai_model: config.local_ai_model,
+        }),
+      })
+      const data = await r.json()
+      if (data.status === 'success') toast.success(data.message || "Connected")
+      else toast.error(data.message || "Failed")
+    } catch {
+      toast.error("Failed to reach local AI server")
     }
   }
 
@@ -301,15 +324,23 @@ export function SettingsTab() {
         </CardContent>
       </Card>
 
-      {/* Subtitle Translation */}
+      {/* Subtitle Translation — OpenAI */}
       <Card className="border-border/50 bg-card/50">
         <CardHeader className="pb-4">
           <CardTitle className="flex items-center gap-2 text-base font-medium">
             <Languages className="h-4 w-4 text-accent" />
-            Subtitle Translation (OpenAI)
+            Subtitle Translation — OpenAI
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
+          <div className="flex items-center justify-between">
+            <Label htmlFor="enable-openai-translate" className="text-sm">Use OpenAI for Translation</Label>
+            <Switch
+              id="enable-openai-translate"
+              checked={config.translate_backend === "openai"}
+              onCheckedChange={(checked) => setConfig({ ...config, translate_backend: checked ? "openai" : "local_ai" })}
+            />
+          </div>
           <div className="space-y-2">
             <Label htmlFor="openai-key" className="text-sm text-muted-foreground">OpenAI API Key</Label>
             <Input
@@ -343,6 +374,85 @@ export function SettingsTab() {
               gpt-4o-mini is recommended — excellent quality at a fraction of the cost.
             </p>
           </div>
+          <div className="space-y-2">
+            <Label htmlFor="openai-chunk-size" className="text-sm text-muted-foreground">Chunk Size (SRT blocks per request)</Label>
+            <Input
+              id="openai-chunk-size"
+              type="number"
+              min={1}
+              max={2000}
+              value={config.openai_chunk_size}
+              onChange={(e) => setConfig({ ...config, openai_chunk_size: Number(e.target.value) })}
+              className="bg-input"
+            />
+            <p className="text-xs text-muted-foreground">
+              Lower it for more reliable per-request translation, raise it for fewer round-trips. 350 is a safe default for gpt-4o-mini.
+            </p>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Subtitle Translation — Local AI */}
+      <Card className="border-border/50 bg-card/50">
+        <CardHeader className="pb-4">
+          <CardTitle className="flex items-center gap-2 text-base font-medium">
+            <Cpu className="h-4 w-4 text-accent" />
+            Subtitle Translation — Local AI (Ollama)
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-center justify-between">
+            <Label htmlFor="enable-local-ai-translate" className="text-sm">Use Local AI for Translation</Label>
+            <Switch
+              id="enable-local-ai-translate"
+              checked={config.translate_backend === "local_ai"}
+              onCheckedChange={(checked) => setConfig({ ...config, translate_backend: checked ? "local_ai" : "openai" })}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="local-ai-url" className="text-sm text-muted-foreground">Base URL</Label>
+            <Input
+              id="local-ai-url"
+              placeholder="http://100.x.x.x:11434/v1"
+              value={config.local_ai_base_url}
+              onChange={(e) => setConfig({ ...config, local_ai_base_url: e.target.value })}
+              className="bg-input"
+            />
+            <p className="text-xs text-muted-foreground">
+              Must include the <code>/v1</code> suffix. Any address reachable from this container works — a
+              Tailscale IP/hostname, LAN IP, etc. No docker-compose changes needed.
+            </p>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="local-ai-model" className="text-sm text-muted-foreground">Model</Label>
+            <Input
+              id="local-ai-model"
+              placeholder="qwen2.5:7b"
+              value={config.local_ai_model}
+              onChange={(e) => setConfig({ ...config, local_ai_model: e.target.value })}
+              className="bg-input"
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="local-ai-chunk-size" className="text-sm text-muted-foreground">Chunk Size (SRT blocks per request)</Label>
+            <Input
+              id="local-ai-chunk-size"
+              type="number"
+              min={1}
+              max={350}
+              value={config.local_ai_chunk_size}
+              onChange={(e) => setConfig({ ...config, local_ai_chunk_size: Number(e.target.value) })}
+              className="bg-input"
+            />
+            <p className="text-xs text-muted-foreground">
+              Smaller is safer for a smaller Ollama context window. If a job fails with "block count changed",
+              lower this value.
+            </p>
+          </div>
+          <Button variant="outline" size="sm" onClick={handleTestLocalAi}>
+            <Send className="mr-2 h-3.5 w-3.5" />
+            Test Local AI
+          </Button>
         </CardContent>
       </Card>
 

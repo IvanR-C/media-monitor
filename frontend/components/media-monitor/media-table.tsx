@@ -47,6 +47,7 @@ import {
   Wrench,
   Search,
   Disc,
+  Download,
 } from "lucide-react";
 import {
   Tooltip,
@@ -115,7 +116,9 @@ interface MediaTableProps {
   onEnqueueSelected: () => void;
   onRip: (id: number) => void;
   onTranslate: (id: number, subIdx: number) => void;
+  onDownloadSubtitle: (id: number, subIdx: number, isOcr: boolean) => void;
   onTranslateSelected: () => void;
+  onOcrTranslateSelected: () => void;
   onAssignTracks: (id: number, audio: any[], subs: any[]) => Promise<void>;
   onFolderScan: (fileIds: number[]) => void;
   onScanLibrary: () => void;
@@ -137,7 +140,9 @@ export function MediaTable({
   onEnqueueSelected,
   onRip,
   onTranslate,
+  onDownloadSubtitle,
   onTranslateSelected,
+  onOcrTranslateSelected,
   onAssignTracks,
   onFolderScan,
   onScanLibrary,
@@ -186,11 +191,14 @@ export function MediaTable({
   const allSelected = files.length > 0 && selectedIds.size === files.length;
 
   const selectedFiles = files.filter((f) => selectedIds.has(f.id));
-  const isTranslatable = (codec: string) =>
-    !IMAGE_CODECS.has(codec) || OCR_CODECS.has(codec);
+  const isTranslatable = (codec: string) => !IMAGE_CODECS.has(codec);
 
   const translatableSelectedCount = selectedFiles.filter((f) =>
     f.subtitle_tracks.some((t) => isTranslatable(t.codec)),
+  ).length;
+
+  const ocrTranslatableSelectedCount = selectedFiles.filter((f) =>
+    f.subtitle_tracks.some((t) => OCR_CODECS.has(t.codec)),
   ).length;
 
   // Apply client-side sort
@@ -319,6 +327,7 @@ export function MediaTable({
           onEnqueue={() => onEnqueue(file.id)}
           onRip={() => onRip(file.id)}
           onTranslate={onTranslate}
+          onDownloadSubtitle={onDownloadSubtitle}
           onOpenAssignDialog={setAssignDialogFile}
           onOpenMuxDialog={setMuxDialogFile}
           onFolderScan={() => onFolderScan([file.id])}
@@ -463,6 +472,7 @@ export function MediaTable({
               onEnqueue={() => onEnqueue(ep.id)}
               onRip={() => onRip(ep.id)}
               onTranslate={onTranslate}
+              onDownloadSubtitle={onDownloadSubtitle}
               onOpenAssignDialog={setAssignDialogFile}
               onOpenMuxDialog={setMuxDialogFile}
               isEpisode
@@ -501,6 +511,20 @@ export function MediaTable({
                 Translate
                 {translatableSelectedCount > 1
                   ? ` ${translatableSelectedCount}`
+                  : ""}
+              </Button>
+            )}
+            {ocrTranslatableSelectedCount > 0 && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 text-xs"
+                onClick={onOcrTranslateSelected}
+              >
+                <ScanLine className="mr-1 h-3 w-3" />
+                OCR + Translate
+                {ocrTranslatableSelectedCount > 1
+                  ? ` ${ocrTranslatableSelectedCount}`
                   : ""}
               </Button>
             )}
@@ -623,6 +647,7 @@ export function MediaTable({
                 onEnqueue={() => onEnqueue(file.id)}
                 onRip={() => onRip(file.id)}
                 onTranslate={onTranslate}
+                onDownloadSubtitle={onDownloadSubtitle}
                 onOpenAssignDialog={setAssignDialogFile}
                 onOpenMuxDialog={setMuxDialogFile}
                 onFolderScan={() => onFolderScan([file.id])}
@@ -753,6 +778,7 @@ export function MediaTable({
                                   onEnqueue={() => onEnqueue(ep.id)}
                                   onRip={() => onRip(ep.id)}
                                   onTranslate={onTranslate}
+                                  onDownloadSubtitle={onDownloadSubtitle}
                                   onOpenAssignDialog={setAssignDialogFile}
                                   onOpenMuxDialog={setMuxDialogFile}
                                   indent
@@ -799,6 +825,7 @@ function MobileFileCard({
   onEnqueue,
   onRip,
   onTranslate,
+  onDownloadSubtitle,
   onOpenAssignDialog,
   onOpenMuxDialog,
   indent,
@@ -811,6 +838,7 @@ function MobileFileCard({
   onEnqueue: () => void;
   onRip: () => void;
   onTranslate: (id: number, subIdx: number) => void;
+  onDownloadSubtitle: (id: number, subIdx: number, isOcr: boolean) => void;
   onOpenAssignDialog: (file: MediaFile) => void;
   onOpenMuxDialog?: (file: MediaFile) => void;
   indent?: boolean;
@@ -904,16 +932,23 @@ function MobileFileCard({
             {translatableSubTracks.length > 0 && (
               <>
                 <DropdownMenuSeparator />
-                {translatableSubTracks.map((t) => (
+                {translatableSubTracks.flatMap((t) => [
                   <DropdownMenuItem
-                    key={t.sub_idx}
+                    key={`translate-${t.sub_idx}`}
                     onClick={() => onTranslate(file.id, t.sub_idx)}
                   >
                     <Languages className="mr-2 h-3.5 w-3.5" />
                     {OCR_CODECS.has(t.codec) ? "OCR + Translate" : "Translate"} #{t.sub_idx}
                     {t.lang ? ` (${t.lang.toUpperCase()})` : ""}
-                  </DropdownMenuItem>
-                ))}
+                  </DropdownMenuItem>,
+                  <DropdownMenuItem
+                    key={`download-${t.sub_idx}`}
+                    onClick={() => onDownloadSubtitle(file.id, t.sub_idx, OCR_CODECS.has(t.codec))}
+                  >
+                    <Download className="mr-2 h-3.5 w-3.5" />
+                    Download{OCR_CODECS.has(t.codec) ? " OCR'd" : ""} Subtitle #{t.sub_idx}
+                  </DropdownMenuItem>,
+                ])}
               </>
             )}
             {file.subtitle_tracks.length === 0 && onOpenMuxDialog && (
@@ -987,6 +1022,7 @@ interface MediaTableRowProps {
   onEnqueue: () => void;
   onRip: () => void;
   onTranslate: (id: number, subIdx: number) => void;
+  onDownloadSubtitle: (id: number, subIdx: number, isOcr: boolean) => void;
   onOpenAssignDialog: (file: MediaFile) => void;
   onOpenMuxDialog?: (file: MediaFile) => void;
   isEpisode?: boolean;
@@ -1000,6 +1036,7 @@ function MediaTableRow({
   onEnqueue,
   onRip,
   onTranslate,
+  onDownloadSubtitle,
   onOpenAssignDialog,
   onOpenMuxDialog,
   isEpisode,
@@ -1109,16 +1146,23 @@ function MediaTableRow({
             {translatableSubTracks.length > 0 && (
               <>
                 <DropdownMenuSeparator />
-                {translatableSubTracks.map((t) => (
+                {translatableSubTracks.flatMap((t) => [
                   <DropdownMenuItem
-                    key={t.sub_idx}
+                    key={`translate-${t.sub_idx}`}
                     onClick={() => onTranslate(file.id, t.sub_idx)}
                   >
                     <Languages className="mr-2 h-3.5 w-3.5" />
                     {OCR_CODECS.has(t.codec) ? "OCR + Translate" : "Translate"} #{t.sub_idx}
                     {t.lang ? ` (${t.lang.toUpperCase()})` : ""}
-                  </DropdownMenuItem>
-                ))}
+                  </DropdownMenuItem>,
+                  <DropdownMenuItem
+                    key={`download-${t.sub_idx}`}
+                    onClick={() => onDownloadSubtitle(file.id, t.sub_idx, OCR_CODECS.has(t.codec))}
+                  >
+                    <Download className="mr-2 h-3.5 w-3.5" />
+                    Download{OCR_CODECS.has(t.codec) ? " OCR'd" : ""} Subtitle #{t.sub_idx}
+                  </DropdownMenuItem>,
+                ])}
               </>
             )}
             {file.subtitle_tracks.length === 0 && onOpenMuxDialog && (
