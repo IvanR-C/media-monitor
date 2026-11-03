@@ -42,7 +42,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY entrypoint.sh /entrypoint.sh
 RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 COPY app.py .
-COPY templates/ templates/
 
 # Create directories for config and data
 RUN mkdir -p /config /watch
