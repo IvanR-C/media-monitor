@@ -324,6 +324,58 @@ export function MediaLibraryTab({ scan }: MediaLibraryTabProps) {
     }
   };
 
+  const handleDownloadSubtitle = (id: number, subIdx: number, isOcr: boolean) => {
+    const run = async () => {
+      // Queue the extract/OCR through the same job worker translations use — a
+      // synchronous request here used to hold the connection open for the whole
+      // OCR pass, which a proxy in front could reset ("socket hang up") on slow
+      // (large/PGS) tracks. Queuing returns instantly; we just poll for it to finish.
+      const q = await fetch(`/api/media/${id}/subtitle/${subIdx}/extract`, { method: "POST" });
+      const qData = await q.json().catch(() => ({}));
+      if (!q.ok) throw new Error(qData.error || `Failed to queue (HTTP ${q.status})`);
+      const jobId = qData.job_id;
+
+      let job: any = null;
+      for (let attempt = 0; attempt < 300; attempt++) {
+        await new Promise((res) => setTimeout(res, 2000));
+        const jr = await fetch("/api/translate/jobs");
+        const jData = await jr.json().catch(() => ({}));
+        job = (jData.jobs ?? []).find((j: any) => j.id === jobId);
+        if (!job) throw new Error("Job disappeared from the queue");
+        if (job.status === "done") break;
+        if (job.status === "failed") throw new Error(job.error_text || "Extraction failed");
+        if (job.status === "cancelled") throw new Error("Extraction was cancelled");
+        job = null; // still running — keep polling
+      }
+      if (!job) throw new Error("Timed out waiting for extraction to finish");
+
+      const r = await fetch(`/api/translate/jobs/${jobId}/download`);
+      if (!r.ok) {
+        const data = await r.json().catch(() => ({}));
+        throw new Error(data.error || `Failed to download (HTTP ${r.status})`);
+      }
+      const blob = await r.blob();
+      const cd = r.headers.get("Content-Disposition") || "";
+      const match = cd.match(/filename="([^"]+)"/);
+      const filename = match ? match[1] : `subtitle-${subIdx}.srt`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    };
+    toast.promise(run(), {
+      loading: isOcr
+        ? "OCR'ing subtitle… this can take a minute for image-based tracks"
+        : "Extracting subtitle…",
+      success: "Subtitle downloaded",
+      error: (e) => (e instanceof Error ? e.message : "Failed to download subtitle"),
+    });
+  };
+
   const handleAssignTracks = async (
     fileId: number,
     audio: any[],
@@ -370,6 +422,8 @@ export function MediaLibraryTab({ scan }: MediaLibraryTabProps) {
     "eia_608",
   ]);
 
+  const OCR_SUB_CODECS = new Set(["hdmv_pgs_subtitle"]);
+
   const handleTranslateSelected = async () => {
     if (selectedIds.size === 0) return;
     let queued = 0;
@@ -410,6 +464,49 @@ export function MediaLibraryTab({ scan }: MediaLibraryTabProps) {
     }
     if (skipped > 0)
       toast.info(`${skipped} file(s) skipped (no translatable subtitle)`);
+    setSelectedIds(new Set());
+  };
+
+  const handleOcrTranslateSelected = async () => {
+    if (selectedIds.size === 0) return;
+    let queued = 0;
+    let skipped = 0;
+    for (const id of selectedIds) {
+      const file = files.find((f) => f.id === id);
+      if (!file) {
+        skipped++;
+        continue;
+      }
+      const ocrSubs = file.subtitle_tracks.filter((t) =>
+        OCR_SUB_CODECS.has(t.codec),
+      );
+      if (ocrSubs.length === 0) {
+        skipped++;
+        continue;
+      }
+      // Prefer first non-eng/spa track, fall back to first OCR-capable track
+      const target =
+        ocrSubs.find(
+          (t) => !["eng", "spa"].includes((t.lang ?? "").toLowerCase()),
+        ) ?? ocrSubs[0];
+      try {
+        const r = await fetch(`/api/media/${id}/translate-subtitle`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sub_idx: target.sub_idx }),
+        });
+        if (r.ok) queued++;
+        else skipped++;
+      } catch {
+        skipped++;
+      }
+    }
+    if (queued > 0) {
+      toast.success(`Queued ${queued} file(s) for OCR+translation`);
+      fetchMedia(true);
+    }
+    if (skipped > 0)
+      toast.info(`${skipped} file(s) skipped (no OCR-capable subtitle)`);
     setSelectedIds(new Set());
   };
 
@@ -474,7 +571,9 @@ export function MediaLibraryTab({ scan }: MediaLibraryTabProps) {
           onEnqueueSelected={handleEnqueueSelected}
           onRip={handleRipDisc}
           onTranslate={handleTranslateSingle}
+          onDownloadSubtitle={handleDownloadSubtitle}
           onTranslateSelected={handleTranslateSelected}
+          onOcrTranslateSelected={handleOcrTranslateSelected}
           onAssignTracks={handleAssignTracks}
           onFolderScan={onFolderScan}
           onScanLibrary={onScan}
