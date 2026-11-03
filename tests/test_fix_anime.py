@@ -8,6 +8,8 @@ import pytest
 
 from anime_subtitles import DEFAULT_SETTINGS, srt_to_ass
 
+pytestmark = pytest.mark.usefixtures('spanish_anime_preferences')
+
 
 SRT = '1\n00:00:00,100 --> 00:00:00,900\nHello <i>world</i>!\n'
 
@@ -36,7 +38,7 @@ def test_style_preserves_timing_markup_and_escapes_ass():
 def test_invalid_settings_do_not_persist(client, app_module, setting):
     response = client.post('/api/anime/settings', json=setting)
     assert response.status_code == 400
-    assert app_module.config['anime_settings'] == DEFAULT_SETTINGS
+    assert app_module.config['anime_settings'] == {**DEFAULT_SETTINGS, 'target_lang': 'spa'}
 
 
 def test_settings_save_without_queueing_and_reload(client, app_module):
@@ -151,7 +153,7 @@ def test_real_ass_remux_filters_languages_without_translation(client, app_module
 def test_real_missing_target_translates_to_selected_language(client, app_module, monkeypatch, real_media):
     fid, video = real_media
     calls = []
-    monkeypatch.setattr(app_module, '_translation_backend_ready', lambda: (True, ''))
+    monkeypatch.setattr(app_module, '_translation_backend_ready', lambda settings=None: (True, ''))
     def translate(path, source_lang, **kwargs):
         calls.append((source_lang, kwargs['target_lang']))
         return Path(path).read_text(encoding='utf-8').replace('Hello', 'Ciao')
@@ -319,7 +321,7 @@ def test_real_container_conversion_keeps_identity_and_stream_copies(client, app_
 def test_target_mode_converts_retained_mp4_subtitles_without_extra_translation(client, app_module, non_mkv_media, monkeypatch):
     fid, video = non_mkv_media()
     calls = []
-    monkeypatch.setattr(app_module, '_translation_backend_ready', lambda: (True, ''))
+    monkeypatch.setattr(app_module, '_translation_backend_ready', lambda settings=None: (True, ''))
     def translate(path, lang, **kwargs):
         calls.append((lang, kwargs['target_lang']))
         return Path(path).read_text(encoding='utf-8').replace('Hello', 'Ciao')

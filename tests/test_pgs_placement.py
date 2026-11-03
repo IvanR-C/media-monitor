@@ -12,6 +12,8 @@ from PIL import Image
 
 from anime_subtitles import DEFAULT_SETTINGS, srt_to_ass
 
+pytestmark = pytest.mark.usefixtures('spanish_anime_preferences')
+
 
 def segment(ms, kind, payload=b''):
     return b'PG' + struct.pack('>IIBH', ms * 90, 0, kind, len(payload)) + payload
@@ -217,7 +219,7 @@ def test_real_pgs_to_ass_job_keeps_timing_positions_and_translation(client, app_
     fid = insert_media(filepath=str(video), filename=video.name, audio_tracks=info['audio_tracks'], subtitle_tracks=info['subtitle_tracks'])
     monkeypatch.setattr(pytesseract, 'image_to_data', fake_ocr_data)
     monkeypatch.setattr(pytesseract, 'image_to_string', lambda *a, **kw: 'Caption')
-    monkeypatch.setattr(app_module, '_translation_backend_ready', lambda: (True, ''))
+    monkeypatch.setattr(app_module, '_translation_backend_ready', lambda settings=None: (True, ''))
     requests = []
     def translate(path, source_lang, **kwargs):
         text = Path(path).read_text(encoding='utf-8')

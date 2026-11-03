@@ -14,8 +14,9 @@ Each queued job retains its own settings snapshot, even if the defaults change.
 - **Fix target language:** prefer an existing full-dialogue subtitle in that
   language. If missing, extract another subtitle and translate it through the
   configured OpenAI or local AI provider, then produce ASS. English text is
-  preferred as a translation source. Spanish retains the existing Cuban Spanish
-  prompt; other target languages use their selected language.
+  preferred as a translation source. Regional style, custom instructions, and
+  model preferences come from Settings → AI translation and are saved with each
+  queued job. No dialect is assumed.
 - **Convert kept subtitles to ASS:** convert every subtitle in the kept language
   list in its original language. This mode never calls the translation provider.
 
@@ -25,6 +26,10 @@ are also supported; neighboring episodes' sidecars are excluded. Files without a
 readable source are skipped; this feature does not search subtitle websites.
 
 ## Language filters and styles
+
+Choose a target subtitle language before using target mode. The dialog can inherit
+your explicit language choice from AI translation settings; no target language is
+selected by the repository. Converting kept tracks does not require a target.
 
 Audio defaults to Japanese, English, and Spanish. Subtitles default to English and
 Spanish. Both lists are editable; target mode always also keeps its target
@@ -87,7 +92,11 @@ process takes effect before the next stage or before replacing the media file.
 
 The worker re-reads tracks before processing, writes to a temporary directory on
 the same volume, verifies the output track counts/codecs, and atomically replaces
-the media file. Encoding and subtitle jobs for the same file share a lock.
+the media file — or, with **Settings → Output files → Write separate output**,
+writes a new `<name><suffix>.mkv` and leaves the source untouched. With **Back up
+originals**, the replaced file (or the pre-conversion container) is kept as `.bak`.
+Fix Anime's language filters are its own; Settings → Tracks & languages applies to
+encoding and disc rips. Encoding and subtitle jobs for the same file share a lock.
 Failures or cancellation before replacement leave the original intact. Interrupted
 subtitle jobs recover on application restart. Language removal is permanent after
 a successful remux.

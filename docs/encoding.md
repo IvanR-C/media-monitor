@@ -42,14 +42,13 @@ You can also select multiple files with the checkboxes and use the bulk **Queue 
 
 For each queued file, the encoder:
 
-1. Builds an ffmpeg command with these settings:
-   - Video: `hevc_nvenc`, preset `p4`, CQ `20`, profile `main10`
-   - Audio: copies the **highest-quality track per approved language** (see Language Filtering below)
-   - Subtitles: copies all tracks in approved languages
-   - Resolution: downscales to 1080p if the source is 4K
+1. Builds an ffmpeg command from the settings snapshot taken when the job was queued:
+   - Video: the encoder, quality profile, and speed preset from **Settings → Encoding** (default `hevc_nvenc`, preset `p4`, CQ `20`, profile `main10`)
+   - Audio and subtitles: the tracks chosen by **Settings → Tracks & languages** (see Language Filtering below)
+   - Resolution: scales down to the maximum resolution (default 1080p), or keeps the original
 2. Writes output to a `.encoding.tmp` file alongside the original
 3. Streams ffmpeg's structured progress output to track percentage, speed, and ETA
-4. On success: replaces the original file with the encoded output
+4. On success: verifies the output, then replaces the original (optionally keeping a `.bak` backup) or writes a separate output file, per **Settings → Output files**
 5. On failure or cancellation: deletes the temp file, marks the job failed
 
 Encoding is **sequential** — one job at a time to maximise GPU utilisation.
@@ -58,14 +57,16 @@ Encoding is **sequential** — one job at a time to maximise GPU utilisation.
 
 ## Encode Settings
 
-| Setting | Value |
+Defaults, all editable in **Settings → Encoding** (disc rips use the same settings):
+
+| Setting | Default |
 |---|---|
-| Video codec | `hevc_nvenc` (NVIDIA H.265) |
-| Quality | CQ 20 (constant quality, visually lossless for most content) |
-| Preset | `p4` (balanced speed/quality) |
-| Profile | `main10` |
-| RC lookahead | 20 frames |
-| Max resolution | 1080p (4K sources are downscaled) |
+| Video encoder | `hevc_nvenc` (NVIDIA H.265). Other encoders are offered when a self-test passes |
+| Quality profile | Balanced: CQ 20 (High quality 18, Smaller files 24, or a custom value) |
+| Speed preset | 4 of 7 (`p4`) |
+| Maximum resolution | 1080p, or keep the original |
+| 10-bit output | On (`main10`) |
+| RC lookahead | 20 frames (NVENC) |
 | Audio | Copy (passthrough, no re-encode) |
 | Subtitles | Copy (passthrough) |
 | Container | Matroska (`.mkv`) |
@@ -74,22 +75,21 @@ Encoding is **sequential** — one job at a time to maximise GPU utilisation.
 
 ## Language Filtering
 
-During encoding, only tracks in the approved sets are included in the output:
+**Settings → Tracks & languages** decides which tracks are kept. The defaults keep audio in
+English, Japanese, and Spanish and subtitles in English and Spanish. For audio, the best track
+per language is kept by default, ranked by codec (TrueHD · FLAC · DTS · E-AC3 · AC-3 · AAC ·
+Opus · Vorbis · MP3 · MP2, reorderable) and then by channel count. If no audio matches,
+all audio tracks are kept (or only the first, if you choose). Commentary tracks are dropped
+by default.
 
-| Track type | Kept |
-|---|---|
-| Audio | English (`eng`), Spanish (`spa`), Japanese (`jpn`) |
-| Subtitles | English (`eng`), Spanish (`spa`) |
-
-For audio, **only the highest-quality track per language** is kept. Quality ranking (highest first): TrueHD · FLAC · DTS · E-AC3 · AC-3 · AAC · MP3. For example, if a file has both TrueHD 7.1 and AC-3 5.1 in English, only the TrueHD is kept.
-
-> These language lists are hardcoded. Configurable language selection from the UI is planned for a future release.
+The file details drawer lists every track as Keep or Drop, with the reason, before you
+queue. See [processing-settings.md](processing-settings.md) for the full precedence rules.
 
 ---
 
 ## Estimated Size
 
-For files not yet encoded, the Library table shows an estimated post-encode size in green (e.g. `→ 4.2 GB`). This estimate is calculated from the source bitrate, codec, resolution, and audio tracks — actual results will vary.
+For files not yet encoded, the Library table shows an estimated post-encode size in green (e.g. `→ 4.2 GB`). This estimate is calculated from the source bitrate, codec, and resolution, the selected encoder, quality profile, and maximum resolution, and the audio tracks that will be kept — actual results will vary.
 
 ---
 

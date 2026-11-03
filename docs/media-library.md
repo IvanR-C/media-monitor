@@ -131,7 +131,7 @@ If a movie has no subtitle tracks, a **Mux Subtitle File** option appears in its
 5. The job runs through the encode worker queue (visible in the Encode Queue panel)
 6. When complete the movie record is refreshed — the new subtitle track appears immediately
 
-The original movie file is replaced in-place; no re-encoding of video or audio takes place. The operation is fast (typically a few seconds regardless of file size).
+By default the original movie file is replaced in place (or a separate copy is written, and optional `.bak` backups kept, per **Settings → Output files**); no re-encoding of video or audio takes place. The operation is fast (typically a few seconds regardless of file size).
 
 > **Subtitle files must be in the same directory as the movie.** Files in subdirectories or elsewhere on the system are not listed for security reasons.
 

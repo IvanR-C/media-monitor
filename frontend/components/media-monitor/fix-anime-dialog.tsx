@@ -169,8 +169,8 @@ export function FixAnimeDialog({ selection, onClose, onQueued }: {
                   : "Convert every kept subtitle track to the same ASS style in its original language. PGS tracks use OCR. No AI translation is used."}</p>
               </div>
               {settings.mode === "target" && <div className="space-y-2"><Label>Target subtitle language</Label>
-                <LanguagePicker label="Target subtitle language" value={settings.target_lang} onChange={v => update("target_lang", v)} allowUnknown={false} />
-                <p className="text-xs text-muted-foreground">The target language is always kept. Spanish uses the existing Cuban Spanish translation style.</p>
+                <LanguagePicker label="Target subtitle language" value={settings.target_lang} onChange={v => update("target_lang", v)} allowUnknown={false} placeholder="Choose a language…" />
+                <p className="text-xs text-muted-foreground">The target language is always kept. Translation style and model preferences come from Settings → AI translation.</p>
               </div>}
               <LanguageKeepList title="Keep audio languages" values={settings.audio_languages} onChange={v => update("audio_languages", v)} />
               <LanguageKeepList title="Keep subtitle languages" values={settings.subtitle_languages} onChange={v => update("subtitle_languages", v)} />
