@@ -90,6 +90,9 @@ def _insert_media(app_module, **overrides):
         encode_status=None,
         has_sibling_videos=0,
         media_type="movie",
+        show_name=None,
+        season_episode=None,
+        poster_url=None,
     )
     defaults.update(overrides)
     with app_module.db() as conn:
@@ -99,12 +102,14 @@ def _insert_media(app_module, **overrides):
                 (filepath, folder_name, filename, size_bytes, duration_seconds,
                  video_codec, video_width, video_height, video_bitrate,
                  audio_tracks, subtitle_tracks, format_name, status,
-                 encode_status, has_sibling_videos, media_type, scanned_at)
+                 encode_status, has_sibling_videos, media_type, show_name,
+                 season_episode, poster_url, scanned_at)
             VALUES
                 (:filepath, :folder_name, :filename, :size_bytes, :duration_seconds,
                  :video_codec, :video_width, :video_height, :video_bitrate,
                  :audio_tracks, :subtitle_tracks, :format_name, :status,
-                 :encode_status, :has_sibling_videos, :media_type, datetime('now'))
+                 :encode_status, :has_sibling_videos, :media_type, :show_name,
+                 :season_episode, :poster_url, datetime('now'))
             """,
             defaults,
         )

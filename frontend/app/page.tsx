@@ -20,6 +20,8 @@ export type ScanState = {
 
 export default function MediaMonitor() {
   const [activeView, setActiveView] = useState<"library" | "settings">("library")
+  const [settingsVisited, setSettingsVisited] = useState(false)
+  const [librarySettingsRequest, setLibrarySettingsRequest] = useState(0)
 
   // ── Scan state lives here so it survives tab switches ────────────────────────
   const [isScanning, setIsScanning]       = useState(false)
@@ -104,7 +106,10 @@ export default function MediaMonitor() {
   return (
     <AuthGate>
       <div className="min-h-screen bg-background">
-        <Header activeView={activeView} onViewChange={setActiveView} isScanning={isScanning} />
+        <Header activeView={activeView} onViewChange={view => {
+          if (view === "settings") setSettingsVisited(true)
+          setActiveView(view)
+        }} isScanning={isScanning} />
 
         <main className="mx-auto max-w-[1800px] px-4 pb-6 pt-4 sm:px-6">
           {/* Cross-view scan banner — visible whenever a scan runs outside the library view */}
@@ -119,8 +124,8 @@ export default function MediaMonitor() {
             </div>
           )}
 
-          {activeView === "library"  && <MediaLibraryTab scan={scanState} />}
-          {activeView === "settings" && <SettingsTab />}
+          {activeView === "library"  && <MediaLibraryTab scan={scanState} onOpenPosterSettings={() => { setLibrarySettingsRequest(value => value + 1); setSettingsVisited(true); setActiveView("settings"); }} />}
+          {settingsVisited && <div hidden={activeView !== "settings"}><SettingsTab libraryRequest={librarySettingsRequest} /></div>}
         </main>
         <Toaster position="bottom-right" theme="dark" />
       </div>

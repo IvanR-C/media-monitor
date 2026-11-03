@@ -143,6 +143,15 @@ LANG_MAP = {
     'en': 'eng', 'es': 'spa', 'ja': 'jpn', 'sp': 'spa', 'jp': 'jpn',
     'de': 'deu', 'fr': 'fra', 'pt': 'por', 'it': 'ita', 'zh': 'zho',
     'ko': 'kor', 'ru': 'rus', 'ar': 'ara', 'hi': 'hin',
+    'nl': 'nld', 'pl': 'pol', 'sv': 'swe', 'no': 'nor', 'da': 'dan',
+    'fi': 'fin', 'cs': 'ces', 'hu': 'hun', 'ro': 'ron', 'el': 'ell',
+    'tr': 'tur', 'he': 'heb', 'uk': 'ukr', 'vi': 'vie', 'th': 'tha',
+    'id': 'ind', 'ms': 'msa', 'ta': 'tam', 'te': 'tel',
+    # ISO 639-2 bibliographic codes and terminology codes are synonyms.
+    'alb': 'sqi', 'arm': 'hye', 'baq': 'eus', 'bur': 'mya', 'chi': 'zho',
+    'cze': 'ces', 'dut': 'nld', 'fre': 'fra', 'geo': 'kat', 'ger': 'deu',
+    'gre': 'ell', 'ice': 'isl', 'mac': 'mkd', 'mao': 'mri', 'may': 'msa',
+    'per': 'fas', 'rum': 'ron', 'slo': 'slk', 'tib': 'bod', 'wel': 'cym',
 }
 
 # Full language names → ISO 639-2, for sidecar files spelled out (Movie.Spanish.srt)
@@ -791,6 +800,8 @@ def normalize_lang(lang):
     if not lang:
         return ''
     l = lang.lower().strip()
+    if l == 'und':
+        return ''
     return LANG_MAP.get(l, l)
 
 
@@ -970,7 +981,7 @@ def determine_status(size_bytes, audio_streams, subtitle_streams,
         parts.append('RE-ENCODE')
     # Only consider non-dropped tracks when checking for missing language tags
     active = [s for s in audio_streams + subtitle_streams if s.get('action') != 'drop']
-    if any(not s.get('lang') for s in active):
+    if any(not normalize_lang(s.get('lang')) for s in active):
         parts.append('REMUX')
     # Flag if any required subtitle language is not present — but first count
     # external sidecar subtitles (Movie.spa.srt) as available languages. The
@@ -1121,10 +1132,11 @@ def tvdb_search_poster(title, is_episode=False):
     headers = {'Authorization': f'Bearer {token}'}
     search_type = 'series' if is_episode else 'movie'
 
-    for params in [
-        {'query': title, 'type': search_type, 'limit': 3},
-        {'query': title, 'limit': 3},                      # fallback: no type filter
-    ]:
+    year = re.search(r'\s*\((\d{4})\)\s*$', title)
+    query = title[:year.start()].strip() if year else title
+    base_params = {'query': query, 'type': search_type, 'limit': 3}
+    searches = [{**base_params, 'year': year.group(1)}, base_params] if year else [base_params]
+    for params in searches:
         try:
             r = requests.get(
                 f'{_TVDB_BASE}/search',
@@ -1136,8 +1148,10 @@ def tvdb_search_poster(title, is_episode=False):
                 continue
             results = r.json().get('data') or []
             for result in results:
+                if result.get('type') and result['type'] != search_type:
+                    continue
                 url = result.get('imageUrl') or result.get('image_url')
-                if url:
+                if isinstance(url, str) and url.startswith(('https://', 'http://')):
                     return url
         except Exception as e:
             print(f'[tvdb] search error for "{title}": {e}')
@@ -1711,11 +1725,9 @@ def build_remux_cmd(filepath, output_path, audio_tracks, subtitle_tracks):
 
     # Stamp language metadata on the re-ordered output streams
     for i, t in enumerate(kept_audio):
-        if t.get('lang'):
-            cmd += [f'-metadata:s:a:{i}', f'language={t["lang"]}']
+        cmd += [f'-metadata:s:a:{i}', f'language={normalize_lang(t.get("lang")) or "und"}']
     for i, t in enumerate(kept_subs):
-        if t.get('lang'):
-            cmd += [f'-metadata:s:s:{i}', f'language={t["lang"]}']
+        cmd += [f'-metadata:s:s:{i}', f'language={normalize_lang(t.get("lang")) or "und"}']
 
     cmd += ['-f', 'matroska', output_path]
     return cmd
@@ -3531,7 +3543,7 @@ def get_config_route():
 
 @app.route('/api/config', methods=['POST'])
 def update_config_route():
-    global config
+    global config, _tvdb_token, _tvdb_token_expires
     payload = request.json or {}
     # Validate threshold fields when present so a bad UI submit can't poison
     # determine_status() (which would silently mis-flag every file).
@@ -3566,6 +3578,8 @@ def update_config_route():
             payload['openai_chunk_size'] = v
         except (TypeError, ValueError):
             return jsonify({'error': 'openai_chunk_size must be a positive integer ≤ 2000'}), 400
+    if 'tvdb_api_key' in payload and payload['tvdb_api_key'] != config.get('tvdb_api_key'):
+        _tvdb_token, _tvdb_token_expires = None, 0.0
     config.update(payload)
     save_config()
     return jsonify({'status': 'success', 'config': config})
@@ -3742,6 +3756,85 @@ def get_media():
         'files': result,
         'total': len(result),
     })
+
+
+@app.route('/api/media/<int:file_id>')
+def get_media_detail(file_id):
+    with db() as conn:
+        row = conn.execute('SELECT * FROM media_files WHERE id=?', (file_id,)).fetchone()
+        if not row:
+            return jsonify({'error': 'File not found'}), 404
+        result = dict(row)
+        if not result['poster_url']:
+            is_show = result['media_type'] == 'show'
+            title = result['show_name'] if is_show else result['folder_name']
+            field = 'show_name' if is_show else 'folder_name'
+            cached = conn.execute(
+                f'SELECT poster_url FROM media_files WHERE {field}=? AND media_type=? '
+                "AND poster_url IS NOT NULL AND poster_url != '' LIMIT 1",
+                (title, result['media_type']),
+            ).fetchone()
+            if cached:
+                result['poster_url'] = cached['poster_url']
+    audio = json.loads(result['audio_tracks'] or '[]')
+    subtitles = json.loads(result['subtitle_tracks'] or '[]')
+    required = {normalize_lang(lang) for lang in
+                (config.get('required_sub_langs') or APPROVED_SUB_LANGS) if lang} or APPROVED_SUB_LANGS
+    embedded = {normalize_lang(track.get('lang')) for track in subtitles if track.get('action') != 'drop'}
+    sidecars = sidecar_sub_langs(result['filepath'], result['media_type']) if required - embedded else set()
+    kept_audio = select_audio_tracks(audio)
+    kept_subtitles = select_subtitle_tracks(subtitles)
+    result.update(
+        audio_tracks=audio, subtitle_tracks=subtitles,
+        size_gb=round((result['size_bytes'] or 0) / 1e9, 2),
+        estimated_size_gb=round(estimate_output_size(row) / 1e9, 2) if 'RE-ENCODE' in (result['status'] or '') else None,
+        required_subtitle_langs=sorted(required),
+        missing_subtitle_langs=sorted(required - embedded - sidecars),
+        sidecar_subtitle_langs=sorted(sidecars),
+        reencode_threshold_gib=float(config.get('reencode_size_gb', REENCODE_SIZE_GB)),
+        posters_enabled=bool(config.get('enable_posters')),
+        poster_lookup_available=bool(config.get('enable_posters') and config.get('tvdb_api_key')),
+        encoding_preview={
+            'audio_tracks': kept_audio,
+            'subtitle_tracks': kept_subtitles,
+            'excluded_tracks': len(audio) + len(subtitles) - len(kept_audio) - len(kept_subtitles),
+        },
+    )
+    return jsonify(result)
+
+
+@app.route('/api/media/<int:file_id>/poster', methods=['POST'])
+def lookup_media_poster(file_id):
+    with db() as conn:
+        row = conn.execute('SELECT * FROM media_files WHERE id=?', (file_id,)).fetchone()
+        if not row:
+            return jsonify({'error': 'File not found'}), 404
+        is_show = row['media_type'] == 'show'
+        title = row['show_name'] if is_show else row['folder_name']
+        field = 'show_name' if is_show else 'folder_name'
+        # Reuse artwork across a movie's versions or a show's seasons/episodes.
+        cached = conn.execute(
+            f'SELECT poster_url FROM media_files WHERE {field}=? AND media_type=? '
+            "AND poster_url IS NOT NULL AND poster_url != '' LIMIT 1",
+            (title, row['media_type']),
+        ).fetchone()
+    refresh = bool((request.get_json(silent=True) or {}).get('refresh'))
+    if not config.get('enable_posters'):
+        return jsonify({'error': 'Enable poster images in Settings → Library.'}), 409
+    if cached and not refresh:
+        poster = cached['poster_url']
+    else:
+        if not config.get('tvdb_api_key'):
+            return jsonify({'error': 'Add a TVDB API key in Settings → Library to look up artwork.'}), 409
+        if not title:
+            return jsonify({'error': 'A movie or show title is needed to find artwork.'}), 422
+        poster = tvdb_search_poster(title, is_show)
+        if not poster:
+            return jsonify({'error': 'No artwork was returned. Check the title and TVDB settings, then try again.'}), 404
+    with db() as conn:
+        conn.execute(f'UPDATE media_files SET poster_url=? WHERE {field}=? AND media_type=?',
+                     (poster, title, row['media_type']))
+    return jsonify({'poster_url': poster})
 
 
 @app.route('/api/media/stats')
@@ -4004,8 +4097,8 @@ def assign_tracks(file_id):
     for t in audio_tracks:
         assignment = audio_assignments.get(t['audio_idx'])
         if assignment:
-            if assignment.get('lang'):
-                t['lang']          = assignment['lang']
+            if 'lang' in assignment:
+                t['lang']          = normalize_lang(assignment['lang'])
                 t['lang_assigned'] = True
             t['action'] = assignment.get('action', 'keep')
 
@@ -4013,8 +4106,8 @@ def assign_tracks(file_id):
     for t in subtitle_tracks:
         assignment = sub_assignments.get(t['sub_idx'])
         if assignment:
-            if assignment.get('lang'):
-                t['lang']          = assignment['lang']
+            if 'lang' in assignment:
+                t['lang']          = normalize_lang(assignment['lang'])
                 t['lang_assigned'] = True
             t['action'] = assignment.get('action', 'keep')
 
