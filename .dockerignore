@@ -19,3 +19,10 @@ config/
 .DS_Store
 .vscode
 .idea
+
+# Built in their own Dockerfile stage — never copy the host's copies in,
+# they're OS/arch-specific and would clobber what the image just installed.
+frontend/node_modules
+frontend/.next
+frontend/out
+frontend/tsconfig.tsbuildinfo

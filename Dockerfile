@@ -1,3 +1,18 @@
+# ── Frontend build stage ───────────────────────────────────────────────────
+# The dashboard is a pure client-side Next.js SPA (no SSR) exported as static
+# files and served directly by Flask below — this is the only stage that
+# needs Node; it isn't present in the final image.
+FROM node:22-slim AS frontend-build
+WORKDIR /frontend
+ENV CI=true
+RUN npm install -g pnpm@11
+COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
+COPY frontend/ .
+ENV NEXT_TELEMETRY_DISABLED=1
+RUN pnpm build
+
+# ── Backend / runtime image ─────────────────────────────────────────────────
 FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -42,7 +57,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY entrypoint.sh /entrypoint.sh
 RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 COPY app.py .
-COPY templates/ templates/
+
+# Static frontend build — served directly by Flask (see STATIC_DIR in app.py)
+COPY --from=frontend-build /frontend/out/ static/
 
 # Create directories for config and data
 RUN mkdir -p /config /watch
@@ -50,9 +67,9 @@ RUN mkdir -p /config /watch
 # Expose web UI port
 EXPOSE 5000
 
-# Health check — hits the stats API endpoint
+# Health check — unauthenticated, lightweight DB ping
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-    CMD curl -f http://localhost:5000/api/stats || exit 1
+    CMD curl -f http://localhost:5000/api/health || exit 1
 
 # The NVIDIA Container Toolkit injects libnvidia-encode.so.1 and
 # libnvcuvid.so.1 from the host driver into /usr/lib/x86_64-linux-gnu

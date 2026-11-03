@@ -40,6 +40,7 @@ def app_module(tmp_path, monkeypatch):
 
     mod.init_db()
     mod._migrate_db()
+    mod.load_auth()
     yield mod
 
     # Best-effort: drop the app from sys.modules so the next test reimports
@@ -48,10 +49,22 @@ def app_module(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def client(app_module):
+def raw_client(app_module):
+    """An unauthenticated test client — for exercising the auth/setup flow itself."""
     app_module.app.config["TESTING"] = True
     with app_module.app.test_client() as c:
         yield c
+
+
+@pytest.fixture
+def client(raw_client):
+    """Most tests just want to hit the API — perform first-run setup once so
+    the session is authenticated and _require_auth doesn't 401 every call."""
+    raw_client.post(
+        "/api/auth/setup",
+        json={"username": "test-admin", "password": "testpassword123"},
+    )
+    yield raw_client
 
 
 def _insert_media(app_module, **overrides):
