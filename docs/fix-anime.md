@@ -39,8 +39,24 @@ The sample preview is rendered with ffmpeg/libass using server-installed fonts.
 The Docker image includes Noto fonts; unavailable custom fonts fall back to an
 installed font. Players need the selected font for matching playback.
 
-Converted tracks use one uniform dialogue style. Their original typesetting,
-karaoke, signs, and positioning are flattened. Timing and basic bold/italic/
+**Preserve original placement (PGS)** is enabled by default. PGS OCR retains
+source canvas dimensions, visible object bounds, separate text regions, and
+successive position changes. These become timed ASS positioning overrides,
+scaled to the 1920×1080 script canvas. Reused bitmaps survive display-set changes;
+all objects in a display are handled. Repeated moving text is OCR'd and translated
+once per identical bitmap/text where possible, then restored at every source
+position and time. Placement metadata stays separate from the text sent to AI.
+Sparse OCR region boxes are mapped back after image preprocessing and resizing.
+
+Disable this setting to place PGS at the configured position and margin. Those
+controls continue to apply to text subtitle sources. The preview includes top,
+bottom, and right-side PGS examples for comparing the setting; these are sample
+positions, not extracted frames from your media.
+
+Converted tracks use the configured dialogue style. Exact source fonts, graphics,
+rotation, karaoke, and fitting translated text into the original space remain
+approximate or flattened. PGS movement is preserved as successive timed placements,
+without inferring smooth motion between them. Timing and basic bold/italic/
 underline markup are retained. Converted embedded tracks replace their sources;
 other subtitles in the kept language list remain. Sidecar originals are left alone.
 

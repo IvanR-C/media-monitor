@@ -11,6 +11,7 @@ DEFAULT_SETTINGS = {
     'margin_v': 48, 'alignment': 2, 'bold': True, 'italic': False,
     'audio_languages': ['jpn', 'eng', 'spa'],
     'subtitle_languages': ['eng', 'spa'], 'mode': 'target',
+    'preserve_pgs_placement': True,
 }
 
 
@@ -43,7 +44,7 @@ def validate_settings(value, languages):
             raise ValueError(f'{key} must be between {minimum} and {maximum}')
     if type(result['alignment']) is not int or result['alignment'] not in (2, 5, 8):
         raise ValueError('Alignment must be bottom, middle, or top center')
-    for key in ('bold', 'italic'):
+    for key in ('bold', 'italic', 'preserve_pgs_placement'):
         if not isinstance(result[key], bool):
             raise ValueError(f'{key} must be a boolean')
     return result
@@ -53,10 +54,26 @@ def ass_color(color):
     return '&H00' + color[5:7] + color[3:5] + color[1:3]
 
 
-def srt_to_ass(content, settings):
+def _position_override(layout):
+    """Anchor each region to its source screen zone, scaled to ASS coordinates."""
+    sw, sh = layout['screen_width'], layout['screen_height']
+    x, y, w, h = (layout[key] for key in ('x', 'y', 'width', 'height'))
+    if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
+           for v in (sw, sh, x, y, w, h)) or min(sw, sh, w, h) <= 0:
+        raise ValueError('Invalid PGS placement metadata')
+    cx, cy = x + w / 2, y + h / 2
+    col = 0 if cx < sw / 3 else 2 if cx > sw * 2 / 3 else 1
+    row = 2 if cy < sh / 3 else 0 if cy > sh * 2 / 3 else 1
+    px = (x, cx, x + w)[col]
+    py = (y + h, cy, y)[row]
+    px, py = round(max(0, min(sw, px)) * 1920 / sw), round(max(0, min(sh, py)) * 1080 / sh)
+    return '{' + rf'\an{row * 3 + col + 1}\pos({px},{py})' + '}'
+
+
+def srt_to_ass(content, settings, layouts=None):
     """Create a uniform dialogue style at 1080p; retain timing and basic markup.
 
-    Existing typesetting is intentionally flattened in the converted track.
+    PGS regions can retain their positions; other typesetting is flattened.
     """
     s = settings
     style = ','.join(map(str, [
@@ -86,6 +103,9 @@ def srt_to_ass(content, settings):
         return f'{cs // 360000}:{cs // 6000 % 60:02d}:{cs // 100 % 60:02d}.{cs % 100:02d}'
 
     events = []
+    placements = {str(item['cue_id']): item for item in layouts} if layouts is not None else None
+    if placements is not None and len(placements) != len(layouts):
+        raise ValueError('Duplicate PGS cue placement IDs')
     pattern = r'(\d+:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d+:\d{2}:\d{2}[,.]\d{3})[^\n]*\n(.+)'
     for block in re.split(r'\n\s*\n', content.replace('\r\n', '\n').strip()):
         match = re.search(pattern, block, re.S)
@@ -101,7 +121,15 @@ def srt_to_ass(content, settings):
             text = re.sub(f'<{tag}>', lambda _: '{\\' + tag + '1}', text, flags=re.I)
             text = re.sub(f'</{tag}>', lambda _: '{\\' + tag + str(int(default)) + '}', text, flags=re.I)
         text = re.sub(r'<[^>]+>', '', text).replace('\n', r'\N')
+        if placements is not None:
+            cue_id = block.splitlines()[0].strip().lstrip('\ufeff')
+            if cue_id not in placements:
+                raise ValueError('PGS placement no longer matches subtitle cues')
+            if settings.get('preserve_pgs_placement', True):
+                text = _position_override(placements[cue_id]) + text
         events.append(f'Dialogue: 0,{format_time(start)},{format_time(end)},Anime,,0,0,0,,{text}')
     if not events:
         raise ValueError('Subtitle contains no usable dialogue')
+    if placements is not None and len(events) != len(placements):
+        raise ValueError('PGS placement cue count changed')
     return header + '\n'.join(events) + '\n'
