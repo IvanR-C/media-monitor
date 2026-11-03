@@ -122,3 +122,9 @@ def insert_media(app_module):
         return _insert_media(app_module, **overrides)
 
     return _do
+
+
+@pytest.fixture
+def spanish_anime_preferences(app_module):
+    """Existing anime scenarios explicitly opt into Spanish; fresh installs do not."""
+    app_module.config['anime_settings'] = {**app_module.config['anime_settings'], 'target_lang': 'spa'}

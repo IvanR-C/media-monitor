@@ -586,7 +586,7 @@ function TranslateJobRow({
           ) : job.extract_only ? (
             <span className="shrink-0 text-[10px] text-muted-foreground uppercase">Extract only</span>
           ) : job.source_lang ? (
-            <span className="shrink-0 text-[10px] text-muted-foreground uppercase">{job.source_lang} → SPA</span>
+            <span className="shrink-0 text-[10px] text-muted-foreground uppercase">{job.source_lang} → {job.target_lang || "Choose target"}</span>
           ) : null}
         </div>
         {job.media_type === "show" && job.season_episode && (
