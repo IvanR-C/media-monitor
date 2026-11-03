@@ -21,7 +21,7 @@ from queue import Queue
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
-from flask import Flask, render_template, request, jsonify, Response
+from flask import Flask, request, jsonify, Response
 import requests
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -3120,11 +3120,6 @@ def start_monitoring():
 
 
 # ── Flask routes — existing ───────────────────────────────────────────────────
-@app.route('/')
-def index():
-    return render_template('index.html', config=config)
-
-
 @app.route('/api/config', methods=['GET'])
 def get_config_route():
     return jsonify(config)

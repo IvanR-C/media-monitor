@@ -295,8 +295,6 @@ All environment variables can also be set directly in `docker-compose.yml`:
 ├── Dockerfile                # Backend container
 ├── docker-compose.yml        # Production stack (Docker Hub images)
 ├── entrypoint.sh             # Container entrypoint
-├── templates/
-│   └── index.html            # Legacy web UI (superseded by Next.js frontend)
 ├── frontend/
 │   ├── app/
 │   │   └── page.tsx          # Main page (Library + Settings views)
