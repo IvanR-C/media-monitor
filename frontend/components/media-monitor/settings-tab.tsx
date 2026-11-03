@@ -1,560 +1,239 @@
 "use client"
 
-import { useState, useEffect, useRef } from "react"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { useEffect, useRef, useState, type ReactNode } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { AccountSecurityCard } from "@/components/media-monitor/account-security-card"
+import { SettingsAutosave, type SaveStatus } from "@/lib/settings-autosave"
+import { cn } from "@/lib/utils"
 import { toast } from "sonner"
-import {
-  Activity,
-  CheckCircle2,
-  Cpu,
-  Bell,
-  MessageSquare,
-  Image,
-  Languages,
-  Save,
-  RefreshCw,
-  Send,
-  SlidersHorizontal
-} from "lucide-react"
+import { Bell, Check, ChevronRight, Languages, Loader2, RefreshCw, Send, ShieldCheck, SlidersHorizontal, AlertCircle } from "lucide-react"
 
-const COMMON_SUB_LANGS: { code: string; label: string }[] = [
-  { code: "eng", label: "English" },
-  { code: "spa", label: "Spanish" },
-  { code: "jpn", label: "Japanese" },
-  { code: "fra", label: "French" },
-  { code: "deu", label: "German" },
-  { code: "ita", label: "Italian" },
-  { code: "por", label: "Portuguese" },
-  { code: "kor", label: "Korean" },
-  { code: "zho", label: "Chinese" },
+const DEFAULTS = {
+  enable_ntfy: true, ntfy_server: "https://ntfy.sh", ntfy_topic: "",
+  enable_discord: false, discord_webhook: "", enable_posters: true, tvdb_api_key: "",
+  openai_api_key: "", openai_model: "gpt-4o-mini", openai_chunk_size: 350,
+  translate_backend: "openai", local_ai_base_url: "", local_ai_model: "", local_ai_chunk_size: 25,
+  reencode_size_gb: 20, required_sub_langs: ["eng", "spa"] as string[],
+}
+type Config = typeof DEFAULTS
+const SECTIONS = [
+  { id: "translation", title: "AI translation", icon: Languages, description: "Choose how your subtitles are translated." },
+  { id: "notifications", title: "Notifications", icon: Bell, description: "Decide where media updates are delivered." },
+  { id: "library", title: "Library", icon: SlidersHorizontal, description: "Set file status rules and manage poster artwork." },
+  { id: "security", title: "Account & security", icon: ShieldCheck, description: "Manage your password and passkeys. Confirm account actions below." },
+] as const
+const LANGUAGES = [
+  ["eng", "English"], ["spa", "Spanish"], ["jpn", "Japanese"], ["fra", "French"],
+  ["deu", "German"], ["ita", "Italian"], ["por", "Portuguese"], ["kor", "Korean"], ["zho", "Chinese"],
 ]
+const validUrl = (value: string) => {
+  if (!value) return undefined
+  try { if (["http:", "https:"].includes(new URL(value).protocol)) return undefined } catch { /* incomplete address */ }
+  return "Enter a complete http:// or https:// URL."
+}
+const numberRule = (max: number, integer = true) => (value: string) => {
+  const n = Number(value)
+  return !value.trim() || !Number.isFinite(n) || n <= 0 || n > max || (integer && !Number.isInteger(n))
+    ? `Enter ${integer ? "a whole number" : "a number"} greater than 0 and up to ${max}.` : undefined
+}
 
-export function SettingsTab() {
-  const [config, setConfig] = useState({
-    enable_ntfy: true,
-    ntfy_server: "https://ntfy.sh",
-    ntfy_topic: "",
-    enable_discord: false,
-    discord_webhook: "",
-    enable_posters: true,
-    tvdb_api_key: "",
-    openai_api_key: "",
-    openai_model: "gpt-4o-mini",
-    openai_chunk_size: 350,
-    translate_backend: "openai",
-    local_ai_base_url: "",
-    local_ai_model: "",
-    local_ai_chunk_size: 25,
-    reencode_size_gb: 20,
-    required_sub_langs: ["eng", "spa"] as string[],
-  })
-  // Snapshot of threshold fields at last load — diffed on save to decide whether
-  // we need to trigger a status recompute (cheap but visible blip in the UI).
-  const initialThresholdsRef = useRef<{ size: number; langs: string }>({ size: 20, langs: "eng,spa" })
-  const [stats, setStats] = useState({ total: 0, by_status: {} as Record<string, number>, max_workers: 4 })
+export function SettingsTab({ libraryRequest = 0 }: { libraryRequest?: number }) {
+  const [section, setSection] = useState<(typeof SECTIONS)[number]["id"]>("translation")
+  useEffect(() => { if (libraryRequest) setSection("library") }, [libraryRequest])
+  const [config, setConfig] = useState(DEFAULTS)
+  const [stats, setStats] = useState<{ total: number; max_workers: number } | null>(null)
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState(false)
+  const [loadAttempt, setLoadAttempt] = useState(0)
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>("saved")
+  const [saveError, setSaveError] = useState("")
+  const [invalid, setInvalid] = useState<Record<string, boolean>>({})
+  const [testing, setTesting] = useState<string | null>(null)
+  const saver = useRef<SettingsAutosave | null>(null)
+  if (!saver.current) saver.current = new SettingsAutosave((status, message) => {
+    setSaveStatus(status)
+    setSaveError(message || "")
+  })
 
   useEffect(() => {
-    let cancelled = false
-    let retryTimer: ReturnType<typeof setTimeout> | null = null
+    const controller = new AbortController()
+    setLoading(true)
+    setLoadError(false)
+    fetch("/api/config", { signal: controller.signal })
+      .then(async r => { if (!r.ok) throw new Error(); return r.json() })
+      .then(cfg => { if (!controller.signal.aborted) setConfig({ ...DEFAULTS, ...cfg }) })
+      .catch(() => { if (!controller.signal.aborted) setLoadError(true) })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false) })
+    // Summary is optional: its failure must not prevent editing settings.
+    fetch("/api/stats", { signal: controller.signal }).then(r => r.ok ? r.json() : null)
+      .then(data => { if (!controller.signal.aborted) setStats(data) }).catch(() => {})
+    return () => controller.abort()
+  }, [loadAttempt])
 
-    const load = async (attempt = 1) => {
-      try {
-        const [cfg, st] = await Promise.all([
-          fetch('/api/config').then(r => { if (!r.ok) throw new Error(`config ${r.status}`); return r.json() }),
-          fetch('/api/stats').then(r =>   { if (!r.ok) throw new Error(`stats ${r.status}`);  return r.json() }),
-        ])
-        if (cancelled) return
-        setConfig(prev => ({ ...prev, ...cfg }))
-        setStats(st)
-        initialThresholdsRef.current = {
-          size: Number(cfg.reencode_size_gb ?? 20),
-          langs: [...(cfg.required_sub_langs ?? ["eng", "spa"])].sort().join(","),
-        }
-        setLoading(false)
-      } catch {
-        if (cancelled) return
-        // Retry up to 5 times with increasing delay (handles Docker startup ordering
-        // where the frontend container comes up before the backend is fully ready).
-        if (attempt < 5) {
-          retryTimer = setTimeout(() => load(attempt + 1), attempt * 1500)
-        } else {
-          setLoading(false)
-          toast.error('Failed to load config — is the backend reachable?')
-        }
-      }
+  useEffect(() => {
+    const warn = (event: BeforeUnloadEvent) => {
+      if (saver.current?.hasUnsavedChanges) { event.preventDefault(); event.returnValue = "" }
     }
-
-    load()
+    const flush = () => { void saver.current?.flush() }
+    window.addEventListener("beforeunload", warn)
+    window.addEventListener("pagehide", flush)
     return () => {
-      cancelled = true
-      if (retryTimer) clearTimeout(retryTimer)
+      window.removeEventListener("beforeunload", warn)
+      window.removeEventListener("pagehide", flush)
+      void saver.current?.flush()
     }
   }, [])
 
-  const handleSave = async () => {
+  function update<K extends keyof Config>(key: K, value: Config[K], immediate = false) {
+    setConfig(prev => ({ ...prev, [key]: value }))
+    saver.current!.change(key, value, immediate)
+  }
+  const field = (key: keyof Config, label: string, options: {
+    type?: "password" | "number" | "text"; placeholder?: string; max?: number; step?: string;
+    validate?: (value: string) => string | undefined
+  } = {}) => <DraftInput key={key} id={key} label={label} value={String(config[key])} {...options}
+    onValidityChange={bad => setInvalid(prev => prev[key] === bad ? prev : { ...prev, [key]: bad })}
+    onValueChange={value => update(key, options.type === "number" ? Number(value) : value)} />
+
+  const test = async (service: "ntfy" | "discord" | "local-ai") => {
+    setTesting(service)
     try {
-      const r = await fetch('/api/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(config),
+      if (!await saver.current!.flush()) return
+      const response = await fetch(`/api/test/${service}`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        ...(service === "local-ai" ? { body: JSON.stringify({ local_ai_base_url: config.local_ai_base_url, local_ai_model: config.local_ai_model }) } : {}),
       })
-      if (!r.ok) {
-        const data = await r.json().catch(() => ({}))
-        toast.error(data.error || "Failed to save configuration")
-        return
-      }
-      // If thresholds changed, recompute status across all rows so the library
-      // pills (Re-encode / Missing Sub) reflect the new rules immediately.
-      const sizeNow = Number(config.reencode_size_gb)
-      const langsNow = [...config.required_sub_langs].sort().join(",")
-      const thresholdsChanged =
-        sizeNow !== initialThresholdsRef.current.size ||
-        langsNow !== initialThresholdsRef.current.langs
-      if (thresholdsChanged) {
-        try {
-          await fetch('/api/media/recalculate-status', { method: 'POST' })
-          initialThresholdsRef.current = { size: sizeNow, langs: langsNow }
-          toast.success("Configuration saved — recomputed file statuses")
-        } catch {
-          toast.success("Configuration saved (status recompute failed)")
-        }
-      } else {
-        toast.success("Configuration saved")
-      }
-    } catch {
-      toast.error("Failed to save configuration")
-    }
+      const data = await response.json()
+      if (!response.ok || data.status !== "success") throw new Error(data.error || data.message || "Test failed. Check your settings and try again.")
+      toast.success(service === "local-ai" ? data.message || "Connected to local AI" : "Test notification sent")
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Couldn’t complete the test") }
+    finally { setTesting(null) }
   }
-
-  const handleReload = async () => {
-    try {
-      const [cfg, st] = await Promise.all([
-        fetch('/api/config').then(r => r.json()),
-        fetch('/api/stats').then(r => r.json()),
-      ])
-      setConfig(prev => ({ ...prev, ...cfg }))
-      setStats(st)
-      toast.info("Configuration reloaded")
-    } catch {
-      toast.error("Failed to reload configuration")
-    }
-  }
-
-  const handleTestNtfy = async () => {
-    try {
-      await fetch('/api/test/ntfy', { method: 'POST' })
-      toast.success("Test notification sent to Ntfy")
-    } catch {
-      toast.error("Failed to send test notification")
-    }
-  }
-
-  const handleTestDiscord = async () => {
-    try {
-      const r = await fetch('/api/test/discord', { method: 'POST' })
-      const data = await r.json()
-      if (data.status === 'success') toast.success("Test notification sent to Discord")
-      else toast.error(data.message || "Failed")
-    } catch {
-      toast.error("Failed to send test notification")
-    }
-  }
-
-  const handleTestLocalAi = async () => {
-    try {
-      const r = await fetch('/api/test/local-ai', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          local_ai_base_url: config.local_ai_base_url,
-          local_ai_model: config.local_ai_model,
-        }),
-      })
-      const data = await r.json()
-      if (data.status === 'success') toast.success(data.message || "Connected")
-      else toast.error(data.message || "Failed")
-    } catch {
-      toast.error("Failed to reach local AI server")
-    }
-  }
-
-  const okCount = stats.by_status?.['OK'] ?? 0
-
-  return (
-    <div className="space-y-6">
-      {/* Stats Grid */}
-      <div className="grid gap-4 sm:grid-cols-3">
-        <StatCard
-          icon={Activity}
-          value={stats.total.toLocaleString()}
-          label="Files Processed"
-        />
-        <StatCard
-          icon={CheckCircle2}
-          value={okCount.toLocaleString()}
-          label="OK"
-          variant="success"
-        />
-        <StatCard
-          icon={Cpu}
-          value={stats.max_workers?.toString() ?? '4'}
-          label="Worker Threads"
-        />
-      </div>
-
-      {/* Ntfy Configuration */}
-      <Card className="border-border/50 bg-card/50">
-        <CardHeader className="pb-4">
-          <CardTitle className="flex items-center gap-2 text-base font-medium">
-            <Bell className="h-4 w-4 text-accent" />
-            Ntfy Configuration
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex items-center justify-between">
-            <Label htmlFor="enable-ntfy" className="text-sm">Enable Ntfy Notifications</Label>
-            <Switch
-              id="enable-ntfy"
-              checked={config.enable_ntfy}
-              onCheckedChange={(checked) => setConfig({ ...config, enable_ntfy: checked })}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="ntfy-server" className="text-sm text-muted-foreground">Ntfy Server URL</Label>
-            <Input
-              id="ntfy-server"
-              placeholder="https://ntfy.sh"
-              value={config.ntfy_server}
-              onChange={(e) => setConfig({ ...config, ntfy_server: e.target.value })}
-              className="bg-input"
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="ntfy-topic" className="text-sm text-muted-foreground">Ntfy Topic</Label>
-            <Input
-              id="ntfy-topic"
-              placeholder="my-media-notifications"
-              value={config.ntfy_topic}
-              onChange={(e) => setConfig({ ...config, ntfy_topic: e.target.value })}
-              className="bg-input"
-            />
-          </div>
-          <Button variant="outline" size="sm" onClick={handleTestNtfy} className="mt-2">
-            <Send className="mr-2 h-3.5 w-3.5" />
-            Test Ntfy
-          </Button>
-        </CardContent>
-      </Card>
-
-      {/* Discord Configuration */}
-      <Card className="border-border/50 bg-card/50">
-        <CardHeader className="pb-4">
-          <CardTitle className="flex items-center gap-2 text-base font-medium">
-            <MessageSquare className="h-4 w-4 text-accent" />
-            Discord Configuration
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex items-center justify-between">
-            <Label htmlFor="enable-discord" className="text-sm">Enable Discord Notifications</Label>
-            <Switch
-              id="enable-discord"
-              checked={config.enable_discord}
-              onCheckedChange={(checked) => setConfig({ ...config, enable_discord: checked })}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="discord-webhook" className="text-sm text-muted-foreground">Discord Webhook URL</Label>
-            <Input
-              id="discord-webhook"
-              type="password"
-              placeholder="https://discord.com/api/webhooks/..."
-              value={config.discord_webhook}
-              onChange={(e) => setConfig({ ...config, discord_webhook: e.target.value })}
-              className="bg-input"
-            />
-          </div>
-          <Button variant="outline" size="sm" onClick={handleTestDiscord}>
-            <Send className="mr-2 h-3.5 w-3.5" />
-            Test Discord
-          </Button>
-        </CardContent>
-      </Card>
-
-      {/* Advanced Options */}
-      <Card className="border-border/50 bg-card/50">
-        <CardHeader className="pb-4">
-          <CardTitle className="flex items-center gap-2 text-base font-medium">
-            <Image className="h-4 w-4 text-accent" />
-            Advanced Options
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex items-center justify-between">
-            <Label htmlFor="enable-posters" className="text-sm">Enable Poster Images (TVDB)</Label>
-            <Switch
-              id="enable-posters"
-              checked={config.enable_posters}
-              onCheckedChange={(checked) => setConfig({ ...config, enable_posters: checked })}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="tvdb-key" className="text-sm text-muted-foreground">TVDB API Key (Optional)</Label>
-            <Input
-              id="tvdb-key"
-              type="password"
-              placeholder="Your TVDB API key"
-              value={config.tvdb_api_key}
-              onChange={(e) => setConfig({ ...config, tvdb_api_key: e.target.value })}
-              className="bg-input"
-            />
-            <p className="text-xs text-muted-foreground">
-              Get your API key from{" "}
-              <a href="https://thetvdb.com/api-information" target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">
-                TVDB
-              </a>
-            </p>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Subtitle Translation — OpenAI */}
-      <Card className="border-border/50 bg-card/50">
-        <CardHeader className="pb-4">
-          <CardTitle className="flex items-center gap-2 text-base font-medium">
-            <Languages className="h-4 w-4 text-accent" />
-            Subtitle Translation — OpenAI
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex items-center justify-between">
-            <Label htmlFor="enable-openai-translate" className="text-sm">Use OpenAI for Translation</Label>
-            <Switch
-              id="enable-openai-translate"
-              checked={config.translate_backend === "openai"}
-              onCheckedChange={(checked) => setConfig({ ...config, translate_backend: checked ? "openai" : "local_ai" })}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="openai-key" className="text-sm text-muted-foreground">OpenAI API Key</Label>
-            <Input
-              id="openai-key"
-              type="password"
-              placeholder="sk-..."
-              value={config.openai_api_key}
-              onChange={(e) => setConfig({ ...config, openai_api_key: e.target.value })}
-              className="bg-input"
-            />
-            <p className="text-xs text-muted-foreground">
-              Get your key from{" "}
-              <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">
-                platform.openai.com
-              </a>
-            </p>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="openai-model" className="text-sm text-muted-foreground">Translation Model</Label>
-            <Select value={config.openai_model} onValueChange={(value) => setConfig({ ...config, openai_model: value })}>
-              <SelectTrigger className="bg-input">
-                <SelectValue placeholder="Select model" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="gpt-4o-mini">gpt-4o-mini — Fast & cheap (~$0.002/movie)</SelectItem>
-                <SelectItem value="gpt-4o">gpt-4o — Best quality (~$0.04/movie)</SelectItem>
-                <SelectItem value="gpt-4-turbo">gpt-4-turbo — High quality (~$0.15/movie)</SelectItem>
-              </SelectContent>
-            </Select>
-            <p className="text-xs text-muted-foreground">
-              gpt-4o-mini is recommended — excellent quality at a fraction of the cost.
-            </p>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="openai-chunk-size" className="text-sm text-muted-foreground">Chunk Size (SRT blocks per request)</Label>
-            <Input
-              id="openai-chunk-size"
-              type="number"
-              min={1}
-              max={2000}
-              value={config.openai_chunk_size}
-              onChange={(e) => setConfig({ ...config, openai_chunk_size: Number(e.target.value) })}
-              className="bg-input"
-            />
-            <p className="text-xs text-muted-foreground">
-              Lower it for more reliable per-request translation, raise it for fewer round-trips. 350 is a safe default for gpt-4o-mini.
-            </p>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Subtitle Translation — Local AI */}
-      <Card className="border-border/50 bg-card/50">
-        <CardHeader className="pb-4">
-          <CardTitle className="flex items-center gap-2 text-base font-medium">
-            <Cpu className="h-4 w-4 text-accent" />
-            Subtitle Translation — Local AI (Ollama)
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex items-center justify-between">
-            <Label htmlFor="enable-local-ai-translate" className="text-sm">Use Local AI for Translation</Label>
-            <Switch
-              id="enable-local-ai-translate"
-              checked={config.translate_backend === "local_ai"}
-              onCheckedChange={(checked) => setConfig({ ...config, translate_backend: checked ? "local_ai" : "openai" })}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="local-ai-url" className="text-sm text-muted-foreground">Base URL</Label>
-            <Input
-              id="local-ai-url"
-              placeholder="http://100.x.x.x:11434/v1"
-              value={config.local_ai_base_url}
-              onChange={(e) => setConfig({ ...config, local_ai_base_url: e.target.value })}
-              className="bg-input"
-            />
-            <p className="text-xs text-muted-foreground">
-              Must include the <code>/v1</code> suffix. Any address reachable from this container works — a
-              Tailscale IP/hostname, LAN IP, etc. No docker-compose changes needed.
-            </p>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="local-ai-model" className="text-sm text-muted-foreground">Model</Label>
-            <Input
-              id="local-ai-model"
-              placeholder="qwen2.5:7b"
-              value={config.local_ai_model}
-              onChange={(e) => setConfig({ ...config, local_ai_model: e.target.value })}
-              className="bg-input"
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="local-ai-chunk-size" className="text-sm text-muted-foreground">Chunk Size (SRT blocks per request)</Label>
-            <Input
-              id="local-ai-chunk-size"
-              type="number"
-              min={1}
-              max={350}
-              value={config.local_ai_chunk_size}
-              onChange={(e) => setConfig({ ...config, local_ai_chunk_size: Number(e.target.value) })}
-              className="bg-input"
-            />
-            <p className="text-xs text-muted-foreground">
-              Smaller is safer for a smaller Ollama context window. If a job fails with "block count changed",
-              lower this value.
-            </p>
-          </div>
-          <Button variant="outline" size="sm" onClick={handleTestLocalAi}>
-            <Send className="mr-2 h-3.5 w-3.5" />
-            Test Local AI
-          </Button>
-        </CardContent>
-      </Card>
-
-      {/* File Status Rules */}
-      <Card className="border-border/50 bg-card/50">
-        <CardHeader className="pb-4">
-          <CardTitle className="flex items-center gap-2 text-base font-medium">
-            <SlidersHorizontal className="h-4 w-4 text-accent" />
-            File Status Rules
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="space-y-2">
-            <Label htmlFor="reencode-size" className="text-sm text-muted-foreground">
-              Re-encode size threshold (GiB)
-            </Label>
-            <Input
-              id="reencode-size"
-              type="number"
-              min={1}
-              max={1024}
-              step={0.5}
-              value={config.reencode_size_gb}
-              onChange={(e) => setConfig({ ...config, reencode_size_gb: Number(e.target.value) })}
-              className="bg-input"
-            />
-            <p className="text-xs text-muted-foreground">
-              Files larger than this are flagged <span className="font-mono">RE-ENCODE</span>. Default: 20.
-            </p>
-          </div>
-          <div className="space-y-2">
-            <Label className="text-sm text-muted-foreground">Required subtitle languages</Label>
-            <div className="flex flex-wrap gap-2">
-              {COMMON_SUB_LANGS.map(lang => {
-                const checked = config.required_sub_langs.includes(lang.code)
-                return (
-                  <button
-                    key={lang.code}
-                    type="button"
-                    onClick={() => {
-                      const next = checked
-                        ? config.required_sub_langs.filter(c => c !== lang.code)
-                        : [...config.required_sub_langs, lang.code]
-                      setConfig({ ...config, required_sub_langs: next })
-                    }}
-                    className={
-                      "rounded-md border px-2.5 py-1 text-xs font-medium transition-colors " +
-                      (checked
-                        ? "border-accent/40 bg-accent/15 text-accent"
-                        : "border-border/40 text-muted-foreground hover:border-border hover:text-foreground")
-                    }
-                  >
-                    {lang.label}
-                    <span className="ml-1.5 font-mono text-[10px] opacity-60">{lang.code}</span>
-                  </button>
-                )
-              })}
-            </div>
-            <p className="text-xs text-muted-foreground">
-              Files missing any selected language are flagged <span className="font-mono">MISSING LANG</span>.
-              Saving with a change re-evaluates every file automatically.
-            </p>
-          </div>
-        </CardContent>
-      </Card>
-
-      <AccountSecurityCard />
-
-      {/* Save/Reload Buttons */}
-      <div className="flex gap-3">
-        <Button onClick={handleSave}>
-          <Save className="mr-2 h-4 w-4" />
-          Save Configuration
-        </Button>
-        <Button variant="outline" onClick={handleReload}>
-          <RefreshCw className="mr-2 h-4 w-4" />
-          Reload
-        </Button>
-      </div>
-    </div>
+  const relevantInvalid = Object.keys(invalid).filter(key => invalid[key]
+    && !(key.startsWith("openai_") && config.translate_backend !== "openai")
+    && !(key.startsWith("local_ai_") && config.translate_backend !== "local_ai")
+    && !(key.startsWith("ntfy_") && !config.enable_ntfy)
+    && !(key === "discord_webhook" && !config.enable_discord)
+    && !(key === "tvdb_api_key" && !config.enable_posters))
+  const hasInvalid = relevantInvalid.length > 0
+  const invalidSection = (id: string) => relevantInvalid.some(key =>
+    id === "translation" ? /^(openai_|local_ai_)/.test(key) :
+    id === "notifications" ? /^(ntfy_|discord_)/.test(key) : id === "library")
+  const testButton = (service: "ntfy" | "discord" | "local-ai", disabled: boolean) => (
+    <Button variant="outline" size="sm" onClick={() => test(service)} disabled={!!testing || disabled || relevantInvalid.some(key => service === "local-ai" ? key.startsWith("local_ai_") : service === "ntfy" ? key.startsWith("ntfy_") : key.startsWith("discord_"))}>
+      {testing === service ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+      {service === "local-ai" ? "Test connection" : "Send test notification"}
+    </Button>
   )
-}
+  const active = SECTIONS.find(s => s.id === section)!
 
-interface StatCardProps {
-  icon: React.ElementType
-  value: string
-  label: string
-  variant?: "default" | "success"
-}
-
-function StatCard({ icon: Icon, value, label, variant = "default" }: StatCardProps) {
   return (
-    <div className="group relative overflow-hidden rounded-xl bg-card p-6 transition-all hover:bg-card/80">
-      <div className="absolute inset-0 bg-gradient-to-br from-accent/5 to-transparent opacity-0 transition-opacity group-hover:opacity-100" />
-      <div className="relative">
-        <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-lg bg-secondary">
-          <Icon className={variant === "success" ? "h-5 w-5 text-success" : "h-5 w-5 text-muted-foreground"} />
+    <div className="mx-auto max-w-6xl pb-6">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/50 pb-5 pt-2">
+        <div><h1 className="text-xl font-semibold tracking-tight">Settings</h1><p className="mt-1 text-sm text-muted-foreground">Make it work your way. Changes save automatically.</p></div>
+        <div role="status" aria-live="polite" className={cn("flex items-center gap-2 text-xs", saveStatus === "error" ? "text-destructive" : "text-muted-foreground")}>
+          {loading ? <><Loader2 className="h-3.5 w-3.5 animate-spin" />Loading settings</> : loadError ? <><AlertCircle className="h-3.5 w-3.5" />Settings unavailable</> : saveStatus === "error" ? <><AlertCircle className="h-3.5 w-3.5" />Couldn’t apply changes</> : hasInvalid ? <><AlertCircle className="h-3.5 w-3.5 text-warning" />Check highlighted fields</> : saveStatus === "saved" ? <><Check className="h-3.5 w-3.5 text-accent" />All changes saved</> : <><Loader2 className="h-3.5 w-3.5 animate-spin" />{saveStatus === "saving" ? "Applying changes…" : "Waiting to save…"}</>}
         </div>
-        <div className="text-3xl font-semibold tracking-tight text-foreground">{value}</div>
-        <div className="text-sm text-muted-foreground">{label}</div>
       </div>
+      <div className="grid grid-cols-1 gap-6 pt-5 md:grid-cols-[200px_minmax(0,1fr)] md:gap-10">
+        <aside className="min-w-0">
+          <nav aria-label="Settings sections" className="grid grid-cols-2 gap-1 pb-2 md:sticky md:top-20 md:flex md:flex-col">
+            {SECTIONS.map(({ id, title, icon: Icon }) => (
+              <button key={id} type="button" aria-current={section === id ? "page" : undefined} aria-controls={`settings-${id}`} onClick={() => setSection(id)}
+                className={cn("flex min-w-0 items-center gap-2 rounded-md px-2.5 py-2.5 text-left text-xs transition-colors sm:text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring", section === id ? "bg-accent/10 font-medium text-accent" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground")}>
+                <Icon className="h-4 w-4 shrink-0" />{title}{invalidSection(id) && <AlertCircle aria-label="Has invalid fields" className="h-3.5 w-3.5 text-warning" />}<ChevronRight className={cn("ml-auto hidden h-3.5 w-3.5 md:block", section !== id && "invisible")} />
+              </button>
+            ))}
+          </nav>
+        </aside>
+        <div className="min-w-0">
+          <div className="mb-4"><h2 className="text-base font-medium">{active.title}</h2><p className="mt-1 text-sm text-muted-foreground">{active.description}</p></div>
+          {loading ? <div className="flex items-center gap-2 py-10 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" />Loading your configuration…</div> : loadError ? (
+            <div role="alert" className="space-y-3 py-6"><p className="text-sm text-muted-foreground">Couldn’t load settings. Check that the backend is reachable.</p><Button variant="outline" size="sm" onClick={() => setLoadAttempt(n => n + 1)}><RefreshCw className="h-3.5 w-3.5" />Try again</Button></div>
+          ) : <>
+            {saveStatus === "error" && <div role="alert" className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2.5"><p className="text-sm">{saveError}</p><Button size="sm" variant="outline" onClick={() => saver.current!.flush()}><RefreshCw className="h-3.5 w-3.5" />Retry</Button></div>}
+            <section id="settings-translation" hidden={section !== "translation"} aria-label="AI translation">
+              <SettingRow id="translate-backend" title="Translation provider" description="Used for new subtitle translation jobs.">
+                <Select value={config.translate_backend} onValueChange={value => update("translate_backend", value, true)}><SelectTrigger id="translate-backend" className="w-full bg-input"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="openai">OpenAI</SelectItem><SelectItem value="local_ai">Local AI · Ollama</SelectItem></SelectContent></Select>
+              </SettingRow>
+              <div hidden={config.translate_backend !== "openai"}>
+                <SettingRow id="openai_api_key" title="API key" description="Your OpenAI key for subtitle translation.">{field("openai_api_key", "API key", { type: "password", placeholder: "sk-…" })}</SettingRow>
+                <SettingRow id="openai_model" title="Model" description="Choose a model available to your OpenAI account.">{field("openai_model", "Model", { placeholder: "gpt-4o-mini" })}</SettingRow>
+                <SettingRow id="openai_chunk_size" title="Blocks per request" description="Smaller batches can improve reliability. Default: 350.">{field("openai_chunk_size", "Blocks per request", { type: "number", max: 2000, validate: numberRule(2000) })}</SettingRow>
+              </div>
+              <div hidden={config.translate_backend !== "local_ai"}>
+                <SettingRow id="local_ai_base_url" title="Server URL" description="An address the media server can reach, ending in /v1.">{field("local_ai_base_url", "Server URL", { placeholder: "http://localhost:11434/v1", validate: value => validUrl(value) || (value && !value.replace(/\/$/, "").endsWith("/v1") ? "Add /v1 to the end of the URL." : undefined) })}</SettingRow>
+                <SettingRow id="local_ai_model" title="Model" description="Use the exact name of a model installed on your server.">{field("local_ai_model", "Local AI model", { placeholder: "qwen2.5:7b" })}</SettingRow>
+                <SettingRow id="local_ai_chunk_size" title="Blocks per request" description="Lower this if translation fails with “block count changed”. Default: 25.">{field("local_ai_chunk_size", "Local AI blocks per request", { type: "number", max: 350, validate: numberRule(350) })}</SettingRow>
+                <div className="flex justify-end pt-4">{testButton("local-ai", !config.local_ai_base_url || !config.local_ai_model)}</div>
+              </div>
+              <p className="mt-6 text-xs leading-relaxed text-muted-foreground">Subtitles are currently translated into Cuban Spanish. Provider changes apply to new jobs.</p>
+            </section>
+            <section id="settings-notifications" hidden={section !== "notifications"} aria-label="Notifications">
+              <SettingRow id="enable-ntfy" title="Ntfy" description="Push media updates to an Ntfy topic." toggle><Switch id="enable-ntfy" checked={config.enable_ntfy} onCheckedChange={value => update("enable_ntfy", value, true)} /></SettingRow>
+              <div hidden={!config.enable_ntfy}>
+                <SettingRow id="ntfy_server" title="Server URL" description="Use ntfy.sh or your own Ntfy server.">{field("ntfy_server", "Ntfy server URL", { placeholder: "https://ntfy.sh", validate: validUrl })}</SettingRow>
+                <SettingRow id="ntfy_topic" title="Topic" description="The topic subscribed to on your devices.">{field("ntfy_topic", "Ntfy topic", { placeholder: "my-media-notifications" })}</SettingRow>
+                <div className="flex justify-end py-4">{testButton("ntfy", !config.ntfy_server || !config.ntfy_topic)}</div>
+              </div>
+              <div className="mt-4 border-t border-border/50 pt-2">
+                <SettingRow id="enable-discord" title="Discord" description="Post media updates to a Discord channel." toggle><Switch id="enable-discord" checked={config.enable_discord} onCheckedChange={value => update("enable_discord", value, true)} /></SettingRow>
+                <div hidden={!config.enable_discord}>
+                  <SettingRow id="discord_webhook" title="Webhook URL" description="The incoming webhook for your channel.">{field("discord_webhook", "Discord webhook URL", { type: "password", placeholder: "https://discord.com/api/webhooks/…", validate: validUrl })}</SettingRow>
+                  <div className="flex justify-end pt-4">{testButton("discord", !config.discord_webhook)}</div>
+                </div>
+              </div>
+            </section>
+            <section id="settings-library" hidden={section !== "library"} aria-label="Library">
+              <h3 className="pt-3 text-xs font-medium uppercase tracking-wider text-muted-foreground">File status rules</h3>
+              <SettingRow id="reencode_size_gb" title="Re-encode above" description="Larger files are flagged RE-ENCODE. Statuses refresh automatically.">
+                <div className="flex items-start gap-2">{field("reencode_size_gb", "Re-encode above", { type: "number", max: 1024, step: "any", validate: numberRule(1024, false) })}<span className="pt-2.5 text-sm text-muted-foreground">GiB</span></div>
+              </SettingRow>
+              <SettingRow id="required-languages" title="Required subtitles" description="Files missing a selected language are flagged MISSING LANG.">
+                <div id="required-languages" role="group" aria-label="Required subtitle languages" className="flex flex-wrap gap-2">
+                  {LANGUAGES.map(([code, label]) => <button key={code} type="button" aria-pressed={config.required_sub_langs.includes(code)} onClick={() => update("required_sub_langs", config.required_sub_langs.includes(code) ? config.required_sub_langs.filter(c => c !== code) : [...config.required_sub_langs, code], true)} className={cn("inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring", config.required_sub_langs.includes(code) ? "border-accent/40 bg-accent/10 text-accent" : "border-border/50 text-muted-foreground hover:text-foreground")}>
+                    {config.required_sub_langs.includes(code) && <Check className="h-3 w-3" />}{label}
+                  </button>)}
+                  {config.required_sub_langs.filter(code => !LANGUAGES.some(([known]) => known === code)).map(code => <button key={code} type="button" aria-pressed="true" onClick={() => update("required_sub_langs", config.required_sub_langs.filter(c => c !== code), true)} className="rounded-md border border-accent/40 bg-accent/10 px-2.5 py-1.5 text-xs text-accent">{code}</button>)}
+                </div>
+              </SettingRow>
+              <h3 className="mt-6 border-t border-border/50 pt-6 text-xs font-medium uppercase tracking-wider text-muted-foreground">Artwork</h3>
+              <SettingRow id="enable-posters" title="Poster images" description="Look up artwork from TheTVDB." toggle><Switch id="enable-posters" checked={config.enable_posters} onCheckedChange={value => update("enable_posters", value, true)} /></SettingRow>
+              <div hidden={!config.enable_posters}><SettingRow id="tvdb_api_key" title="TVDB API key" description="Required to find poster artwork on TheTVDB.">{field("tvdb_api_key", "TVDB API key", { type: "password", placeholder: "Your TVDB API key" })}</SettingRow></div>
+            </section>
+            <section id="settings-security" hidden={section !== "security"} aria-label="Account and security"><AccountSecurityCard compact /></section>
+          </>}
+        </div>
+      </div>
+      {stats && <footer className="mt-10 flex flex-wrap gap-x-5 gap-y-1 border-t border-border/40 pt-4 text-xs text-muted-foreground"><span>{stats.total.toLocaleString()} files processed</span><span>{stats.max_workers} worker threads</span></footer>}
     </div>
   )
+}
+
+function SettingRow({ id, title, description, toggle, children }: { id: string; title: string; description: string; toggle?: boolean; children: ReactNode }) {
+  return <div className={cn("flex gap-3 border-b border-border/30 py-4 last:border-b-0", toggle ? "items-center justify-between" : "flex-col sm:grid sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] sm:items-start sm:gap-6")}>
+    <div className="min-w-0"><Label htmlFor={id} className="text-sm font-medium">{title}</Label><p id={`${id}-description`} className="mt-1 text-xs leading-relaxed text-muted-foreground">{description}</p></div>
+    <div className={toggle ? "shrink-0" : "min-w-0"}>{children}</div>
+  </div>
+}
+
+function DraftInput({ id, label, value, type = "text", placeholder, max, step, validate, onValueChange, onValidityChange }: {
+  id: string; label: string; value: string; type?: "text" | "password" | "number"; placeholder?: string; max?: number; step?: string;
+  validate?: (value: string) => string | undefined; onValueChange: (value: string) => void; onValidityChange: (invalid: boolean) => void
+}) {
+  const [draft, setDraft] = useState(value)
+  const [error, setError] = useState<string | undefined>()
+  // Loaded values arrive before this field mounts. Keep invalid drafts visible until corrected.
+  return <div className="w-full"><Input id={id} aria-label={label} aria-describedby={`${id}-description${error ? ` ${id}-error` : ""}`} aria-invalid={!!error} type={type} value={draft} placeholder={placeholder} min={type === "number" ? step === "any" ? 0 : 1 : undefined} max={max} step={step} autoComplete="off" className="h-9 bg-input text-sm" onChange={event => {
+    const next = event.target.value
+    setDraft(next)
+    const message = validate?.(next)
+    setError(message)
+    onValidityChange(!!message)
+    if (!message) onValueChange(next)
+  }} />{error && <p id={`${id}-error`} className="mt-1.5 text-xs text-destructive">{error}</p>}</div>
 }

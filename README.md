@@ -14,6 +14,18 @@ Built for Plex, Jellyfin, and any folder-based media server.
 <!-- Screenshot: Settings view showing notifications, poster lookup, OpenAI, and file-status rules -->
 ![Settings](docs/screenshots/settings.png)
 
+### Local UI preview with fictional media
+
+Build the dashboard with `cd frontend` and `pnpm build`, then run `python scripts/preview.py`
+from the repository root. Open [the local preview](http://127.0.0.1:5001) to browse 14 fictional
+movies and 24 episodes across four shows. Preview state is isolated under `config/settings-preview/`;
+the script uses a temporary demo sign-in, creates no media files, and starts no media workers.
+Demo operations can be queued but do not execute. Run this loopback-only preview for local UI work.
+
+Track language pickers search the [Library of Congress ISO 639-2 catalog](https://www.loc.gov/standards/iso639-2/php/code_list.php)
+by name, three-letter code, or two-letter/bibliographic alias. Existing unlisted codes remain visible.
+See the [Library UX review](docs/ux/library/review.md) for captured findings and follow-up ideas.
+
 ---
 
 ## ✨ Features
@@ -60,6 +72,15 @@ See [docs/encoding.md](docs/encoding.md) for full details.
 > The target translation language is currently hardcoded to **Cuban Spanish**. Support for configuring the target language from the UI is planned for a future release.
 
 See [docs/subtitle-translation.md](docs/subtitle-translation.md) for full details.
+
+### ✨ Fix Anime
+- Movie, episode, full-season, full-show, and selected-file actions
+- Saved ASS styles with a live ffmpeg/libass preview
+- Keep selected audio/subtitle languages; remux away unwanted tracks
+- Translate a missing target language with the configured AI provider, or convert kept subtitles to ASS without translation
+- All library video formats accepted; automatic MKV remuxing for ASS with output verification and queue progress
+
+See [docs/fix-anime.md](docs/fix-anime.md) for behavior and requirements.
 
 ### 📎 External Subtitle Muxing
 - Movies with no subtitle tracks get a **Mux Subtitle File** action in their ··· menu
@@ -187,6 +208,12 @@ docker compose up -d
 ### Web UI
 
 All settings can be configured from the **Settings** view after first launch:
+
+Use the section navigation for **AI translation**, **Notifications**, **Library**, and **Account & security**.
+Configuration toggles and selections apply immediately; text and number fields save after a short typing pause.
+The save indicator shows pending changes, successful saves, and failures with a retry action. Invalid fields
+show an inline message and are not submitted. Changing library rules automatically refreshes file statuses.
+Password changes and passkey actions use their own explicit buttons.
 
 | Setting | Description |
 |---|---|

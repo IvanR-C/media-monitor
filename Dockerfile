@@ -32,6 +32,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     coreutils \
     tesseract-ocr \
     tesseract-ocr-all \
+    fonts-noto-core \
+    fonts-noto-cjk \
     lsdvd \
     dvdbackup \
     libarchive-tools \
@@ -56,7 +58,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # /bin/bash\r as the interpreter and the container exits immediately.
 COPY entrypoint.sh /entrypoint.sh
 RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
-COPY app.py .
+COPY app.py anime_subtitles.py .
+COPY frontend/lib/data/iso-639-2.json languages.json
 
 # Static frontend build — served directly by Flask (see STATIC_DIR in app.py)
 COPY --from=frontend-build /frontend/out/ static/
