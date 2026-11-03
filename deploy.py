@@ -3,7 +3,7 @@ import datetime
 import sys
 
 # Configuration — single merged image (Flask backend + static Next.js frontend)
-BACKEND_REPO = "ivanchelo/media-monitor"
+IMAGE_REPO = "ivanchelo/media-monitor"
 
 def get_next_version(repo):
     """
@@ -46,18 +46,18 @@ def run_command(command, cwd=None):
         sys.exit(1)
 
 def main():
-    # 1. Determine the version (based on backend repo)
-    version = get_next_version(BACKEND_REPO)
+    # 1. Determine the version
+    version = get_next_version(IMAGE_REPO)
     print(f"--- Target Version: {version} ---")
 
     # 2. Build & Push (Root directory — Dockerfile builds the frontend static
     #    export in its own stage, so this is the only image to produce)
     print("\nBuilding...")
-    run_command(["docker", "build", "-t", f"{BACKEND_REPO}:{version}", "-t", f"{BACKEND_REPO}:latest", "."])
+    run_command(["docker", "build", "-t", f"{IMAGE_REPO}:{version}", "-t", f"{IMAGE_REPO}:latest", "."])
 
     print("\nPushing...")
-    run_command(["docker", "push", f"{BACKEND_REPO}:{version}"])
-    run_command(["docker", "push", f"{BACKEND_REPO}:latest"])
+    run_command(["docker", "push", f"{IMAGE_REPO}:{version}"])
+    run_command(["docker", "push", f"{IMAGE_REPO}:latest"])
 
     print(f"\nSuccessfully deployed version {version}!")
 
