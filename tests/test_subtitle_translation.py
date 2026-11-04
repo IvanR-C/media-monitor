@@ -107,7 +107,69 @@ def test_dialogue_only_request_preserves_source_structure(app_module, translator
     assert '00:00:' not in prompt
     assert 'Target language: Spanish' in request['messages'][0]['content']
     assert 'Cuban' not in request['messages'][0]['content']
-    assert 'response_format' not in request  # Compatible servers need only plain chat support.
+    if backend == 'openai':
+        assert 'response_format' not in request
+    else:
+        schema = request['response_format']['json_schema']['schema']
+        assert schema['minItems'] == schema['maxItems'] == 2
+
+
+@pytest.mark.parametrize('backend', ['openai', 'local_ai'])
+@pytest.mark.parametrize('source,reply,expected', [
+    # Seen from qwen2.5:7b in production: each pair JSON-encoded as a string.
+    (SOURCE, json.dumps([json.dumps(p, ensure_ascii=False) for p in PAIRS], ensure_ascii=False),
+     '¿Ya puedes empezar?'),
+    # Seen from qwen2.5:7b in production: a single cue answered as a bare pair.
+    ('1\n00:00:01,000 --> 00:00:02,000\nHello', '[1,"Hola"]', 'Hola'),
+])
+def test_common_local_model_shapes_are_repaired(app_module, translator, backend, source, reply, expected):
+    calls, state = translator
+    app_module.config.update(translate_backend=backend, local_ai_base_url='http://local/v1',
+                             local_ai_model='local-model')
+    state.reply = reply
+    assert expected in app_module.translate_srt_chunk(source)
+    assert app_module.translate_srt_chunk(source) == app_module.translate_srt_chunk(source)
+    assert len(calls) == 1  # The repaired pairs were cached in the canonical shape.
+
+
+def test_local_server_without_structured_output_falls_back_to_plain(app_module, monkeypatch):
+    import httpx
+    from openai import OpenAI
+
+    requests = []
+
+    def respond(request):
+        body = json.loads(request.content)
+        requests.append(body)
+        if 'response_format' in body:
+            return httpx.Response(400, json={'error': {'message': 'unknown field response_format'}})
+        return httpx.Response(200, json={
+            'id': 'test', 'object': 'chat.completion', 'created': 0, 'model': body['model'],
+            'choices': [{'index': 0, 'finish_reason': 'stop',
+                         'message': {'role': 'assistant', 'content': json.dumps(PAIRS)}}],
+        })
+
+    app_module.config.update(translate_backend='local_ai', local_ai_base_url='http://local/v1',
+                             local_ai_model='local-model', translation_target_lang='spa',
+                             translation_cache_enabled=False)
+    with OpenAI(api_key='ollama', base_url='http://local/v1', max_retries=0,
+                http_client=httpx.Client(transport=httpx.MockTransport(respond))) as sdk:
+        monkeypatch.setattr(app_module, '_translation_client_and_model',
+                            lambda settings=None: (sdk, 'local-model'))
+        assert '¿Ya puedes empezar?' in app_module.translate_srt_chunk(SOURCE)
+        assert '¿Ya puedes empezar?' in app_module.translate_srt_chunk(SOURCE)
+    # Rejected once, then remembered: later chunks skip straight to plain requests.
+    assert ['response_format' in r for r in requests] == [True, False, False]
+
+
+def test_local_server_errors_other_than_rejection_still_fail(app_module, translator):
+    calls, state = translator
+    app_module.config.update(translate_backend='local_ai', local_ai_base_url='http://local/v1',
+                             local_ai_model='local-model')
+    state.fail_on = 1
+    with pytest.raises(RuntimeError, match='interrupted'):
+        app_module.translate_srt_chunk(SOURCE)
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize('reply', [

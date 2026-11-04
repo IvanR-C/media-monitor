@@ -260,9 +260,20 @@ config = {
     'openai_api_key':    os.environ.get('OPENAI_API_KEY', ''),
     'openai_model':      os.environ.get('OPENAI_MODEL', 'gpt-4o-mini'),
     'openai_chunk_size': 350,    # SRT blocks per request
-    # Translation backend selection — 'openai' or 'local_ai' (self-hosted, OpenAI-
+    # Translation backend selection — 'openai', 'gemini' (Google AI Studio key via
+    # Gemini's OpenAI-compatible endpoint) or 'local_ai' (self-hosted, OpenAI-
     # compatible server such as Ollama). Exactly one is active at a time.
     'translate_backend':   os.environ.get('TRANSLATE_BACKEND', 'openai'),
+    'gemini_api_key':      os.environ.get('GEMINI_API_KEY', ''),
+    # Flash-Lite has the most generous free-tier daily quota (500 requests/day
+    # at the time of writing, versus 20 for the full Flash models).
+    'gemini_model':        os.environ.get('GEMINI_MODEL', 'gemini-3.5-flash-lite'),
+    # Large chunks keep a whole episode to a few requests, which is what the
+    # free tier's per-day request quota actually limits.
+    'gemini_chunk_size':   200,
+    'gemini_thinking':     'default',
+    # Requests are spaced to stay under this; the free tier allows 15/min on Flash-Lite.
+    'gemini_requests_per_minute': 15,
     'local_ai_base_url':   '',   # e.g. http://100.x.x.x:11434/v1 — must include /v1
     'local_ai_model':      '',   # e.g. qwen2.5:7b
     'local_ai_chunk_size': 25,   # SRT blocks per request — local models have far less context than gpt-4o-mini
@@ -2778,6 +2789,7 @@ def translation_cache_ttl():
 
 _TRANSLATION_SETTING_KEYS = (
     'translate_backend', 'openai_model', 'openai_chunk_size',
+    'gemini_model', 'gemini_chunk_size', 'gemini_thinking',
     'local_ai_base_url', 'local_ai_model', 'local_ai_chunk_size', 'local_ai_thinking',
     'translation_target_lang', 'translation_variant', 'translation_instructions',
     'translation_temperature', 'translation_cache_enabled', 'local_ai_timeout',
@@ -2898,9 +2910,19 @@ def _translation_backend_ready(settings=None):
         if not settings.get('local_ai_model'):
             return False, 'Local AI model not configured. Add it in the Dashboard settings.'
         return True, None
+    if backend == 'gemini':
+        # The key is read from live config, never from a job's settings snapshot.
+        if not config.get('gemini_api_key'):
+            return False, 'Gemini API key not configured. Add it in the Dashboard settings.'
+        if not settings.get('gemini_model'):
+            return False, 'Gemini model not configured. Add it in the Dashboard settings.'
+        return True, None
     if not config.get('openai_api_key'):
         return False, 'OpenAI API key not configured. Add it in the Dashboard settings.'
     return True, None
+
+
+GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/openai/'
 
 
 def _translation_client_and_model(settings=None):
@@ -2908,6 +2930,9 @@ def _translation_client_and_model(settings=None):
     from openai import OpenAI
     settings = config if settings is None else settings
     backend = settings.get('translate_backend', 'openai')
+    if backend == 'gemini':
+        client = OpenAI(api_key=config.get('gemini_api_key', ''), base_url=GEMINI_BASE_URL, timeout=600)
+        return client, settings.get('gemini_model', '')
     if backend == 'local_ai':
         client = OpenAI(
             api_key='ollama',
@@ -2918,6 +2943,43 @@ def _translation_client_and_model(settings=None):
         return client, settings.get('local_ai_model', '')
     client = OpenAI(api_key=config.get('openai_api_key', ''))
     return client, settings.get('openai_model', 'gpt-4o-mini')
+
+
+def _dialogue_response_format(cue_count):
+    """JSON schema that forces exactly `cue_count` [id, text] pairs.
+
+    Small local models (e.g. qwen2.5:7b) often drift from the prompt's format —
+    returning each pair JSON-encoded as a string, or a bare pair for one cue.
+    Ollama, llama.cpp and vLLM turn this schema into a decoding grammar, so the
+    reply can only be the right shape; the IDs and text are still validated.
+    """
+    return {'type': 'json_schema', 'json_schema': {'name': 'subtitle_dialogue', 'schema': {
+        'type': 'array', 'minItems': cue_count, 'maxItems': cue_count,
+        'items': {'type': 'array', 'minItems': 2, 'maxItems': 2,
+                  'prefixItems': [{'type': 'integer'}, {'type': 'string'}]},
+    }}}
+
+
+# (base_url, model) pairs whose server rejected `response_format`; they get plain requests.
+_SCHEMA_UNSUPPORTED = set()
+
+
+def _normalize_dialogue_pairs(value, cue_count):
+    """Undo the malformed shapes local models emit most often, before strict validation."""
+    if not isinstance(value, list):
+        return value
+    # One cue answered as a bare pair: [1,"Hola"] instead of [[1,"Hola"]].
+    if cue_count == 1 and len(value) == 2 and type(value[0]) is int and isinstance(value[1], str):
+        return [value]
+    # Each pair JSON-encoded as a string: ["[1,\"Hola\"]", "[2,\"Otra\"]"].
+    if value and all(isinstance(item, str) for item in value):
+        try:
+            decoded = [json.loads(item) for item in value]
+        except ValueError:
+            return value
+        if all(isinstance(pair, list) for pair in decoded):
+            return decoded
+    return value
 
 
 def _restore_dialogue_pairs(source_blocks, pairs):
@@ -2973,6 +3035,63 @@ def _save_subtitle_dialogue(cache_key, pairs):
         log('warn', f'[translate] could not save completed chunk: {error}')
 
 
+_gemini_pace_lock = threading.Lock()
+_gemini_next_slot = 0.0
+_GEMINI_RATE_LIMIT_RETRIES = 3
+
+
+def _pace_gemini_request():
+    """Space Gemini requests evenly so long files stay under the per-minute quota.
+
+    Each caller reserves the next free slot under the lock and sleeps outside
+    it, so concurrent translation jobs share one request budget.
+    """
+    global _gemini_next_slot
+    rpm = config.get('gemini_requests_per_minute') or 15
+    with _gemini_pace_lock:
+        now = time.monotonic()
+        start = max(now, _gemini_next_slot)
+        _gemini_next_slot = start + 60.0 / rpm
+    if start > now:
+        time.sleep(start - now)
+
+
+def _rate_limit_delay(error, default=30.0):
+    """Seconds Gemini asked us to wait ("retryDelay": "17s" / "retry in 17.5s"), capped."""
+    headers = getattr(getattr(error, 'response', None), 'headers', None) or {}
+    try:
+        return min(float(headers.get('retry-after')), 120.0)
+    except (TypeError, ValueError):
+        pass
+    match = re.search(r'retry(?:Delay)?["\'\s:in]*([\d.]+)\s*s', str(error), re.I)
+    return min(float(match.group(1)) + 1, 120.0) if match else default
+
+
+def _create_completion(client, settings, **request):
+    """Send one chat completion; on Gemini, pace requests and wait out per-minute limits."""
+    if settings['translate_backend'] != 'gemini':
+        return client.chat.completions.create(**request)
+    from openai import RateLimitError
+    for attempt in range(_GEMINI_RATE_LIMIT_RETRIES + 1):
+        _pace_gemini_request()
+        try:
+            return client.chat.completions.create(**request)
+        except RateLimitError as error:
+            # Daily quotas reset at midnight Pacific; waiting minutes cannot help.
+            if re.search(r'PerDay|per day', str(error), re.I):
+                raise ValueError(
+                    f"Gemini daily quota for {request['model']} is used up (it resets at midnight "
+                    'Pacific time). Try again later, or choose a model with its own quota.') from error
+            if attempt == _GEMINI_RATE_LIMIT_RETRIES:
+                raise ValueError(
+                    'Gemini kept rejecting requests for exceeding its rate limit; '
+                    'lower "Requests per minute" in Settings and retry.') from error
+            delay = _rate_limit_delay(error)
+            log('warn', f'[translate] Gemini rate limit reached; retrying in {delay:.0f}s '
+                        f'({attempt + 1}/{_GEMINI_RATE_LIMIT_RETRIES})')
+            time.sleep(delay)
+
+
 def translate_srt_chunk(content, source_lang='', target_lang=None, cache_context=None, settings=None):
     """Translate dialogue only; reuse validated results for the same source context."""
     settings = translation_settings(target_lang, settings)
@@ -3000,6 +3119,8 @@ def translate_srt_chunk(content, source_lang='', target_lang=None, cache_context
     generation = {'temperature': settings['translation_temperature']}
     if settings['translate_backend'] == 'local_ai' and settings['local_ai_thinking'] != 'default':
         generation['reasoning_effort'] = settings['local_ai_thinking']
+    if settings['translate_backend'] == 'gemini' and settings['gemini_thinking'] != 'default':
+        generation['reasoning_effort'] = settings['gemini_thinking']
     # Full-file context prevents cross-scene reuse of otherwise identical dialogue.
     # Include actual request settings; API credentials are deliberately excluded.
     cache_key = hashlib.sha256(json.dumps({
@@ -3013,12 +3134,27 @@ def translate_srt_chunk(content, source_lang='', target_lang=None, cache_context
         log('info', f'[translate] reused completed chunk ({len(source_blocks)} cues)')
         return cached
     log('info', f'[translate] → {model}: {_log_preview(prompt)}')
-    response = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        **generation,
-    )
+    # Constrained output only for local servers; the OpenAI API follows the prompt
+    # reliably and its strict schema mode does not support tuple-style arrays.
+    # Kept out of the cache key: it changes only how the reply is decoded.
+    endpoint = (str(client.base_url), model)
+    request = dict(model=model, messages=messages, **generation)
+    if settings['translate_backend'] == 'local_ai' and endpoint not in _SCHEMA_UNSUPPORTED:
+        try:
+            response = client.chat.completions.create(
+                **request, response_format=_dialogue_response_format(len(source_blocks)))
+        except Exception as error:
+            if getattr(error, 'status_code', None) not in (400, 422):
+                raise
+            _SCHEMA_UNSUPPORTED.add(endpoint)
+            log('warn', f'[translate] {model} rejected structured output ({error}); '
+                        'falling back to plain JSON prompting')
+            response = client.chat.completions.create(**request)
+    else:
+        response = _create_completion(client, settings, **request)
     choice = response.choices[0]
+    if choice.finish_reason == 'content_filter':
+        raise ValueError("Translation was blocked by the provider's safety filter")
     if choice.finish_reason != 'stop':
         raise ValueError(f'Translation did not complete ({choice.finish_reason}); try a smaller chunk size')
     translated = choice.message.content
@@ -3034,6 +3170,7 @@ def translate_srt_chunk(content, source_lang='', target_lang=None, cache_context
         translated_pairs = json.loads(translated)
     except ValueError as error:
         raise ValueError('Translation returned invalid dialogue JSON') from error
+    translated_pairs = _normalize_dialogue_pairs(translated_pairs, len(source_blocks))
     restored = _restore_dialogue_pairs(source_blocks, translated_pairs)
     if settings['translation_cache_enabled']:
         _save_subtitle_dialogue(cache_key, translated_pairs)
@@ -3054,10 +3191,10 @@ def translate_subtitle_file(srt_path, source_lang='', progress_cb=None, job_id=N
         raise ValueError('Extracted subtitle file is empty')
 
     backend    = settings['translate_backend']
-    max_blocks = (
-        settings['local_ai_chunk_size'] if backend == 'local_ai'
-        else settings['openai_chunk_size']
-    )
+    max_blocks = {
+        'local_ai': settings['local_ai_chunk_size'],
+        'gemini':   settings['gemini_chunk_size'],
+    }.get(backend, settings['openai_chunk_size'])
     chunks     = chunk_srt_content(content, max_blocks=max_blocks)
     if not chunks:
         raise ValueError('Could not parse subtitle content into blocks')
@@ -4160,8 +4297,21 @@ def update_config_route():
         if not isinstance(langs, list) or not all(isinstance(l, str) for l in langs):
             return jsonify({'error': 'required_sub_langs must be a list of strings'}), 400
         payload['required_sub_langs'] = sorted({normalize_lang(l) for l in langs if l})
-    if 'translate_backend' in payload and payload['translate_backend'] not in ('openai', 'local_ai'):
-        return jsonify({'error': "translate_backend must be 'openai' or 'local_ai'"}), 400
+    if 'translate_backend' in payload and payload['translate_backend'] not in ('openai', 'gemini', 'local_ai'):
+        return jsonify({'error': "translate_backend must be 'openai', 'gemini' or 'local_ai'"}), 400
+    for key in ('gemini_api_key', 'gemini_model'):
+        if key in payload:
+            if not isinstance(payload[key], str) or len(payload[key]) > 200:
+                return jsonify({'error': f'{key} must be text of at most 200 characters'}), 400
+            payload[key] = payload[key].strip()
+    if 'gemini_thinking' in payload and payload['gemini_thinking'] not in ('default', 'minimal', 'low', 'medium', 'high'):
+        return jsonify({'error': 'Choose model default, minimal, low, medium, or high thinking'}), 400
+    for key, high, label in (('gemini_chunk_size', 1000, 'Gemini blocks per request'),
+                             ('gemini_requests_per_minute', 1000, 'Requests per minute')):
+        if key in payload:
+            value = payload[key]
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= high:
+                return jsonify({'error': f'{label} must be a whole number from 1 to {high}'}), 400
     if 'local_ai_chunk_size' in payload:
         try:
             v = int(payload['local_ai_chunk_size'])
@@ -4254,6 +4404,99 @@ def test_local_ai():
         return jsonify({'status': 'success', 'models': models, 'message': f'Connected — {len(models)} model(s) available'})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# Google's model list has names and token limits but no prices or quotas, so these
+# come from the AI Studio pricing page and a free-tier project's Rate limit page.
+# Prices are paid Standard-tier USD per 1M text tokens; free = (RPM, TPM, RPD) or
+# None where the free tier has no quota. Models not listed here show no figures.
+# Listed in the order the picker recommends them for subtitle translation.
+GEMINI_CATALOG_AS_OF = 'November 2026'
+GEMINI_CATALOG = {
+    'gemini-3.5-flash-lite': {'price': (0.30, 2.50), 'free': (15, 250_000, 500)},
+    'gemini-3.1-flash-lite': {'price': (0.25, 1.50), 'free': (15, 250_000, 500)},
+    'gemma-4-31b-it': {'price': None, 'free': (30, 16_000, 14_400),
+                       'note': 'Free only. The 16K tokens/minute limit needs small chunks (about 100 blocks).'},
+    'gemma-4-26b-a4b-it': {'price': None, 'free': (30, 16_000, 14_400),
+                           'note': 'Free only. The 16K tokens/minute limit needs small chunks (about 100 blocks).'},
+    'gemini-3.8-flash': {'price': (0.75, 3.75), 'free': (5, 250_000, 20),
+                         'note': 'Paid price doubles to $1.50 / $7.50 on January 1, 2027.'},
+    'gemini-3.6-flash': {'price': (0.75, 3.75), 'free': (5, 250_000, 20),
+                         'note': 'Paid price doubles to $1.50 / $7.50 on January 1, 2027.'},
+    'gemini-3-flash-preview': {'price': (0.50, 3.00), 'free': (5, 250_000, 20)},
+    'gemini-2.5-flash-lite': {'price': (0.10, 0.40), 'free': (10, 250_000, 20)},
+    'gemini-2.5-flash': {'price': (0.30, 2.50), 'free': (5, 250_000, 20),
+                         'note': 'Deprecated: from December 1, 2026, requests go to Gemini 3.5 Flash-Lite.'},
+    'gemini-2.5-pro': {'price': (1.25, 10.00), 'free': None,
+                       'note': 'Deprecated: from December 1, 2026, requests go to Gemini 3.8 Flash.'},
+    'gemini-3.1-pro-preview': {'price': (2.00, 12.00), 'free': None},
+    'gemini-4-argon': {'price': (2.00, 10.00), 'free': None,
+                       'note': 'Paid price doubles to $4.00 / $20.00 on December 1, 2026.'},
+}
+_GEMINI_RANK = {model_id: rank for rank, model_id in enumerate(GEMINI_CATALOG)}
+_GEMINI_NON_TEXT = re.compile(
+    r'embedding|tts|image|live|transcribe|audio|computer-use|robotics|banana|omni|veo|lyria|imagen|aqa|customtools')
+
+
+def _gemini_text_models(key):
+    """Text models this key can use, merged with the built-in price/quota catalog.
+
+    Returns (models, error_message, http_status); models is None on failure.
+    """
+    try:
+        r = requests.get('https://generativelanguage.googleapis.com/v1beta/models',
+                         headers={'x-goog-api-key': key}, params={'pageSize': 1000}, timeout=10)
+    except requests.RequestException as e:
+        return None, f'Could not reach Gemini: {e}', 502
+    if r.status_code in (400, 401, 403):
+        return None, 'Gemini rejected the API key. Check it was copied completely.', 400
+    if not r.ok:
+        return None, f'Gemini returned HTTP {r.status_code}', 502
+    models = []
+    for m in r.json().get('models', []):
+        model_id = (m.get('name') or '').removeprefix('models/')
+        if (not model_id.startswith(('gemini-', 'gemma-')) or _GEMINI_NON_TEXT.search(model_id)
+                or 'generateContent' not in (m.get('supportedGenerationMethods') or [])):
+            continue
+        known = GEMINI_CATALOG.get(model_id, {})
+        free, price = known.get('free'), known.get('price')
+        models.append({
+            'id': model_id, 'name': m.get('displayName') or model_id,
+            'input_tokens': m.get('inputTokenLimit'), 'output_tokens': m.get('outputTokenLimit'),
+            'thinking': bool(m.get('thinking')), 'known': bool(known),
+            'free': dict(zip(('rpm', 'tpm', 'rpd'), free)) if free else None,
+            'price': dict(zip(('input', 'output'), price)) if price else None,
+            'note': known.get('note', ''),
+        })
+    # Catalog (recommended) order first, then models without known figures by name.
+    models.sort(key=lambda m: (_GEMINI_RANK.get(m['id'], len(_GEMINI_RANK)), m['name']))
+    return models, None, 200
+
+
+@app.route('/api/gemini/models')
+def gemini_models():
+    """List text models the saved key can use, with known prices and free-tier limits."""
+    if not config.get('gemini_api_key'):
+        return jsonify({'error': 'Gemini API key not set'}), 400
+    models, error, status = _gemini_text_models(config['gemini_api_key'])
+    if models is None:
+        return jsonify({'error': error}), status
+    return jsonify({'models': models, 'as_of': GEMINI_CATALOG_AS_OF})
+
+
+@app.route('/api/test/gemini', methods=['POST'])
+def test_gemini():
+    """Check the saved Gemini key by listing the text models it can use."""
+    key, model = config.get('gemini_api_key', ''), config.get('gemini_model', '')
+    if not key:
+        return jsonify({'status': 'error', 'message': 'Gemini API key not set'}), 400
+    models, error, status = _gemini_text_models(key)
+    if models is None:
+        return jsonify({'status': 'error', 'message': error}), status
+    ids = [m['id'] for m in models]
+    message = (f'Key works, but "{model}" is not available to it. Choose another model.'
+               if model and model not in ids else f'Key works — {len(ids)} text model(s) available')
+    return jsonify({'status': 'success', 'models': models, 'as_of': GEMINI_CATALOG_AS_OF, 'message': message})
 
 
 @app.route('/api/translate/cache/clear', methods=['POST'])

@@ -1,7 +1,8 @@
 # Subtitle Translation
 
-Media Monitor translates subtitle tracks to your selected language using OpenAI
-or a local OpenAI-compatible server such as Ollama. Text subtitles and Blu-ray
+Media Monitor translates subtitle tracks to your selected language using OpenAI,
+Google Gemini (an AI Studio API key, with a free tier), or a local
+OpenAI-compatible server such as Ollama. Text subtitles and Blu-ray
 PGS image subtitles share the same translation workflow.
 
 ---
@@ -11,7 +12,7 @@ PGS image subtitles share the same translation workflow.
 | Requirement | Notes |
 |---|---|
 | Target language | Choose in Settings → AI translation; no default language |
-| AI provider | OpenAI API key, or a reachable local AI server and installed model |
+| AI provider | OpenAI API key, Gemini API key, or a reachable local AI server and installed model |
 | OpenAI model | Default `gpt-4o-mini`; configurable in Settings |
 | Tesseract OCR | Pre-installed in the Docker image (`tesseract-ocr-all`) — no action needed |
 
@@ -28,9 +29,24 @@ In **Settings → AI translation**, configure:
   dialogue without a regional preference; there is no built-in Cuban style.
 - **Translation instructions:** optional tone, terminology, names, and character
   context, up to 4000 characters. These are sent with every chunk, so keep them concise.
-- **Provider and model:** OpenAI, or a local compatible server. A local server URL
+- **Provider and model:** OpenAI, Google Gemini, or a local compatible server. A local server URL
   must be reachable from the NAS/container and end in `/v1`, for example
   `http://YOUR-PC-IP:11434/v1`. Test connection loads available model suggestions.
+- **Gemini:** create a key at [Google AI Studio → API keys](https://aistudio.google.com/api-keys)
+  and paste it into Settings (or set `GEMINI_API_KEY`). Requests go to Gemini's
+  OpenAI-compatible endpoint. Once the key is saved, the model picker lists the text
+  models it can use, in recommended order. For known models it shows free-tier limits,
+  paid price, and context size. These figures come from a built-in table dated in
+  the picker, because Google's model API doesn't publish prices or quotas; models
+  missing from the table show no figures. The default model is `gemini-3.5-flash-lite`: Flash-Lite
+  models have the largest free daily quota, while full Flash models allow far fewer
+  requests per day on the free tier. Your quotas are listed under **Rate limit** in
+  AI Studio; daily quotas reset at midnight Pacific time. Requests are spaced to stay
+  under **Requests per minute** (default 15). When Gemini reports a per-minute limit,
+  the chunk waits for the delay Gemini suggests and retries up to 3 times. An exhausted
+  daily quota fails the job immediately with a clear message. On the free tier,
+  Google may use requests to improve its products. **Thinking level** sends
+  `reasoning_effort`; Gemini 3 models cannot turn thinking fully off.
 - **Blocks per request:** configurable separately for each backend.
 - **Temperature:** 0–2, default 0.3, to control variation in wording. The selected
   model must support the temperature parameter.
@@ -172,7 +188,8 @@ enlarged before recognition. Accurate is slower but better for small or thin fon
 Large subtitle files are automatically split into chunks of up to **350 blocks** before being sent to the OpenAI API. This keeps each API call within the model's context window and allows progress to be reported per chunk. The translated chunks are reassembled in order before being saved.
 
 The chunk sizes are configurable in Settings: OpenAI defaults to **350 cues** per
-request and Local AI defaults to **25 cues**. Only compact `[id, dialogue]` pairs
+request, Gemini to **200 cues** (fewer, larger requests stretch the free daily
+quota), and Local AI to **25 cues**. Only compact `[id, dialogue]` pairs
 are sent to the model. Timestamps and original subtitle numbers stay local and
 are restored after the response is validated. Missing, duplicate, or unexpected
 IDs, empty translations, malformed JSON, and incomplete responses fail the chunk
@@ -203,6 +220,11 @@ percentage is assumed.
 
 **"OpenAI API key not configured":**
 Set it in Settings or via the `OPENAI_API_KEY` environment variable.
+
+**"Gemini daily quota … is used up":**
+The free tier's requests-per-day limit for that model was reached. It resets at
+midnight Pacific time. Retry the job later, raise **Blocks per request** so each
+episode needs fewer requests, or pick another model; each model has its own quota.
 
 **Translation job stuck on `ocr`:**
 The OCR phase processes one frame at a time. A 2-hour movie with 2000 subtitle frames may take several minutes. Watch the progress detail in the queue panel — it shows "OCR frame N/N".
