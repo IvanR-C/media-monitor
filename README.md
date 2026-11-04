@@ -64,13 +64,13 @@ See the [Library UX review](docs/ux/library/review.md) for captured findings and
 See [docs/encoding.md](docs/encoding.md) for full details.
 
 ### 💬 Subtitle Translation
-- Translate subtitle tracks to a language you choose using OpenAI or a local AI server such as Ollama
+- Translate subtitle tracks to a language you choose using OpenAI, Google Gemini (free tier available), or a local AI server such as Ollama
 - **Text subtitles** (SRT, ASS, SSA): extracted directly and sent to the model
 - **Image subtitles** (PGS / Blu-ray): OCR'd first with Tesseract (using the track's language tag to pick the right language pack), then translated
 - Output uses a language-tagged sidecar (for example `.fra.srt`) while muxing. The sidecar is removed after a successful mux unless **Keep translated sidecar** is on
 - Job queue with live progress and per-step status (`extracting` → `ocr` → `translating` → `muxing`)
 - Configure provider, model, chunk size, temperature, local thinking mode, and saved-chunk reuse in Settings
-- OpenAI requires an API key; local AI uses your own compatible server
+- OpenAI and Gemini require an API key (a free Gemini key comes from [Google AI Studio](https://aistudio.google.com/api-keys)); local AI uses your own compatible server
 
 > Choose a target language in **Settings → AI translation** before translating. No language or regional dialect is selected by default. Optional regional style and custom instructions let each user choose their own translation preferences.
 
@@ -121,7 +121,7 @@ See [docs/processing-settings.md](docs/processing-settings.md) for every setting
 | Docker + Docker Compose | Any recent version |
 | NVIDIA GPU | Required for encoding (NVENC). GTX 10xx or newer recommended |
 | NVIDIA Container Toolkit | Required for GPU access inside Docker — [install guide](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) |
-| OpenAI API key | Required only for subtitle translation |
+| OpenAI or Gemini API key | Required only for subtitle translation (or use a local AI server) |
 | Ntfy / Discord webhook | Required only for notifications |
 
 > If you do not intend to use encoding, an NVIDIA GPU is not required — the rest of the application (file watching, notifications, library browser, subtitle translation) works on any machine.
@@ -165,6 +165,7 @@ services:
       # - DISCORD_WEBHOOK=https://discord.com/api/webhooks/...
       # - OPENAI_API_KEY=sk-...
       # - OPENAI_MODEL=gpt-4o-mini
+      # - GEMINI_API_KEY=...
       # - TVDB_API_KEY=your-tvdb-key
 
       # Auth — see "Authentication" below
@@ -227,6 +228,7 @@ Password changes and passkey actions use their own explicit buttons.
 | **Discord webhook** | Rich embed notifications to a Discord channel |
 | **OpenAI API key** | Required for subtitle translation |
 | **OpenAI model** | Default: `gpt-4o-mini`. Use `gpt-4o` for higher accuracy |
+| **Gemini API key + model** | Alternative provider. Default model `gemini-3.5-flash-lite`, which has the largest free daily quota |
 | **TVDB API key** | Optional — fetch poster art for notification embeds |
 | **Notification events** | Per provider: new media, needs attention, job completed, job failed, disc image found; Ntfy priority per event |
 | **Required subtitles** | Languages a file must have to avoid MISSING LANG. An empty selection requires none |
@@ -252,6 +254,9 @@ All environment variables can also be set directly in `docker-compose.yml`:
 | `DISCORD_WEBHOOK` | — | Full Discord webhook URL |
 | `OPENAI_API_KEY` | — | OpenAI API key for subtitle translation |
 | `OPENAI_MODEL` | `gpt-4o-mini` | OpenAI model to use |
+| `TRANSLATE_BACKEND` | `openai` | Initial translation provider: `openai`, `gemini`, or `local_ai` |
+| `GEMINI_API_KEY` | — | Google AI Studio key for Gemini translation |
+| `GEMINI_MODEL` | `gemini-3.5-flash-lite` | Gemini model to use |
 | `TVDB_API_KEY` | — | TheTVDB API key for poster art |
 | `DB_FILE` | `/config/processed.db` | SQLite database path |
 | `CONFIG_FILE` | `/config/config.json` | Config file path |

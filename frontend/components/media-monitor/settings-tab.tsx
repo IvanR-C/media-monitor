@@ -18,6 +18,7 @@ const DEFAULTS = {
   enable_ntfy: true, ntfy_server: "https://ntfy.sh", ntfy_topic: "",
   enable_discord: false, discord_webhook: "", enable_posters: true, tvdb_api_key: "",
   openai_api_key: "", openai_model: "gpt-4o-mini", openai_chunk_size: 350,
+  gemini_api_key: "", gemini_model: "gemini-3.5-flash-lite", gemini_chunk_size: 200, gemini_thinking: "default", gemini_requests_per_minute: 15,
   translate_backend: "openai", local_ai_base_url: "", local_ai_model: "", local_ai_chunk_size: 25,
   translation_target_lang: "", translation_variant: "", translation_instructions: "",
   translation_temperature: 0.3, local_ai_thinking: "default", translation_cache_enabled: true,
@@ -58,6 +59,7 @@ export function SettingsTab({ libraryRequest = 0 }: { libraryRequest?: number })
   const [invalid, setInvalid] = useState<Record<string, boolean>>({})
   const [testing, setTesting] = useState<string | null>(null)
   const [localModels, setLocalModels] = useState<string[]>([])
+  const [geminiModels, setGeminiModels] = useState<string[]>([])
   const [clearingCache, setClearingCache] = useState(false)
   const saver = useRef<SettingsAutosave | null>(null)
   if (!saver.current) saver.current = new SettingsAutosave((status, message) => {
@@ -106,7 +108,8 @@ export function SettingsTab({ libraryRequest = 0 }: { libraryRequest?: number })
     onValidityChange={bad => setInvalid(prev => prev[key] === bad ? prev : { ...prev, [key]: bad })}
     onValueChange={value => update(key, options.type === "number" ? Number(value) : value)} />
 
-  const test = async (service: "ntfy" | "discord" | "local-ai") => {
+  type TestService = "ntfy" | "discord" | "local-ai" | "gemini"
+  const test = async (service: TestService) => {
     setTesting(service)
     try {
       if (!await saver.current!.flush()) return
@@ -117,12 +120,15 @@ export function SettingsTab({ libraryRequest = 0 }: { libraryRequest?: number })
       const data = await response.json()
       if (!response.ok || data.status !== "success") throw new Error(data.error || data.message || "Test failed. Check your settings and try again.")
       if (service === "local-ai") setLocalModels(data.models || [])
-      toast.success(service === "local-ai" ? data.message || "Connected to local AI" : "Test notification sent")
+      if (service === "gemini") setGeminiModels(data.models || [])
+      toast.success(service === "local-ai" ? data.message || "Connected to local AI"
+        : service === "gemini" ? data.message || "Gemini key works" : "Test notification sent")
     } catch (error) { toast.error(error instanceof Error ? error.message : "Couldn’t complete the test") }
     finally { setTesting(null) }
   }
   const relevantInvalid = Object.keys(invalid).filter(key => invalid[key]
     && !(key.startsWith("openai_") && config.translate_backend !== "openai")
+    && !(key.startsWith("gemini_") && config.translate_backend !== "gemini")
     && !(key.startsWith("local_ai_") && config.translate_backend !== "local_ai")
     && !(key.startsWith("ntfy_") && !config.enable_ntfy)
     && !(key === "discord_webhook" && !config.enable_discord)
@@ -131,15 +137,16 @@ export function SettingsTab({ libraryRequest = 0 }: { libraryRequest?: number })
     && !(key.startsWith("output_") && config.output_policy !== "separate"))
   const hasInvalid = relevantInvalid.length > 0
   const invalidSection = (id: string) => relevantInvalid.some(key =>
-    id === "translation" ? /^(openai_|local_ai_|translation_)/.test(key) :
+    id === "translation" ? /^(openai_|gemini_|local_ai_|translation_)/.test(key) :
     id === "notifications" ? /^(ntfy_|discord_)/.test(key) :
     id === "encoding" ? key.startsWith("encode_") :
     id === "output" ? /^(output_|backup_)/.test(key) :
     id === "library" && /^(reencode_|stabilize_|tvdb_)/.test(key))
-  const testButton = (service: "ntfy" | "discord" | "local-ai", disabled: boolean) => (
-    <Button variant="outline" size="sm" onClick={() => test(service)} disabled={!!testing || disabled || relevantInvalid.some(key => service === "local-ai" ? key.startsWith("local_ai_") : service === "ntfy" ? key.startsWith("ntfy_") : key.startsWith("discord_"))}>
+  const testPrefix = { "local-ai": "local_ai_", gemini: "gemini_", ntfy: "ntfy_", discord: "discord_" }
+  const testButton = (service: TestService, disabled: boolean) => (
+    <Button variant="outline" size="sm" onClick={() => test(service)} disabled={!!testing || disabled || relevantInvalid.some(key => key.startsWith(testPrefix[service]))}>
       {testing === service ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
-      {service === "local-ai" ? "Test connection" : "Send test notification"}
+      {service === "local-ai" || service === "gemini" ? "Test connection" : "Send test notification"}
     </Button>
   )
   const active = SECTIONS.find(s => s.id === section)!
@@ -182,12 +189,22 @@ export function SettingsTab({ libraryRequest = 0 }: { libraryRequest?: number })
                 <Textarea id="translation_instructions" aria-describedby="translation_instructions-description" rows={3} maxLength={4000} value={config.translation_instructions} onChange={event => update("translation_instructions", event.target.value)} placeholder="e.g. Keep character names unchanged and preserve informal dialogue." className="bg-input text-sm" />
               </SettingRow>
               <SettingRow id="translate-backend" title="Translation provider" description="Used for new subtitle translation jobs.">
-                <Select value={config.translate_backend} onValueChange={value => update("translate_backend", value, true)}><SelectTrigger id="translate-backend" className="w-full bg-input"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="openai">OpenAI</SelectItem><SelectItem value="local_ai">Local AI · Ollama / compatible server</SelectItem></SelectContent></Select>
+                <Select value={config.translate_backend} onValueChange={value => update("translate_backend", value, true)}><SelectTrigger id="translate-backend" className="w-full bg-input"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="openai">OpenAI</SelectItem><SelectItem value="gemini">Google Gemini · free tier available</SelectItem><SelectItem value="local_ai">Local AI · Ollama / compatible server</SelectItem></SelectContent></Select>
               </SettingRow>
               <div hidden={config.translate_backend !== "openai"}>
                 <SettingRow id="openai_api_key" title="API key" description="Your OpenAI key for subtitle translation.">{field("openai_api_key", "API key", { type: "password", placeholder: "sk-…" })}</SettingRow>
                 <SettingRow id="openai_model" title="Model" description="Choose a model available to your OpenAI account.">{field("openai_model", "Model", { placeholder: "gpt-4o-mini" })}</SettingRow>
                 <SettingRow id="openai_chunk_size" title="Blocks per request" description="Smaller batches can improve reliability. Default: 350.">{field("openai_chunk_size", "Blocks per request", { type: "number", max: 2000, validate: numberRule(2000) })}</SettingRow>
+              </div>
+              <div hidden={config.translate_backend !== "gemini"}>
+                <SettingRow id="gemini_api_key" title="API key" description={<>Create a free key in <a href="https://aistudio.google.com/api-keys" target="_blank" rel="noreferrer" className="text-accent underline-offset-2 hover:underline">Google AI Studio</a>. On the free tier, Google may use requests to improve its products.</>}>{field("gemini_api_key", "Gemini API key", { type: "password", placeholder: "AIza…" })}</SettingRow>
+                <SettingRow id="gemini_model" title="Model" description="Flash-Lite models have the largest free daily quota. Test the connection to load the models your key can use.">{field("gemini_model", "Gemini model", { placeholder: "gemini-3.5-flash-lite", list: "gemini-models" })}<datalist id="gemini-models">{geminiModels.map(model => <option key={model} value={model} />)}</datalist></SettingRow>
+                <SettingRow id="gemini_chunk_size" title="Blocks per request" description="Larger batches use fewer of your daily requests. Lower this if responses are incomplete. Default: 200.">{field("gemini_chunk_size", "Gemini blocks per request", { type: "number", max: 1000, validate: numberRule(1000) })}</SettingRow>
+                <SettingRow id="gemini_requests_per_minute" title="Requests per minute" description="Requests are spaced to stay under your quota, shown under Rate limit in AI Studio. Free tier Flash-Lite: 15.">{field("gemini_requests_per_minute", "Gemini requests per minute", { type: "number", max: 1000, validate: numberRule(1000) })}</SettingRow>
+                <SettingRow id="gemini_thinking" title="Thinking level" description="Minimal is fastest and usually enough for subtitles. Gemini 3 models can't turn thinking fully off.">
+                  <Select value={config.gemini_thinking} onValueChange={value => update("gemini_thinking", value, true)}><SelectTrigger id="gemini_thinking" className="bg-input"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="default">Model default</SelectItem><SelectItem value="minimal">Minimal</SelectItem><SelectItem value="low">Low</SelectItem><SelectItem value="medium">Medium</SelectItem><SelectItem value="high">High</SelectItem></SelectContent></Select>
+                </SettingRow>
+                <div className="flex justify-end pt-4">{testButton("gemini", !config.gemini_api_key)}</div>
               </div>
               <div hidden={config.translate_backend !== "local_ai"}>
                 <SettingRow id="local_ai_base_url" title="Server URL" description="An address the media server can reach, ending in /v1.">{field("local_ai_base_url", "Server URL", { placeholder: "http://localhost:11434/v1", validate: value => validUrl(value) || (value && !value.replace(/\/$/, "").endsWith("/v1") ? "Add /v1 to the end of the URL." : undefined) })}</SettingRow>
