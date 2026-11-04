@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo, useRef } from "react";
+import { memo, useState, useEffect, useMemo, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -23,6 +23,7 @@ import { LanguagePicker } from "./language-picker";
 import { FixAnimeDialog, type AnimeSelection } from "./fix-anime-dialog";
 import { languageLabel, languageSummary, normalizeLanguage } from "@/lib/languages";
 import { useTableGroupSpan } from "@/hooks/use-table-group-span";
+import { useMediaQuery } from "@/hooks/use-media-query";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import {
@@ -50,12 +51,7 @@ import {
   Download,
   Sparkles,
 } from "lucide-react";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-  Hint,
-} from "@/components/ui/tooltip";
+import { Hint } from "@/components/ui/tooltip";
 import { Skeleton } from "@/components/ui/skeleton";
 import type {
   MediaFile,
@@ -148,6 +144,10 @@ export function MediaTable({
   onOpenPosterSettings,
 }: MediaTableProps) {
   const groupSpan = useTableGroupSpan();
+  // Only one layout is ever visible, so only one is rendered: building the
+  // hidden mobile card list alongside the desktop table roughly doubled the
+  // cost of showing a large library. Matches Tailwind's `sm` breakpoint.
+  const isDesktop = useMediaQuery("(min-width: 640px)");
   const [detailsFile, setDetailsFile] = useState<MediaFile | null>(null);
   const detailsTrigger = useRef<HTMLElement | null>(null);
   const openDetails = (file: MediaFile) => {
@@ -167,6 +167,23 @@ export function MediaTable({
     label: [file.show_name || file.folder_name, file.season_episode].filter(Boolean).join(" · "),
     scope: { kind: "file", file_id: file.id },
   });
+  // One stable object of row callbacks, reading the latest props through a
+  // ref, so memoized rows don't all re-render whenever the parent does
+  // (progress polls, selection changes, typing in search).
+  const latestActions = useRef({ onToggleSelect, onEnqueue, onRip, onTranslate, onDownloadSubtitle, onFolderScan, openDetails, openAnimeFile });
+  latestActions.current = { onToggleSelect, onEnqueue, onRip, onTranslate, onDownloadSubtitle, onFolderScan, openDetails, openAnimeFile };
+  const rowActions = useMemo<RowActions>(() => ({
+    onToggleSelect: id => latestActions.current.onToggleSelect(id),
+    onEnqueue: id => latestActions.current.onEnqueue(id),
+    onRip: id => latestActions.current.onRip(id),
+    onTranslate: (id, subIdx) => latestActions.current.onTranslate(id, subIdx),
+    onDownloadSubtitle: (id, subIdx, isOcr) => latestActions.current.onDownloadSubtitle(id, subIdx, isOcr),
+    onFolderScan: ids => latestActions.current.onFolderScan(ids),
+    onOpenDetails: file => latestActions.current.openDetails(file),
+    onFixAnime: file => latestActions.current.openAnimeFile(file),
+    onOpenAssignDialog: setAssignDialogFile,
+    onOpenMuxDialog: setMuxDialogFile,
+  }), []);
   const animeGroupMenu = (kind: "show" | "season", label: string, fileId: number) => (
     <DropdownMenu>
       <DropdownMenuTrigger asChild><Button aria-label={`Actions for ${label}`} variant="ghost" size="icon" className="h-7 w-7 shrink-0" onClick={e => e.stopPropagation()}><MoreHorizontal className="h-3.5 w-3.5" /></Button></DropdownMenuTrigger>
@@ -347,16 +364,8 @@ export function MediaTable({
           key={file.id}
           file={file}
           isSelected={selectedIds.has(file.id)}
-          onToggleSelect={() => onToggleSelect(file.id)}
-          onEnqueue={() => onEnqueue(file.id)}
-          onRip={() => onRip(file.id)}
-          onTranslate={onTranslate}
-          onDownloadSubtitle={onDownloadSubtitle}
-          onOpenDetails={openDetails}
-          onOpenAssignDialog={setAssignDialogFile}
-          onOpenMuxDialog={setMuxDialogFile}
-          onFixAnime={openAnimeFile}
-          onFolderScan={() => onFolderScan([file.id])}
+          actions={rowActions}
+          canFolderScan
         />
       ));
     }
@@ -501,15 +510,7 @@ export function MediaTable({
               key={ep.id}
               file={ep}
               isSelected={selectedIds.has(ep.id)}
-              onToggleSelect={() => onToggleSelect(ep.id)}
-              onEnqueue={() => onEnqueue(ep.id)}
-              onRip={() => onRip(ep.id)}
-              onTranslate={onTranslate}
-              onDownloadSubtitle={onDownloadSubtitle}
-              onOpenDetails={openDetails}
-          onOpenAssignDialog={setAssignDialogFile}
-              onOpenMuxDialog={setMuxDialogFile}
-              onFixAnime={openAnimeFile}
+              actions={rowActions}
               isEpisode
             />,
           );
@@ -577,7 +578,7 @@ export function MediaTable({
       )}
 
       {/* ── Desktop table (sm+) ───────────────────────────────────────────────── */}
-      <div className="hidden flex-1 overflow-auto sm:block">
+      {isDesktop && <div className="hidden flex-1 overflow-auto sm:block">
         <table className="w-full table-fixed text-sm">
 
           <thead className="sticky top-0 z-10 bg-secondary/80 backdrop-blur-sm">
@@ -657,10 +658,10 @@ export function MediaTable({
           </thead>
           <tbody className="divide-y divide-border/20">{renderRows()}</tbody>
         </table>
-      </div>
+      </div>}
 
       {/* ── Mobile card list (<sm) ────────────────────────────────────────────── */}
-      <div className="flex-1 overflow-auto sm:hidden">
+      {!isDesktop && <div className="flex-1 overflow-auto sm:hidden">
         {loading && files.length === 0
           ? Array.from({ length: 5 }).map((_, i) => (
               <SkeletonMobileCard key={`sk-m-${i}`} />
@@ -671,16 +672,8 @@ export function MediaTable({
                 key={file.id}
                 file={file}
                 isSelected={selectedIds.has(file.id)}
-                onToggleSelect={() => onToggleSelect(file.id)}
-                onEnqueue={() => onEnqueue(file.id)}
-                onRip={() => onRip(file.id)}
-                onTranslate={onTranslate}
-                onDownloadSubtitle={onDownloadSubtitle}
-                onOpenDetails={openDetails}
-          onOpenAssignDialog={setAssignDialogFile}
-                onOpenMuxDialog={setMuxDialogFile}
-                onFixAnime={openAnimeFile}
-                onFolderScan={() => onFolderScan([file.id])}
+                actions={rowActions}
+                canFolderScan
               />
             ))
           : Array.from(showMap.keys()).map((showName) => {
@@ -810,15 +803,7 @@ export function MediaTable({
                                   key={ep.id}
                                   file={ep}
                                   isSelected={selectedIds.has(ep.id)}
-                                  onToggleSelect={() => onToggleSelect(ep.id)}
-                                  onEnqueue={() => onEnqueue(ep.id)}
-                                  onRip={() => onRip(ep.id)}
-                                  onTranslate={onTranslate}
-                                  onDownloadSubtitle={onDownloadSubtitle}
-                                  onOpenDetails={openDetails}
-          onOpenAssignDialog={setAssignDialogFile}
-                                  onOpenMuxDialog={setMuxDialogFile}
-                                  onFixAnime={openAnimeFile}
+                                  actions={rowActions}
                                   indent
                                   isEpisode
                                 />
@@ -830,7 +815,7 @@ export function MediaTable({
                 </div>
               );
             })}
-      </div>
+      </div>}
 
       <MediaDetailsDrawer
         file={detailsFile ? files.find(file => file.id === detailsFile.id) || detailsFile : null}
@@ -864,37 +849,16 @@ export function MediaTable({
 
 // ── Mobile file card ───────────────────────────────────────────────────────────
 
-function MobileFileCard({
+const MobileFileCard = memo(function MobileFileCard({
   file,
   isSelected,
-  onToggleSelect,
-  onEnqueue,
-  onRip,
-  onTranslate,
-  onDownloadSubtitle,
-  onOpenAssignDialog,
-  onOpenDetails,
-  onOpenMuxDialog,
-  onFixAnime,
+  actions,
   indent,
   isEpisode,
-  onFolderScan,
-}: {
-  file: MediaFile;
-  isSelected: boolean;
-  onToggleSelect: () => void;
-  onEnqueue: () => void;
-  onRip: () => void;
-  onTranslate: (id: number, subIdx: number) => void;
-  onDownloadSubtitle: (id: number, subIdx: number, isOcr: boolean) => void;
-  onOpenAssignDialog: (file: MediaFile) => void;
-  onOpenDetails: (file: MediaFile) => void;
-  onOpenMuxDialog?: (file: MediaFile) => void;
-  onFixAnime: (file: MediaFile) => void;
-  indent?: boolean;
-  isEpisode?: boolean;
-  onFolderScan?: () => void;
-}) {
+  canFolderScan,
+}: RowProps & { indent?: boolean }) {
+  const { onToggleSelect, onEnqueue, onRip, onFolderScan, onTranslate, onDownloadSubtitle,
+    onOpenAssignDialog, onOpenDetails, onOpenMuxDialog, onFixAnime } = bindRowActions(actions, file, canFolderScan);
   const translatableSubTracks = file.subtitle_tracks.filter((t) =>
     !IMAGE_CODECS.has(t.codec) || OCR_CODECS.has(t.codec),
   );
@@ -1019,7 +983,7 @@ function MobileFileCard({
       </div>
     </div>
   );
-}
+});
 
 // ── Sort header ────────────────────────────────────────────────────────────────
 
@@ -1067,37 +1031,48 @@ function SortHeader({
 
 // ── Table row ─────────────────────────────────────────────────────────────────
 
-interface MediaTableRowProps {
-  file: MediaFile;
-  isSelected: boolean;
-  onToggleSelect: () => void;
-  onEnqueue: () => void;
-  onRip: () => void;
+export interface RowActions {
+  onToggleSelect: (id: number) => void;
+  onEnqueue: (id: number) => void;
+  onRip: (id: number) => void;
   onTranslate: (id: number, subIdx: number) => void;
   onDownloadSubtitle: (id: number, subIdx: number, isOcr: boolean) => void;
+  onFolderScan: (fileIds: number[]) => void;
   onOpenAssignDialog: (file: MediaFile) => void;
   onOpenDetails: (file: MediaFile) => void;
-  onOpenMuxDialog?: (file: MediaFile) => void;
+  onOpenMuxDialog: (file: MediaFile) => void;
   onFixAnime: (file: MediaFile) => void;
-  isEpisode?: boolean;
-  onFolderScan?: () => void;
 }
 
-function MediaTableRow({
+interface RowProps {
+  file: MediaFile;
+  isSelected: boolean;
+  actions: RowActions;
+  isEpisode?: boolean;
+  canFolderScan?: boolean;
+}
+
+// Per-row bindings of the shared callbacks. Rows are memoized, so these only
+// get recreated when that row's own props change.
+function bindRowActions(actions: RowActions, file: MediaFile, canFolderScan?: boolean) {
+  return {
+    ...actions,
+    onToggleSelect: () => actions.onToggleSelect(file.id),
+    onEnqueue: () => actions.onEnqueue(file.id),
+    onRip: () => actions.onRip(file.id),
+    onFolderScan: canFolderScan ? () => actions.onFolderScan([file.id]) : undefined,
+  };
+}
+
+const MediaTableRow = memo(function MediaTableRow({
   file,
   isSelected,
-  onToggleSelect,
-  onEnqueue,
-  onRip,
-  onTranslate,
-  onDownloadSubtitle,
-  onOpenAssignDialog,
-  onOpenDetails,
-  onOpenMuxDialog,
-  onFixAnime,
+  actions,
   isEpisode,
-  onFolderScan,
-}: MediaTableRowProps) {
+  canFolderScan,
+}: RowProps) {
+  const { onToggleSelect, onEnqueue, onRip, onFolderScan, onTranslate, onDownloadSubtitle,
+    onOpenAssignDialog, onOpenDetails, onOpenMuxDialog, onFixAnime } = bindRowActions(actions, file, canFolderScan);
   const translatableSubTracks = file.subtitle_tracks.filter((t) =>
     !IMAGE_CODECS.has(t.codec) || OCR_CODECS.has(t.codec),
   );
@@ -1241,7 +1216,7 @@ function MediaTableRow({
       </td>
     </tr>
   );
-}
+});
 
 // ── Row status (shows live progress when encoding/translating) ─────────────────
 
@@ -1260,17 +1235,12 @@ function StatusBadge({
   tooltip: string;
 }) {
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span tabIndex={0} className={cn(BADGE_BASE, "cursor-help focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring", tone)}>
-          <Icon className="h-3 w-3" />
-          {label}
-        </span>
-      </TooltipTrigger>
-      <TooltipContent side="top" className="max-w-[260px] text-[11px]">
-        {tooltip}
-      </TooltipContent>
-    </Tooltip>
+    <Hint content={tooltip} side="top" className="max-w-[260px] text-[11px]">
+      <span tabIndex={0} className={cn(BADGE_BASE, "cursor-help focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring", tone)}>
+        <Icon className="h-3 w-3" />
+        {label}
+      </span>
+    </Hint>
   );
 }
 
