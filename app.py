@@ -2920,6 +2920,43 @@ def _translation_client_and_model(settings=None):
     return client, settings.get('openai_model', 'gpt-4o-mini')
 
 
+def _dialogue_response_format(cue_count):
+    """JSON schema that forces exactly `cue_count` [id, text] pairs.
+
+    Small local models (e.g. qwen2.5:7b) often drift from the prompt's format —
+    returning each pair JSON-encoded as a string, or a bare pair for one cue.
+    Ollama, llama.cpp and vLLM turn this schema into a decoding grammar, so the
+    reply can only be the right shape; the IDs and text are still validated.
+    """
+    return {'type': 'json_schema', 'json_schema': {'name': 'subtitle_dialogue', 'schema': {
+        'type': 'array', 'minItems': cue_count, 'maxItems': cue_count,
+        'items': {'type': 'array', 'minItems': 2, 'maxItems': 2,
+                  'prefixItems': [{'type': 'integer'}, {'type': 'string'}]},
+    }}}
+
+
+# (base_url, model) pairs whose server rejected `response_format`; they get plain requests.
+_SCHEMA_UNSUPPORTED = set()
+
+
+def _normalize_dialogue_pairs(value, cue_count):
+    """Undo the malformed shapes local models emit most often, before strict validation."""
+    if not isinstance(value, list):
+        return value
+    # One cue answered as a bare pair: [1,"Hola"] instead of [[1,"Hola"]].
+    if cue_count == 1 and len(value) == 2 and type(value[0]) is int and isinstance(value[1], str):
+        return [value]
+    # Each pair JSON-encoded as a string: ["[1,\"Hola\"]", "[2,\"Otra\"]"].
+    if value and all(isinstance(item, str) for item in value):
+        try:
+            decoded = [json.loads(item) for item in value]
+        except ValueError:
+            return value
+        if all(isinstance(pair, list) for pair in decoded):
+            return decoded
+    return value
+
+
 def _restore_dialogue_pairs(source_blocks, pairs):
     """Validate exact cue coverage, then rebuild SRT using only source metadata."""
     if not isinstance(pairs, list) or len(pairs) != len(source_blocks):
@@ -3013,11 +3050,24 @@ def translate_srt_chunk(content, source_lang='', target_lang=None, cache_context
         log('info', f'[translate] reused completed chunk ({len(source_blocks)} cues)')
         return cached
     log('info', f'[translate] → {model}: {_log_preview(prompt)}')
-    response = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        **generation,
-    )
+    # Constrained output only for local servers; the OpenAI API follows the prompt
+    # reliably and its strict schema mode does not support tuple-style arrays.
+    # Kept out of the cache key: it changes only how the reply is decoded.
+    endpoint = (str(client.base_url), model)
+    request = dict(model=model, messages=messages, **generation)
+    if settings['translate_backend'] == 'local_ai' and endpoint not in _SCHEMA_UNSUPPORTED:
+        try:
+            response = client.chat.completions.create(
+                **request, response_format=_dialogue_response_format(len(source_blocks)))
+        except Exception as error:
+            if getattr(error, 'status_code', None) not in (400, 422):
+                raise
+            _SCHEMA_UNSUPPORTED.add(endpoint)
+            log('warn', f'[translate] {model} rejected structured output ({error}); '
+                        'falling back to plain JSON prompting')
+            response = client.chat.completions.create(**request)
+    else:
+        response = client.chat.completions.create(**request)
     choice = response.choices[0]
     if choice.finish_reason != 'stop':
         raise ValueError(f'Translation did not complete ({choice.finish_reason}); try a smaller chunk size')
@@ -3034,6 +3084,7 @@ def translate_srt_chunk(content, source_lang='', target_lang=None, cache_context
         translated_pairs = json.loads(translated)
     except ValueError as error:
         raise ValueError('Translation returned invalid dialogue JSON') from error
+    translated_pairs = _normalize_dialogue_pairs(translated_pairs, len(source_blocks))
     restored = _restore_dialogue_pairs(source_blocks, translated_pairs)
     if settings['translation_cache_enabled']:
         _save_subtitle_dialogue(cache_key, translated_pairs)
