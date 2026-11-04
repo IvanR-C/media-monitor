@@ -170,21 +170,60 @@ class _Reply:
         return self._payload
 
 
-def test_key_check_lists_text_models(client, app_module, monkeypatch):
+def _model(name, display, methods=('generateContent', 'countTokens')):
+    return {'name': f'models/{name}', 'displayName': display, 'inputTokenLimit': 1048576,
+            'outputTokenLimit': 65536, 'supportedGenerationMethods': list(methods), 'thinking': True}
+
+
+NATIVE_MODELS = {'models': [
+    _model('gemini-3.8-flash', 'Gemini 3.8 Flash'),
+    _model('gemini-3.8-flash-tts', 'Gemini 3.8 Flash TTS'),
+    _model('gemini-embedding-2', 'Gemini Embedding 2', ('embedContent',)),
+    _model('gemini-3.1-flash-lite-image', 'Nano Banana 2 Lite'),
+    _model('gemini-future-flash', 'Gemini Future Flash'),
+    _model('gemini-4-argon', 'Gemini 4 Argon'),
+    _model('gemini-3.5-flash-lite', 'Gemini 3.5 Flash Lite'),
+    _model('gemma-4-31b-it', 'Gemma 4 31B IT'),
+]}
+
+
+@pytest.fixture
+def native_models(app_module, monkeypatch):
     seen = {}
 
-    def fake_get(url, headers=None, timeout=None):
-        seen.update(url=url, auth=headers['Authorization'])
-        return _Reply(200, {'data': [{'id': 'models/gemini-3.5-flash-lite'}, {'id': 'models/gemini-3.8-flash-tts'},
-                                     {'id': 'models/gemini-embedding-2'}, {'id': 'models/gemma-4-31b-it'}]})
+    def fake_get(url, headers=None, params=None, timeout=None):
+        seen.update(url=url, auth=headers['x-goog-api-key'])
+        return _Reply(200, NATIVE_MODELS)
 
     monkeypatch.setattr(app_module.requests, 'get', fake_get)
+    return seen
+
+
+def test_model_list_merges_prices_and_free_limits(client, app_module, native_models):
+    assert client.get('/api/gemini/models').status_code == 400  # No key saved yet.
+    app_module.config['gemini_api_key'] = 'k'
+    data = client.get('/api/gemini/models').get_json()
+    assert native_models == {'url': 'https://generativelanguage.googleapis.com/v1beta/models', 'auth': 'k'}
+    assert data['as_of']
+    # Text models only, in recommended order, models without known figures last.
+    assert [m['id'] for m in data['models']] == [
+        'gemini-3.5-flash-lite', 'gemma-4-31b-it', 'gemini-3.8-flash', 'gemini-4-argon', 'gemini-future-flash']
+    lite = data['models'][0]
+    assert lite == {'id': 'gemini-3.5-flash-lite', 'name': 'Gemini 3.5 Flash Lite', 'input_tokens': 1048576,
+                    'output_tokens': 65536, 'thinking': True, 'known': True,
+                    'free': {'rpm': 15, 'tpm': 250000, 'rpd': 500},
+                    'price': {'input': 0.30, 'output': 2.50}, 'note': ''}
+    argon, unknown = data['models'][3:]
+    assert argon['free'] is None and argon['price'] == {'input': 2.0, 'output': 10.0} and 'doubles' in argon['note']
+    assert unknown['known'] is False and unknown['free'] is None and unknown['price'] is None
+
+
+def test_key_check_lists_text_models(client, app_module, native_models):
     assert client.post('/api/test/gemini').status_code == 400  # No key saved yet.
     app_module.config.update(gemini_api_key='k', gemini_model='gemini-3.5-flash-lite')
     data = client.post('/api/test/gemini').get_json()
-    assert seen == {'url': 'https://generativelanguage.googleapis.com/v1beta/openai/models', 'auth': 'Bearer k'}
-    assert data['status'] == 'success'
-    assert data['models'] == ['gemini-3.5-flash-lite', 'gemma-4-31b-it']
+    assert data['status'] == 'success' and 'Key works' in data['message']
+    assert 'gemini-3.5-flash-lite' in [m['id'] for m in data['models']]
     app_module.config['gemini_model'] = 'gemini-old'
     assert 'not available' in client.post('/api/test/gemini').get_json()['message']
 
@@ -195,3 +234,4 @@ def test_key_check_reports_rejected_key(client, app_module, monkeypatch):
     response = client.post('/api/test/gemini')
     assert response.status_code == 400
     assert 'rejected the API key' in response.get_json()['message']
+    assert 'rejected the API key' in client.get('/api/gemini/models').get_json()['error']

@@ -34,7 +34,11 @@ In **Settings → AI translation**, configure:
   `http://YOUR-PC-IP:11434/v1`. Test connection loads available model suggestions.
 - **Gemini:** create a key at [Google AI Studio → API keys](https://aistudio.google.com/api-keys)
   and paste it into Settings (or set `GEMINI_API_KEY`). Requests go to Gemini's
-  OpenAI-compatible endpoint. The default model is `gemini-3.5-flash-lite`: Flash-Lite
+  OpenAI-compatible endpoint. Once the key is saved, the model picker lists the text
+  models it can use, in recommended order. For known models it shows free-tier limits,
+  paid price, and context size. These figures come from a built-in table dated in
+  the picker, because Google's model API doesn't publish prices or quotas; models
+  missing from the table show no figures. The default model is `gemini-3.5-flash-lite`: Flash-Lite
   models have the largest free daily quota, while full Flash models allow far fewer
   requests per day on the free tier. Your quotas are listed under **Rate limit** in
   AI Studio; daily quotas reset at midnight Pacific time. Requests are spaced to stay

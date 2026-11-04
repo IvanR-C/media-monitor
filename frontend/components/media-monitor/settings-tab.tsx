@@ -8,6 +8,7 @@ import { Switch } from "@/components/ui/switch"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { AccountSecurityCard } from "@/components/media-monitor/account-security-card"
 import { SettingRow, DraftInput } from "./settings-controls"
+import { GeminiModelPicker, type GeminiCatalog } from "./gemini-model-picker"
 import { EncodingSection, LibraryRules, NotificationEvents, OcrSettings, OutputSection, PROCESSING_DEFAULTS, TracksSection, type ProcessingUpdate } from "./processing-settings"
 import { SettingsAutosave, type SaveStatus } from "@/lib/settings-autosave"
 import { cn } from "@/lib/utils"
@@ -59,7 +60,10 @@ export function SettingsTab({ libraryRequest = 0 }: { libraryRequest?: number })
   const [invalid, setInvalid] = useState<Record<string, boolean>>({})
   const [testing, setTesting] = useState<string | null>(null)
   const [localModels, setLocalModels] = useState<string[]>([])
-  const [geminiModels, setGeminiModels] = useState<string[]>([])
+  const [geminiCatalog, setGeminiCatalog] = useState<GeminiCatalog | null>(null)
+  const [geminiLoading, setGeminiLoading] = useState(false)
+  const [geminiError, setGeminiError] = useState("")
+  const geminiLoadedKey = useRef<string | null>(null)
   const [clearingCache, setClearingCache] = useState(false)
   const saver = useRef<SettingsAutosave | null>(null)
   if (!saver.current) saver.current = new SettingsAutosave((status, message) => {
@@ -96,7 +100,29 @@ export function SettingsTab({ libraryRequest = 0 }: { libraryRequest?: number })
     }
   }, [])
 
+  const loadGeminiModels = async () => {
+    setGeminiLoading(true)
+    setGeminiError("")
+    try {
+      const response = await fetch("/api/gemini/models")
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.error || "Couldn’t load Gemini models")
+      setGeminiCatalog(data)
+    } catch (error) {
+      setGeminiCatalog(null)
+      setGeminiError(error instanceof Error ? error.message : "Couldn’t load Gemini models")
+    } finally { setGeminiLoading(false) }
+  }
+  // Load the model list once the key has been saved; the request uses the saved key.
+  useEffect(() => {
+    const key = config.gemini_api_key
+    if (config.translate_backend !== "gemini" || !key || saveStatus !== "saved" || geminiLoadedKey.current === key) return
+    geminiLoadedKey.current = key
+    void loadGeminiModels()
+  }, [config.translate_backend, config.gemini_api_key, saveStatus])
+
   function update<K extends keyof Config>(key: K, value: Config[K], immediate = false) {
+    if (key === "gemini_api_key") { setGeminiCatalog(null); setGeminiError(""); geminiLoadedKey.current = null }
     if (key === "local_ai_base_url") setLocalModels([])
     setConfig(prev => ({ ...prev, [key]: value }))
     saver.current!.change(key, value, immediate)
@@ -120,7 +146,7 @@ export function SettingsTab({ libraryRequest = 0 }: { libraryRequest?: number })
       const data = await response.json()
       if (!response.ok || data.status !== "success") throw new Error(data.error || data.message || "Test failed. Check your settings and try again.")
       if (service === "local-ai") setLocalModels(data.models || [])
-      if (service === "gemini") setGeminiModels(data.models || [])
+      if (service === "gemini" && data.models) setGeminiCatalog({ models: data.models, as_of: data.as_of })
       toast.success(service === "local-ai" ? data.message || "Connected to local AI"
         : service === "gemini" ? data.message || "Gemini key works" : "Test notification sent")
     } catch (error) { toast.error(error instanceof Error ? error.message : "Couldn’t complete the test") }
@@ -198,7 +224,10 @@ export function SettingsTab({ libraryRequest = 0 }: { libraryRequest?: number })
               </div>
               <div hidden={config.translate_backend !== "gemini"}>
                 <SettingRow id="gemini_api_key" title="API key" description={<>Create a free key in <a href="https://aistudio.google.com/api-keys" target="_blank" rel="noreferrer" className="text-accent underline-offset-2 hover:underline">Google AI Studio</a>. On the free tier, Google may use requests to improve its products.</>}>{field("gemini_api_key", "Gemini API key", { type: "password", placeholder: "AIza…" })}</SettingRow>
-                <SettingRow id="gemini_model" title="Model" description="Flash-Lite models have the largest free daily quota. Test the connection to load the models your key can use.">{field("gemini_model", "Gemini model", { placeholder: "gemini-3.5-flash-lite", list: "gemini-models" })}<datalist id="gemini-models">{geminiModels.map(model => <option key={model} value={model} />)}</datalist></SettingRow>
+                <SettingRow id="gemini_model" title="Model" description="Models your key can use. Flash-Lite models have the largest free daily quota.">
+                  <GeminiModelPicker value={config.gemini_model} onChange={value => update("gemini_model", value, true)} catalog={geminiCatalog}
+                    loading={geminiLoading} error={geminiError} onReload={() => void loadGeminiModels()} requestsPerMinute={config.gemini_requests_per_minute} />
+                </SettingRow>
                 <SettingRow id="gemini_chunk_size" title="Blocks per request" description="Larger batches use fewer of your daily requests. Lower this if responses are incomplete. Default: 200.">{field("gemini_chunk_size", "Gemini blocks per request", { type: "number", max: 1000, validate: numberRule(1000) })}</SettingRow>
                 <SettingRow id="gemini_requests_per_minute" title="Requests per minute" description="Requests are spaced to stay under your quota, shown under Rate limit in AI Studio. Free tier Flash-Lite: 15.">{field("gemini_requests_per_minute", "Gemini requests per minute", { type: "number", max: 1000, validate: numberRule(1000) })}</SettingRow>
                 <SettingRow id="gemini_thinking" title="Thinking level" description="Minimal is fastest and usually enough for subtitles. Gemini 3 models can't turn thinking fully off.">

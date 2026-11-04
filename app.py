@@ -4406,30 +4406,97 @@ def test_local_ai():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
+# Google's model list has names and token limits but no prices or quotas, so these
+# come from the AI Studio pricing page and a free-tier project's Rate limit page.
+# Prices are paid Standard-tier USD per 1M text tokens; free = (RPM, TPM, RPD) or
+# None where the free tier has no quota. Models not listed here show no figures.
+# Listed in the order the picker recommends them for subtitle translation.
+GEMINI_CATALOG_AS_OF = 'November 2026'
+GEMINI_CATALOG = {
+    'gemini-3.5-flash-lite': {'price': (0.30, 2.50), 'free': (15, 250_000, 500)},
+    'gemini-3.1-flash-lite': {'price': (0.25, 1.50), 'free': (15, 250_000, 500)},
+    'gemma-4-31b-it': {'price': None, 'free': (30, 16_000, 14_400),
+                       'note': 'Free only. The 16K tokens/minute limit needs small chunks (about 100 blocks).'},
+    'gemma-4-26b-a4b-it': {'price': None, 'free': (30, 16_000, 14_400),
+                           'note': 'Free only. The 16K tokens/minute limit needs small chunks (about 100 blocks).'},
+    'gemini-3.8-flash': {'price': (0.75, 3.75), 'free': (5, 250_000, 20),
+                         'note': 'Paid price doubles to $1.50 / $7.50 on January 1, 2027.'},
+    'gemini-3.6-flash': {'price': (0.75, 3.75), 'free': (5, 250_000, 20),
+                         'note': 'Paid price doubles to $1.50 / $7.50 on January 1, 2027.'},
+    'gemini-3-flash-preview': {'price': (0.50, 3.00), 'free': (5, 250_000, 20)},
+    'gemini-2.5-flash-lite': {'price': (0.10, 0.40), 'free': (10, 250_000, 20)},
+    'gemini-2.5-flash': {'price': (0.30, 2.50), 'free': (5, 250_000, 20),
+                         'note': 'Deprecated: from December 1, 2026, requests go to Gemini 3.5 Flash-Lite.'},
+    'gemini-2.5-pro': {'price': (1.25, 10.00), 'free': None,
+                       'note': 'Deprecated: from December 1, 2026, requests go to Gemini 3.8 Flash.'},
+    'gemini-3.1-pro-preview': {'price': (2.00, 12.00), 'free': None},
+    'gemini-4-argon': {'price': (2.00, 10.00), 'free': None,
+                       'note': 'Paid price doubles to $4.00 / $20.00 on December 1, 2026.'},
+}
+_GEMINI_RANK = {model_id: rank for rank, model_id in enumerate(GEMINI_CATALOG)}
+_GEMINI_NON_TEXT = re.compile(
+    r'embedding|tts|image|live|transcribe|audio|computer-use|robotics|banana|omni|veo|lyria|imagen|aqa|customtools')
+
+
+def _gemini_text_models(key):
+    """Text models this key can use, merged with the built-in price/quota catalog.
+
+    Returns (models, error_message, http_status); models is None on failure.
+    """
+    try:
+        r = requests.get('https://generativelanguage.googleapis.com/v1beta/models',
+                         headers={'x-goog-api-key': key}, params={'pageSize': 1000}, timeout=10)
+    except requests.RequestException as e:
+        return None, f'Could not reach Gemini: {e}', 502
+    if r.status_code in (400, 401, 403):
+        return None, 'Gemini rejected the API key. Check it was copied completely.', 400
+    if not r.ok:
+        return None, f'Gemini returned HTTP {r.status_code}', 502
+    models = []
+    for m in r.json().get('models', []):
+        model_id = (m.get('name') or '').removeprefix('models/')
+        if (not model_id.startswith(('gemini-', 'gemma-')) or _GEMINI_NON_TEXT.search(model_id)
+                or 'generateContent' not in (m.get('supportedGenerationMethods') or [])):
+            continue
+        known = GEMINI_CATALOG.get(model_id, {})
+        free, price = known.get('free'), known.get('price')
+        models.append({
+            'id': model_id, 'name': m.get('displayName') or model_id,
+            'input_tokens': m.get('inputTokenLimit'), 'output_tokens': m.get('outputTokenLimit'),
+            'thinking': bool(m.get('thinking')), 'known': bool(known),
+            'free': dict(zip(('rpm', 'tpm', 'rpd'), free)) if free else None,
+            'price': dict(zip(('input', 'output'), price)) if price else None,
+            'note': known.get('note', ''),
+        })
+    # Catalog (recommended) order first, then models without known figures by name.
+    models.sort(key=lambda m: (_GEMINI_RANK.get(m['id'], len(_GEMINI_RANK)), m['name']))
+    return models, None, 200
+
+
+@app.route('/api/gemini/models')
+def gemini_models():
+    """List text models the saved key can use, with known prices and free-tier limits."""
+    if not config.get('gemini_api_key'):
+        return jsonify({'error': 'Gemini API key not set'}), 400
+    models, error, status = _gemini_text_models(config['gemini_api_key'])
+    if models is None:
+        return jsonify({'error': error}), status
+    return jsonify({'models': models, 'as_of': GEMINI_CATALOG_AS_OF})
+
+
 @app.route('/api/test/gemini', methods=['POST'])
 def test_gemini():
     """Check the saved Gemini key by listing the text models it can use."""
     key, model = config.get('gemini_api_key', ''), config.get('gemini_model', '')
     if not key:
         return jsonify({'status': 'error', 'message': 'Gemini API key not set'}), 400
-    try:
-        r = requests.get(f'{GEMINI_BASE_URL}models', headers={'Authorization': f'Bearer {key}'}, timeout=10)
-    except requests.RequestException as e:
-        return jsonify({'status': 'error', 'message': f'Could not reach Gemini: {e}'}), 502
-    if r.status_code in (400, 401, 403):
-        return jsonify({'status': 'error', 'message': 'Gemini rejected the API key. Check it was copied completely.'}), 400
-    if not r.ok:
-        return jsonify({'status': 'error', 'message': f'Gemini returned HTTP {r.status_code}'}), 502
-    # IDs come back as "models/gemini-…"; requests use the bare name.
-    models = sorted({(m.get('id') or '').removeprefix('models/') for m in r.json().get('data', [])}
-                    - {''})
-    text_models = [m for m in models if m.startswith(('gemini-', 'gemma-'))
-                   and not re.search(r'embedding|tts|image|live|transcribe|audio', m)]
-    if model and model not in models:
-        return jsonify({'status': 'success', 'models': text_models,
-                        'message': f'Key works, but "{model}" is not available to it. Pick a model from the suggestions.'})
-    return jsonify({'status': 'success', 'models': text_models,
-                    'message': f'Key works — {len(text_models)} text model(s) available'})
+    models, error, status = _gemini_text_models(key)
+    if models is None:
+        return jsonify({'status': 'error', 'message': error}), status
+    ids = [m['id'] for m in models]
+    message = (f'Key works, but "{model}" is not available to it. Choose another model.'
+               if model and model not in ids else f'Key works — {len(ids)} text model(s) available')
+    return jsonify({'status': 'success', 'models': models, 'as_of': GEMINI_CATALOG_AS_OF, 'message': message})
 
 
 @app.route('/api/translate/cache/clear', methods=['POST'])
