@@ -9,6 +9,7 @@ import { AppLogs } from "./app-logs";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { normalizeLanguage } from "@/lib/languages";
+import { applyProgress, fetchLibrary, fetchProgress, getCachedLibrary, setCachedLibrary } from "@/lib/library-store";
 
 export type MediaType = "movie" | "show";
 export type FilterType =
@@ -99,8 +100,10 @@ export function MediaLibraryTab({ scan, onOpenPosterSettings }: MediaLibraryTabP
   // Single source of truth: the entire library for both movies and shows. Tab
   // switches, filter pills, and search all derive from this in-memory list, so
   // no network round-trip is needed for any of those interactions.
-  const [allFiles, setAllFiles] = useState<MediaFile[]>([]);
-  const [loading, setLoading] = useState(true);
+  // Seeded from the module-level cache, so returning to this view renders the
+  // last-known library immediately while it revalidates in the background.
+  const [allFiles, setAllFilesState] = useState<MediaFile[]>(() => getCachedLibrary<MediaFile>().files);
+  const [loading, setLoading] = useState(() => getCachedLibrary<MediaFile>().files.length === 0);
   const [loadError, setLoadError] = useState(false);
   const [debouncedSearch, setDebouncedSearch] = useState("");
 
@@ -113,8 +116,18 @@ export function MediaLibraryTab({ scan, onOpenPosterSettings }: MediaLibraryTabP
   // Track the most recent in-flight fetch so a stale poll response can't
   // clobber a fresh user-action refresh.
   const inflightRef = useRef<AbortController | null>(null);
-  const allFilesRef = useRef<MediaFile[]>([]);
+  const allFilesRef = useRef<MediaFile[]>(allFiles);
   allFilesRef.current = allFiles;
+
+  // Every write to the list goes through here so the cache never lags the UI.
+  // The version also nudges the job queue to refresh as soon as a job is
+  // queued, starts or finishes, instead of waiting for its idle poll.
+  const [libraryVersion, setLibraryVersion] = useState(() => getCachedLibrary<MediaFile>().version);
+  const setAllFiles = useCallback((files: MediaFile[], version?: string | null) => {
+    setCachedLibrary(files, version);
+    setAllFilesState(files);
+    if (version !== undefined) setLibraryVersion(version);
+  }, []);
 
   const fetchMedia = useCallback(async (silent = false) => {
     inflightRef.current?.abort();
@@ -123,11 +136,9 @@ export function MediaLibraryTab({ scan, onOpenPosterSettings }: MediaLibraryTabP
     const showSpinner = !silent && allFilesRef.current.length === 0;
     if (showSpinner) setLoading(true);
     try {
-      const r = await fetch(`/api/media?type=all`, { signal: ac.signal });
-      if (!r.ok) throw new Error(`Library request failed (${r.status})`);
-      const data = await r.json();
+      const result = await fetchLibrary<MediaFile>(ac.signal);
       if (inflightRef.current !== ac) return;
-      setAllFiles(data.files ?? []);
+      if (result.status === "updated") setAllFiles(result.files, result.version);
       setLoadError(false);
     } catch (e) {
       if ((e as { name?: string })?.name === "AbortError") return;
@@ -139,7 +150,7 @@ export function MediaLibraryTab({ scan, onOpenPosterSettings }: MediaLibraryTabP
         if (showSpinner) setLoading(false);
       }
     }
-  }, []);
+  }, [setAllFiles]);
 
   useEffect(() => {
     fetchMedia();
@@ -230,8 +241,10 @@ export function MediaLibraryTab({ scan, onOpenPosterSettings }: MediaLibraryTabP
     });
   }, [files]);
 
-  // Auto-refresh every 3 s while any encode or translation job is active.
-  // Polls the full library (silent) so all derived state stays current.
+  // Keep the table live with a cheap poll of /api/media/progress: 3 s while a
+  // job is running (progress bars), 15 s otherwise (new files from the
+  // watcher, changes made elsewhere). The full list is refetched only when the
+  // server's library version moved. Paused while the browser tab is hidden.
   const hasActiveJobs = useMemo(
     () => allFiles.some(f =>
       f.encode_status === "encoding" ||
@@ -240,11 +253,37 @@ export function MediaLibraryTab({ scan, onOpenPosterSettings }: MediaLibraryTabP
         !["done", "failed", "cancelled"].includes(f.translate_status))),
     [allFiles],
   );
+  // A clean rescan rewrites every row; refetching the growing list mid-scan
+  // would be wasted work, so the scan-finished effect below reloads once.
+  const isScanningRef = useRef(isScanning);
+  isScanningRef.current = isScanning;
   useEffect(() => {
-    if (!hasActiveJobs) return;
-    const id = setInterval(() => fetchMedia(true), 3000);
-    return () => clearInterval(id);
-  }, [hasActiveJobs, fetchMedia]);
+    let ac: AbortController | null = null;
+    const poll = async () => {
+      if (document.hidden) return;
+      ac?.abort();
+      ac = new AbortController();
+      try {
+        const snap = await fetchProgress(ac.signal);
+        if (snap.version !== getCachedLibrary<MediaFile>().version) {
+          if (!isScanningRef.current) fetchMedia(true);
+          return;
+        }
+        const next = applyProgress(allFilesRef.current, snap);
+        if (next !== allFilesRef.current) setAllFiles(next);
+      } catch {
+        // transient — the next tick retries
+      }
+    };
+    const id = setInterval(poll, hasActiveJobs ? 3000 : 15000);
+    const onVisible = () => { if (!document.hidden) poll(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisible);
+      ac?.abort();
+    };
+  }, [hasActiveJobs, fetchMedia, setAllFiles]);
 
   const filterCounts = useMemo(
     () => ({
@@ -619,7 +658,7 @@ export function MediaLibraryTab({ scan, onOpenPosterSettings }: MediaLibraryTabP
 
       {/* Terminal-style bottom panel */}
       <div id="library-queue" tabIndex={-1} className="mt-3 shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-        <CombinedQueue />
+        <CombinedQueue refreshKey={libraryVersion} />
         <AppLogs show={showLogs} onToggle={() => setShowLogs(!showLogs)} />
       </div>
     </div>
