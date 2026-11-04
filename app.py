@@ -2978,8 +2978,12 @@ def _normalize_dialogue_pairs(value, cue_count):
         except ValueError:
             return value
         if all(isinstance(pair, list) for pair in decoded):
-            return decoded
-    return value
+            value = decoded
+    # IDs quoted as strings: [["1","Hola"]] (seen from Gemini Flash-Lite). Only plain
+    # digits convert; coverage and duplicates are still checked strictly afterwards.
+    return [[int(pair[0]), pair[1]] if isinstance(pair, list) and len(pair) == 2
+            and isinstance(pair[0], str) and pair[0].isascii() and pair[0].isdigit() else pair
+            for pair in value]
 
 
 def _restore_dialogue_pairs(source_blocks, pairs):
@@ -3134,24 +3138,49 @@ def translate_srt_chunk(content, source_lang='', target_lang=None, cache_context
         log('info', f'[translate] reused completed chunk ({len(source_blocks)} cues)')
         return cached
     log('info', f'[translate] → {model}: {_log_preview(prompt)}')
-    # Constrained output only for local servers; the OpenAI API follows the prompt
-    # reliably and its strict schema mode does not support tuple-style arrays.
-    # Kept out of the cache key: it changes only how the reply is decoded.
+    # One retry: sampling makes a malformed reply unlikely to repeat (seen from
+    # Gemini Flash-Lite on real anime subtitles). Incomplete or blocked replies
+    # are not retried; the same request would fail the same way.
+    for attempt in (1, 2):
+        response = _send_translation_request(client, model, settings, messages, generation, len(source_blocks))
+        try:
+            restored, translated_pairs = _read_translation_reply(response, model, source_blocks)
+            break
+        except _InvalidReply as error:
+            if attempt == 2:
+                raise
+            log('warn', f'[translate] {model} reply failed validation ({error}); retrying chunk once')
+    if settings['translation_cache_enabled']:
+        _save_subtitle_dialogue(cache_key, translated_pairs)
+    return restored
+
+
+class _InvalidReply(ValueError):
+    """A completed reply whose dialogue failed parsing or validation (worth one retry)."""
+
+
+def _send_translation_request(client, model, settings, messages, generation, cue_count):
+    # Constrained output for local servers and Gemini, which both honour the tuple
+    # schema; the OpenAI API follows the prompt reliably and its strict schema mode
+    # does not support tuple-style arrays. Kept out of the cache key: it changes
+    # only how the reply is decoded.
     endpoint = (str(client.base_url), model)
     request = dict(model=model, messages=messages, **generation)
-    if settings['translate_backend'] == 'local_ai' and endpoint not in _SCHEMA_UNSUPPORTED:
+    if settings['translate_backend'] in ('local_ai', 'gemini') and endpoint not in _SCHEMA_UNSUPPORTED:
         try:
-            response = client.chat.completions.create(
-                **request, response_format=_dialogue_response_format(len(source_blocks)))
+            return _create_completion(client, settings, **request,
+                                      response_format=_dialogue_response_format(cue_count))
         except Exception as error:
             if getattr(error, 'status_code', None) not in (400, 422):
                 raise
             _SCHEMA_UNSUPPORTED.add(endpoint)
             log('warn', f'[translate] {model} rejected structured output ({error}); '
                         'falling back to plain JSON prompting')
-            response = client.chat.completions.create(**request)
-    else:
-        response = _create_completion(client, settings, **request)
+    return _create_completion(client, settings, **request)
+
+
+def _read_translation_reply(response, model, source_blocks):
+    """Return (restored SRT, validated pairs) from a chat completion."""
     choice = response.choices[0]
     if choice.finish_reason == 'content_filter':
         raise ValueError("Translation was blocked by the provider's safety filter")
@@ -3159,7 +3188,7 @@ def translate_srt_chunk(content, source_lang='', target_lang=None, cache_context
         raise ValueError(f'Translation did not complete ({choice.finish_reason}); try a smaller chunk size')
     translated = choice.message.content
     if not isinstance(translated, str) or not translated.strip():
-        raise ValueError('Translation returned no dialogue')
+        raise _InvalidReply('Translation returned no dialogue')
     log('info', f'[translate] ← {model}: {_log_preview(translated)}')
     usage = response.usage
     if usage:
@@ -3169,12 +3198,12 @@ def translate_srt_chunk(content, source_lang='', target_lang=None, cache_context
     try:
         translated_pairs = json.loads(translated)
     except ValueError as error:
-        raise ValueError('Translation returned invalid dialogue JSON') from error
+        raise _InvalidReply('Translation returned invalid dialogue JSON') from error
     translated_pairs = _normalize_dialogue_pairs(translated_pairs, len(source_blocks))
-    restored = _restore_dialogue_pairs(source_blocks, translated_pairs)
-    if settings['translation_cache_enabled']:
-        _save_subtitle_dialogue(cache_key, translated_pairs)
-    return restored
+    try:
+        return _restore_dialogue_pairs(source_blocks, translated_pairs), translated_pairs
+    except ValueError as error:
+        raise _InvalidReply(str(error)) from error
 
 
 def translate_subtitle_file(srt_path, source_lang='', progress_cb=None, job_id=None, target_lang=None, settings=None):

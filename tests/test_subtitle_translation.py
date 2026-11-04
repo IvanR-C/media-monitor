@@ -175,19 +175,42 @@ def test_local_server_errors_other_than_rejection_still_fail(app_module, transla
 @pytest.mark.parametrize('reply', [
     'not JSON', '{}', '[[1,"Hola"]]',
     '[[1,"Hola"],[1,"Otra"]]', '[[1,"Hola"],[3,"Otra"]]',
-    '[[true,"Hola"],[2,"Otra"]]', '[["1","Hola"],[2,"Otra"]]',
+    '[[true,"Hola"],[2,"Otra"]]', '[["x1","Hola"],[2,"Otra"]]', '[["1","Hola"],["1","Otra"]]',
     '[[1,"Hola"],[2,42]]', '[[1,"Hola"],[2,""]]',
     '[[1,"Hola"],[2,"a\\n\\nb"]]',
     '[[1,"Hola"],[2,"00:00:03,000 --> 00:00:04,000"]]',
     '[[1,"Hola","extra"],[2,"Otra"]]',
 ])
 def test_invalid_translation_is_never_cached(app_module, translator, reply):
-    _calls, state = translator
+    calls, state = translator
     state.reply = reply
     with pytest.raises(ValueError):
         app_module.translate_srt_chunk(SOURCE)
+    assert len(calls) == 2  # Retried once, then failed.
     with app_module.db() as conn:
         assert conn.execute('SELECT count(*) FROM subtitle_translation_cache').fetchone()[0] == 0
+
+
+def test_invalid_reply_is_retried_once(app_module, translator):
+    calls, state = translator
+    replies = iter(['[["[1", "Hola"]', json.dumps(PAIRS)])
+    original = app_module._read_translation_reply
+
+    def read(response, model, source_blocks):
+        response.choices[0].message.content = next(replies)
+        return original(response, model, source_blocks)
+
+    app_module._read_translation_reply = read
+    assert '¿Ya puedes empezar?' in app_module.translate_srt_chunk(SOURCE)
+    assert len(calls) == 2
+
+
+def test_quoted_numeric_cue_ids_are_accepted(app_module, translator):
+    calls, state = translator
+    state.reply = json.dumps([["2", PAIRS[1][1]], ["1", PAIRS[0][1]]], ensure_ascii=False)
+    result = app_module.translate_srt_chunk(SOURCE)
+    assert result.startswith('7\n00:00:01,000 --> 00:00:02,000\n<i>Hola.</i>\nOtra vez.')
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize('reason,reply', [('length', '[[1,"Hola"],[2,"Otra"]]'),
