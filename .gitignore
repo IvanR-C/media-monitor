@@ -13,6 +13,8 @@ frontend/out/
 .env.*
 !.env.example
 
-# Local Claude Code state
-.claude/settings.local.json
-.claude/worktrees/
+# Local Claude Code state (permissions, launch configs, worktrees)
+.claude/
+
+# Promo videos and upload kit: large binaries, kept out of the repo
+showcase/
