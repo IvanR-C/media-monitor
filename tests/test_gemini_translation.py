@@ -61,8 +61,22 @@ def test_gemini_request_uses_openai_compatible_endpoint(app_module, gemini):
     assert sent['auth'] == 'Bearer test-gemini-key'
     assert sent['body']['model'] == 'gemini-3.5-flash-lite'
     assert sent['body']['reasoning_effort'] == 'minimal'
-    # Gemini's schema subset lacks tuple arrays; the prompt alone defines the shape.
-    assert 'response_format' not in sent['body']
+    # Gemini honours the tuple schema; without it Flash-Lite sometimes quoted IDs or broke JSON.
+    schema = sent['body']['response_format']['json_schema']['schema']
+    assert schema['minItems'] == schema['maxItems'] == 2
+    assert schema['items']['prefixItems'] == [{'type': 'integer'}, {'type': 'string'}]
+
+
+def test_gemini_model_without_json_mode_falls_back_to_plain(app_module, gemini):
+    app_module.config['gemini_model'] = 'gemma-4-31b-it'
+    gemini['responses'] = [
+        httpx.Response(400, json=[{'error': {'code': 400, 'message': 'JSON mode is not enabled for this model'}}]),
+        None, None,
+    ]
+    assert '¿Ya puedes empezar?' in app_module.translate_srt_chunk(SOURCE)
+    assert '¿Ya puedes empezar?' in app_module.translate_srt_chunk(SOURCE)
+    # Rejected once, then remembered for this model.
+    assert ['response_format' in r['body'] for r in gemini['requests']] == [True, False, False]
 
 
 def test_gemini_default_thinking_sends_no_reasoning_control(app_module, gemini):
