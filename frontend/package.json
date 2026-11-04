@@ -8,7 +8,7 @@
     "start": "next start",
     "lint": "eslint .",
     "test:settings": "node --test tests/settings-autosave.test.mjs",
-    "test:library": "node --test tests/languages.test.mjs"
+    "test:library": "node --test tests/languages.test.mjs tests/library-store.test.mjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.1",

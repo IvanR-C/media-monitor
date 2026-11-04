@@ -66,7 +66,7 @@ interface TranslationJob {
 
 const ACTIVE_ENCODE_STATUSES = new Set(["queued", "encoding"])
 
-export function CombinedQueue() {
+export function CombinedQueue({ refreshKey }: { refreshKey?: string | null } = {}) {
   const [isExpanded, setIsExpanded]         = useState(true)
   const [activeTab, setActiveTab]           = useState<"encode" | "translate">("encode")
   const [encodeJobs, setEncodeJobs]         = useState<EncodeJob[]>([])
@@ -91,11 +91,23 @@ export function CombinedQueue() {
     }
   }, [])
 
+  // Poll fast only while something is running; idle queues change only when a
+  // job is queued, which bumps the library version (refreshKey) and triggers
+  // an immediate fetch below. Skipped while the browser tab is hidden.
+  const hasActiveJobs =
+    encodeJobs.some(j => ACTIVE_ENCODE_STATUSES.has(j.status)) ||
+    translateJobs.some(j => ACTIVE_TRANSLATE_STATUSES.has(j.status))
   useEffect(() => {
-    fetchJobs()
-    const interval = setInterval(fetchJobs, 3000)
-    return () => clearInterval(interval)
-  }, [fetchJobs])
+    const tick = () => { if (!document.hidden) fetchJobs() }
+    const interval = setInterval(tick, hasActiveJobs ? 3000 : 15000)
+    document.addEventListener("visibilitychange", tick)
+    return () => {
+      clearInterval(interval)
+      document.removeEventListener("visibilitychange", tick)
+    }
+  }, [fetchJobs, hasActiveJobs])
+
+  useEffect(() => { fetchJobs() }, [fetchJobs, refreshKey])
 
   // ── Actions ──────────────────────────────────────────────────────────────────
   const handleCancelEncode = async (e: React.MouseEvent, jobId: number) => {

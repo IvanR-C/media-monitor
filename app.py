@@ -6,6 +6,7 @@ import os
 import re
 import ast
 import json
+import gzip
 import hashlib
 import math
 import time
@@ -18,7 +19,7 @@ import threading
 import sqlite3
 import subprocess
 import tempfile
-from collections import Counter, deque
+from collections import Counter, OrderedDict, deque
 from contextlib import contextmanager, ExitStack
 from pathlib import Path
 from queue import Queue
@@ -532,6 +533,58 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_translate_status    ON translation_jobs(status);
             CREATE INDEX IF NOT EXISTS idx_translate_media     ON translation_jobs(media_file_id);
         ''')
+        _install_library_version_triggers(conn)
+
+
+# ── Library version (cache invalidation for /api/media) ───────────────────────
+# A single counter that SQLite itself bumps whenever anything the library list
+# shows could have changed. Triggers instead of Python calls so none of the
+# many write sites in this file can forget to invalidate. Job *progress* writes
+# deliberately don't bump it — those reach the UI via /api/media/progress.
+_LIBRARY_TRIGGER_EVENTS = {
+    'media_files':      ('INSERT', 'DELETE', 'UPDATE'),
+    'encode_jobs':      ('INSERT', 'DELETE', 'UPDATE OF status, job_type, media_file_id'),
+    'translation_jobs': ('INSERT', 'DELETE', 'UPDATE OF status, media_file_id'),
+}
+
+
+def _install_library_version_triggers(conn):
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS library_meta (
+            id      INTEGER PRIMARY KEY CHECK (id = 1),
+            version INTEGER NOT NULL DEFAULT 0
+        )
+    ''')
+    conn.execute('INSERT OR IGNORE INTO library_meta (id, version) VALUES (1, 0)')
+    for table, events in _LIBRARY_TRIGGER_EVENTS.items():
+        for event in events:
+            name = f"trg_libver_{table}_{event.split()[0].lower()}"
+            # A status column re-written with the same value (e.g. a progress
+            # loop that also sets status) is not a change worth a refetch.
+            when = ''
+            if event.startswith('UPDATE OF'):
+                cols = [c.strip() for c in event[len('UPDATE OF'):].split(',')]
+                when = 'WHEN ' + ' OR '.join(f'OLD.{c} IS NOT NEW.{c}' for c in cols)
+            conn.execute(f'''
+                CREATE TRIGGER IF NOT EXISTS {name}
+                AFTER {event} ON {table} {when}
+                BEGIN
+                    UPDATE library_meta SET version = version + 1 WHERE id = 1;
+                END
+            ''')
+
+
+def library_version(conn=None):
+    """Opaque token that changes whenever /api/media output could change:
+    the DB counter above plus the settings that feed per-row size estimates."""
+    if conn is None:
+        with db() as c:
+            return library_version(c)
+    row = conn.execute('SELECT version FROM library_meta WHERE id = 1').fetchone()
+    db_version = row['version'] if row else 0
+    settings = json.dumps(proc.job_settings(config), sort_keys=True, default=str)
+    settings_hash = hashlib.sha1(settings.encode()).hexdigest()[:10]
+    return f'{db_version}-{settings_hash}'
 
 
 # ── Authentication (single admin account + optional passkey MFA) ──────────────
@@ -866,6 +919,31 @@ def _require_auth():
     if not session.get('authenticated'):
         return jsonify({'error': 'authentication_required'}), 401
     return None
+
+
+# ── Response compression ──────────────────────────────────────────────────────
+# Library/job JSON is large and repetitive (nested track lists) and shrinks
+# several-fold under gzip. Only buffered JSON is compressed: streamed files and
+# downloads (direct_passthrough) are left alone, as is anything already encoded.
+_GZIP_MIN_BYTES = 1024
+_GZIP_LEVEL = 5
+
+
+@app.after_request
+def _gzip_json(resp):
+    if (resp.direct_passthrough or resp.is_streamed
+            or resp.status_code < 200 or resp.status_code >= 300
+            or resp.mimetype != 'application/json'
+            or 'Content-Encoding' in resp.headers
+            or not _accepts_gzip()):
+        return resp
+    data = resp.get_data()
+    if len(data) < _GZIP_MIN_BYTES:
+        return resp
+    resp.set_data(gzip.compress(data, compresslevel=_GZIP_LEVEL))
+    resp.headers['Content-Encoding'] = 'gzip'
+    resp.vary.add('Accept-Encoding')
+    return resp
 
 
 # ── Language helpers ──────────────────────────────────────────────────────────
@@ -4201,6 +4279,18 @@ def get_stats():
 
 
 # ── Flask routes — media library ──────────────────────────────────────────────
+# Serialized /api/media bodies keyed by (library version, query). A hit skips
+# the row scan, JSON decoding of track lists, per-row size estimates and the
+# JSON encode; a client already holding the current version gets a bodiless 304.
+_MEDIA_CACHE_MAX = 4
+_media_cache: 'OrderedDict[tuple, dict]' = OrderedDict()
+_media_cache_lock = threading.Lock()
+
+
+def _accepts_gzip():
+    return 'gzip' in (request.headers.get('Accept-Encoding') or '').lower()
+
+
 @app.route('/api/media')
 def get_media():
     f = request.args.get('filter', 'all')
@@ -4209,6 +4299,62 @@ def get_media():
     # filters client-side). Validated against a fixed set to block injection.
     if t not in ('movie', 'show', 'all'):
         t = 'movie'
+    search = request.args.get('search', '').strip()
+
+    with db() as conn:
+        # Read the version BEFORE the rows: a write landing in between leaves
+        # us caching newer data under the older version, which only costs one
+        # extra refetch — never a stale table.
+        version = library_version(conn)
+        if request.if_none_match.contains(version):
+            resp = Response(status=304)
+        else:
+            key = (version, f, t, search)
+            with _media_cache_lock:
+                entry = _media_cache.get(key)
+                if entry is not None:
+                    _media_cache.move_to_end(key)
+            if entry is None:
+                entry = {'raw': app.json.dumps(_media_list_payload(conn, f, t, search)).encode()}
+                with _media_cache_lock:
+                    _media_cache[key] = entry
+                    while len(_media_cache) > _MEDIA_CACHE_MAX:
+                        _media_cache.popitem(last=False)
+            if _accepts_gzip() and len(entry['raw']) >= _GZIP_MIN_BYTES:
+                if 'gz' not in entry:
+                    entry['gz'] = gzip.compress(entry['raw'], compresslevel=_GZIP_LEVEL)
+                resp = Response(entry['gz'], mimetype='application/json')
+                resp.headers['Content-Encoding'] = 'gzip'
+            else:
+                resp = Response(entry['raw'], mimetype='application/json')
+    resp.set_etag(version)
+    resp.headers['X-Library-Version'] = version
+    resp.headers['Cache-Control'] = 'no-cache'
+    resp.vary.add('Accept-Encoding')
+    return resp
+
+
+@app.route('/api/media/progress')
+def get_media_progress():
+    """Tiny poll target for the library table: the current library version
+    (refetch /api/media when it changes) plus live job progress, which is
+    written too often to be part of the cached list."""
+    with db() as conn:
+        version = library_version(conn)
+        encode = [dict(r) for r in conn.execute(
+            "SELECT media_file_id AS id, progress, job_type FROM encode_jobs "
+            "WHERE status IN ('queued','encoding') ORDER BY id DESC"
+        ).fetchall()]
+        translate = [dict(r) for r in conn.execute(
+            "SELECT media_file_id AS id, status, progress FROM translation_jobs "
+            "WHERE status IN ('pending','extracting','ocr','translating','styling','muxing')"
+        ).fetchall()]
+    resp = jsonify({'version': version, 'encode': encode, 'translate': translate})
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
+
+def _media_list_payload(conn, f, t, search):
     # NULL media_type rows are backfilled to 'movie' in _migrate_db, so plain
     # equality is enough — and it lets SQLite use idx_media_type for both types.
     tc = '' if t == 'all' else f" AND media_type = '{t}'"
@@ -4249,7 +4395,6 @@ def get_media():
     }
 
     sql = queries.get(f, queries['all'])
-    search = request.args.get('search', '').strip()
     params: list = []
     if search:
         sql = (
@@ -4258,61 +4403,55 @@ def get_media():
         )
         params = [f'%{search}%', f'%{search}%', f'%{search}%']
 
-    # Single connection for all 4 queries — was 3 separate db() opens, each
-    # paying connection setup + WAL pragma cost. The aggregate stats query is
-    # also the slowest of the four, so keeping it in the same connection lets
-    # SQLite reuse its page cache across queries.
-    with db() as conn:
-        rows = conn.execute(sql, params).fetchall()
+    rows = conn.execute(sql, params).fetchall()
 
-        result = []
-        for r in rows:
-            d                   = dict(r)
-            d['audio_tracks']   = json.loads(d['audio_tracks']   or '[]')
-            d['subtitle_tracks'] = json.loads(d['subtitle_tracks'] or '[]')
-            d['size_gb']        = round((r['size_bytes'] or 0) / 1e9, 2)
-            d['estimated_size_gb'] = (
-                round(estimate_output_size(r) / 1e9, 2)
-                if 'RE-ENCODE' in (r['status'] or '')
-                else None
-            )
-            d['encode_progress']    = None
-            d['encode_job_type']    = None
-            d['translate_status']   = None
-            d['translate_progress'] = None
-            result.append(d)
+    result = []
+    for r in rows:
+        d                   = dict(r)
+        d['audio_tracks']   = json.loads(d['audio_tracks']   or '[]')
+        d['subtitle_tracks'] = json.loads(d['subtitle_tracks'] or '[]')
+        d['size_gb']        = round((r['size_bytes'] or 0) / 1e9, 2)
+        d['estimated_size_gb'] = (
+            round(estimate_output_size(r) / 1e9, 2)
+            if 'RE-ENCODE' in (r['status'] or '')
+            else None
+        )
+        d['encode_progress']    = None
+        d['encode_job_type']    = None
+        d['translate_status']   = None
+        d['translate_progress'] = None
+        result.append(d)
 
-        # Merge active encode / translation progress into result rows
-        id_index = {d['id']: d for d in result}
-        # Include both 'queued' and 'encoding' so job_type is known from the moment
-        # the job is created (not just when the worker picks it up).
-        # ORDER BY id DESC ensures the most recent job wins if duplicates exist.
-        for enc_row in conn.execute(
-            "SELECT media_file_id, progress, job_type FROM encode_jobs "
-            "WHERE status IN ('queued','encoding') ORDER BY id DESC"
-        ).fetchall():
-            mid = enc_row['media_file_id']
-            if mid in id_index:
-                # Only set once (most-recent job wins due to ORDER BY id DESC)
-                if id_index[mid]['encode_job_type'] is None:
-                    id_index[mid]['encode_job_type'] = enc_row['job_type'] or 'encode'
-                if enc_row['progress']:
-                    id_index[mid]['encode_progress'] = enc_row['progress']
-        for tr_row in conn.execute(
-            "SELECT media_file_id, status, progress FROM translation_jobs "
-            "WHERE status IN ('pending','extracting','ocr','translating','styling','muxing')"
-        ).fetchall():
-            if tr_row['media_file_id'] in id_index:
-                id_index[tr_row['media_file_id']]['translate_status']   = tr_row['status']
-                id_index[tr_row['media_file_id']]['translate_progress'] = tr_row['progress']
+    # Merge active encode / translation progress into result rows
+    id_index = {d['id']: d for d in result}
+    # Include both 'queued' and 'encoding' so job_type is known from the moment
+    # the job is created (not just when the worker picks it up).
+    # ORDER BY id DESC ensures the most recent job wins if duplicates exist.
+    for enc_row in conn.execute(
+        "SELECT media_file_id, progress, job_type FROM encode_jobs "
+        "WHERE status IN ('queued','encoding') ORDER BY id DESC"
+    ).fetchall():
+        mid = enc_row['media_file_id']
+        if mid in id_index:
+            # Only set once (most-recent job wins due to ORDER BY id DESC)
+            if id_index[mid]['encode_job_type'] is None:
+                id_index[mid]['encode_job_type'] = enc_row['job_type'] or 'encode'
+            if enc_row['progress']:
+                id_index[mid]['encode_progress'] = enc_row['progress']
+    for tr_row in conn.execute(
+        "SELECT media_file_id, status, progress FROM translation_jobs "
+        "WHERE status IN ('pending','extracting','ocr','translating','styling','muxing')"
+    ).fetchall():
+        if tr_row['media_file_id'] in id_index:
+            id_index[tr_row['media_file_id']]['translate_status']   = tr_row['status']
+            id_index[tr_row['media_file_id']]['translate_progress'] = tr_row['progress']
 
-    # Stats moved to /api/media/stats so they aren't recomputed on every filter
-    # / search keystroke. The frontend caches them per mediaType and refetches
-    # only when the type changes or a job state transition happens.
-    return jsonify({
+    # Stats live in /api/media/stats; the frontend derives its pill counts
+    # from this list client-side.
+    return {
         'files': result,
         'total': len(result),
-    })
+    }
 
 
 def encoding_summary(source_height, settings=None):
