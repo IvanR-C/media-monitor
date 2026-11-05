@@ -7,7 +7,12 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuPortal,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
@@ -20,7 +25,7 @@ import {
 } from "@/components/ui/dialog";
 import { MediaDetailsDrawer } from "./media-details-drawer";
 import { LanguagePicker } from "./language-picker";
-import { FixAnimeDialog, type AnimeSelection } from "./fix-anime-dialog";
+import { useAnimePrefs, useFixAnime } from "./fix-anime-dialog";
 import { languageLabel, languageSummary, normalizeLanguage } from "@/lib/languages";
 import { useTableGroupSpan } from "@/hooks/use-table-group-span";
 import { useMediaQuery } from "@/hooks/use-media-query";
@@ -162,10 +167,11 @@ export function MediaTable({
     null,
   );
   const [muxDialogFile, setMuxDialogFile] = useState<MediaFile | null>(null);
-  const [animeSelection, setAnimeSelection] = useState<AnimeSelection | null>(null);
-  const openAnimeFile = (file: MediaFile) => setAnimeSelection({
+  const fixAnime = useFixAnime(() => onRefresh?.());
+  const openAnimeFile = (file: MediaFile, subIdx?: number) => fixAnime.run({
     label: [file.show_name || file.folder_name, file.season_episode].filter(Boolean).join(" · "),
     scope: { kind: "file", file_id: file.id },
+    source_sub_idx: subIdx,
   });
   // One stable object of row callbacks, reading the latest props through a
   // ref, so memoized rows don't all re-render whenever the parent does
@@ -180,14 +186,14 @@ export function MediaTable({
     onDownloadSubtitle: (id, subIdx, isOcr) => latestActions.current.onDownloadSubtitle(id, subIdx, isOcr),
     onFolderScan: ids => latestActions.current.onFolderScan(ids),
     onOpenDetails: file => latestActions.current.openDetails(file),
-    onFixAnime: file => latestActions.current.openAnimeFile(file),
+    onFixAnime: (file, subIdx) => latestActions.current.openAnimeFile(file, subIdx),
     onOpenAssignDialog: setAssignDialogFile,
     onOpenMuxDialog: setMuxDialogFile,
   }), []);
   const animeGroupMenu = (kind: "show" | "season", label: string, fileId: number) => (
     <DropdownMenu>
       <DropdownMenuTrigger asChild><Button aria-label={`Actions for ${label}`} variant="ghost" size="icon" className="h-7 w-7 shrink-0" onClick={e => e.stopPropagation()}><MoreHorizontal className="h-3.5 w-3.5" /></Button></DropdownMenuTrigger>
-      <DropdownMenuContent align="end"><DropdownMenuItem onClick={e => { e.stopPropagation(); setAnimeSelection({ label: `${label} · Full ${kind}`, scope: { kind, file_id: fileId } }); }}><Sparkles className="mr-2 h-3.5 w-3.5" />Fix Anime · full {kind}</DropdownMenuItem></DropdownMenuContent>
+      <DropdownMenuContent align="end"><DropdownMenuItem onClick={e => { e.stopPropagation(); void fixAnime.run({ label: `${label} · full ${kind}`, scope: { kind, file_id: fileId } }); }}><Sparkles className="mr-2 h-3.5 w-3.5" />Fix Anime · full {kind}</DropdownMenuItem></DropdownMenuContent>
     </DropdownMenu>
   );
   const [sortCol, setSortCol] = useState<SortCol>("title");
@@ -528,7 +534,7 @@ export function MediaTable({
             {selectedIds.size} selected
           </span>
           <div className="flex flex-wrap gap-2">
-            <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => setAnimeSelection({ label: `${selectedFiles.length} selected files`, file_ids: selectedFiles.map(file => file.id) })}><Sparkles className="mr-1 h-3 w-3" />Fix Anime</Button>
+            <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => void fixAnime.run({ label: `${selectedFiles.length} selected file${selectedFiles.length === 1 ? "" : "s"}`, file_ids: selectedFiles.map(file => file.id) })}><Sparkles className="mr-1 h-3 w-3" />Fix Anime</Button>
             <Button
               size="sm"
               className="h-7 text-xs"
@@ -824,7 +830,7 @@ export function MediaTable({
         onEnqueue={onEnqueue} onRip={onRip} onTranslate={onTranslate} onDownloadSubtitle={onDownloadSubtitle}
         onRefresh={onRefresh || (() => {})} onOpenPosterSettings={onOpenPosterSettings}
       />
-      {animeSelection && <FixAnimeDialog selection={animeSelection} onClose={() => setAnimeSelection(null)} onQueued={() => onRefresh?.()} />}
+      {fixAnime.dialog}
       <TrackAssignDialog
         file={assignDialogFile}
         open={assignDialogFile !== null}
@@ -918,7 +924,7 @@ const MobileFileCard = memo(function MobileFileCard({
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            <DropdownMenuItem onClick={() => onFixAnime(file)}><Sparkles className="mr-2 h-3.5 w-3.5" />Fix Anime…</DropdownMenuItem>
+            <FixAnimeMenuItem file={file} onFixAnime={onFixAnime} />
             <DropdownMenuItem onClick={() => onOpenDetails(file)}><FileVideo className="mr-2 h-3.5 w-3.5" />View details</DropdownMenuItem>
             <DropdownMenuSeparator />
             {file.disc_type ? (
@@ -1041,8 +1047,42 @@ export interface RowActions {
   onOpenAssignDialog: (file: MediaFile) => void;
   onOpenDetails: (file: MediaFile) => void;
   onOpenMuxDialog: (file: MediaFile) => void;
-  onFixAnime: (file: MediaFile) => void;
+  onFixAnime: (file: MediaFile, subIdx?: number) => void;
 }
+
+// Rendered only while the row menu is open. In the target-language workflow
+// the user can pick which subtitle track to style; otherwise one click runs.
+function FixAnimeMenuItem({ file, onFixAnime }: { file: MediaFile; onFixAnime: (file: MediaFile, subIdx?: number) => void }) {
+  const prefs = useAnimePrefs();
+  if (prefs?.mode === "all" || file.subtitle_tracks.length === 0) {
+    return <DropdownMenuItem onClick={() => onFixAnime(file)}><Sparkles className="mr-2 h-3.5 w-3.5" />Fix Anime</DropdownMenuItem>;
+  }
+  return <DropdownMenuSub>
+    <DropdownMenuSubTrigger><Sparkles className="mr-2 h-3.5 w-3.5" />Fix Anime</DropdownMenuSubTrigger>
+    <DropdownMenuPortal><DropdownMenuSubContent className="max-w-[min(360px,calc(100vw-32px))]">
+      <DropdownMenuItem className="group" onClick={() => onFixAnime(file)}>
+        <div className="min-w-0"><div>Best available track</div><div className="text-[11px] text-muted-foreground group-data-[highlighted]:text-accent-foreground/80">Prefers target-language dialogue, then English</div></div>
+      </DropdownMenuItem>
+      <DropdownMenuSeparator />
+      <DropdownMenuLabel className="text-[11px] font-normal text-muted-foreground">Use subtitle track</DropdownMenuLabel>
+      {file.subtitle_tracks.map(track => {
+        const unreadable = IMAGE_CODECS.has(track.codec) && !OCR_CODECS.has(track.codec);
+        return <DropdownMenuItem key={track.sub_idx} className="group" disabled={unreadable} onClick={() => onFixAnime(file, track.sub_idx)}>
+          <div className="min-w-0">
+            <div className="truncate">#{track.sub_idx} · {languageLabel(track.lang)}<span className="ml-1.5 text-[11px] uppercase text-muted-foreground group-data-[highlighted]:text-accent-foreground/80">{subtitleCodecLabel(track.codec)}</span></div>
+            {(track.title || unreadable || OCR_CODECS.has(track.codec)) && <div className="truncate text-[11px] text-muted-foreground group-data-[highlighted]:text-accent-foreground/80">{[track.title, unreadable ? "Image format can’t be read" : OCR_CODECS.has(track.codec) ? "Uses OCR" : ""].filter(Boolean).join(" · ")}</div>}
+          </div>
+        </DropdownMenuItem>;
+      })}
+    </DropdownMenuSubContent></DropdownMenuPortal>
+  </DropdownMenuSub>;
+}
+
+const SUB_CODEC_LABELS: Record<string, string> = {
+  subrip: "SRT", ass: "ASS", ssa: "SSA", webvtt: "VTT", mov_text: "MP4 text", hdmv_pgs_subtitle: "PGS",
+  dvd_subtitle: "VobSub", dvb_subtitle: "DVB", dvb_teletext: "Teletext", eia_608: "CC",
+};
+const subtitleCodecLabel = (codec: string) => SUB_CODEC_LABELS[codec] || codec;
 
 interface RowProps {
   file: MediaFile;
@@ -1160,7 +1200,7 @@ const MediaTableRow = memo(function MediaTableRow({
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            <DropdownMenuItem onClick={() => onFixAnime(file)}><Sparkles className="mr-2 h-3.5 w-3.5" />Fix Anime…</DropdownMenuItem>
+            <FixAnimeMenuItem file={file} onFixAnime={onFixAnime} />
             <DropdownMenuItem onClick={() => onOpenDetails(file)}><FileVideo className="mr-2 h-3.5 w-3.5" />View details</DropdownMenuItem>
             <DropdownMenuSeparator />
             {file.disc_type ? (
