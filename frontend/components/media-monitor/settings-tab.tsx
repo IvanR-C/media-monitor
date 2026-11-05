@@ -11,9 +11,11 @@ import { SettingRow, DraftInput } from "./settings-controls"
 import { GeminiModelPicker, type GeminiCatalog } from "./gemini-model-picker"
 import { EncodingSection, LibraryRules, NotificationEvents, OcrSettings, OutputSection, PROCESSING_DEFAULTS, TracksSection, type ProcessingUpdate } from "./processing-settings"
 import { SettingsAutosave, type SaveStatus } from "@/lib/settings-autosave"
+import { ANIME_DEFAULTS, AnimeSettingsPanel } from "./anime-settings"
+import { onAnimeSettingsSaved, setAnimePrefs } from "./fix-anime-dialog"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
-import { AudioLines, Bell, Check, ChevronRight, Clapperboard, FolderOutput, Languages, Loader2, RefreshCw, Send, ShieldCheck, SlidersHorizontal, AlertCircle } from "lucide-react"
+import { AudioLines, Bell, Check, ChevronRight, Clapperboard, FolderOutput, Languages, Loader2, RefreshCw, Send, ShieldCheck, SlidersHorizontal, Sparkles, AlertCircle } from "lucide-react"
 
 const DEFAULTS = {
   enable_ntfy: true, ntfy_server: "https://ntfy.sh", ntfy_topic: "",
@@ -24,11 +26,13 @@ const DEFAULTS = {
   translation_target_lang: "", translation_variant: "", translation_instructions: "",
   translation_temperature: 0.3, local_ai_thinking: "default", translation_cache_enabled: true,
   reencode_size_gb: 20, required_sub_langs: ["eng", "spa"] as string[],
+  anime_settings: ANIME_DEFAULTS,
   ...PROCESSING_DEFAULTS,
 }
 type Config = typeof DEFAULTS
 const SECTIONS = [
   { id: "translation", title: "AI translation", icon: Languages, description: "Choose how your subtitles are translated." },
+  { id: "anime", title: "Fix Anime", icon: Sparkles, description: "Choose how Fix Anime styles subtitles and which languages it keeps. Fix Anime buttons in the library run with these settings." },
   { id: "tracks", title: "Tracks & languages", icon: AudioLines, description: "Choose which audio and subtitle tracks survive encoding and disc rips." },
   { id: "encoding", title: "Encoding", icon: Clapperboard, description: "Set the encoder, quality, speed, and resolution for encodes and rips." },
   { id: "output", title: "Output files", icon: FolderOutput, description: "Decide where processed files go and what happens to originals." },
@@ -100,6 +104,8 @@ export function SettingsTab({ libraryRequest = 0 }: { libraryRequest?: number })
     }
   }, [])
 
+  useEffect(() => onAnimeSettingsSaved(anime_settings => setConfig(prev => ({ ...prev, anime_settings }))), [])
+
   const loadGeminiModels = async () => {
     setGeminiLoading(true)
     setGeminiError("")
@@ -124,6 +130,7 @@ export function SettingsTab({ libraryRequest = 0 }: { libraryRequest?: number })
   function update<K extends keyof Config>(key: K, value: Config[K], immediate = false) {
     if (key === "gemini_api_key") { setGeminiCatalog(null); setGeminiError(""); geminiLoadedKey.current = null }
     if (key === "local_ai_base_url") setLocalModels([])
+    if (key === "anime_settings") setAnimePrefs({ configured: true, mode: (value as Config["anime_settings"]).mode })
     setConfig(prev => ({ ...prev, [key]: value }))
     saver.current!.change(key, value, immediate)
   }
@@ -270,6 +277,9 @@ export function SettingsTab({ libraryRequest = 0 }: { libraryRequest?: number })
               }}>{clearingCache && <Loader2 className="h-3.5 w-3.5 animate-spin" />}Clear saved translations</Button></div>
               <OcrSettings {...sectionProps} />
               <p className="mt-6 text-xs leading-relaxed text-muted-foreground">Language, style, provider, model, generation, and OCR preferences are saved with each queued job. Changes apply to new jobs. Translation-specialist models with a different prompt format may need a dedicated integration.</p>
+            </section>
+            <section id="settings-anime" hidden={section !== "anime"} aria-label="Fix Anime">
+              <AnimeSettingsPanel settings={{ ...ANIME_DEFAULTS, ...config.anime_settings }} fallbackTarget={config.translation_target_lang} onChange={value => update("anime_settings", value)} />
             </section>
             <section id="settings-tracks" hidden={section !== "tracks"} aria-label="Tracks and languages"><TracksSection {...sectionProps} /></section>
             <section id="settings-encoding" hidden={section !== "encoding"} aria-label="Encoding"><EncodingSection {...sectionProps} /></section>

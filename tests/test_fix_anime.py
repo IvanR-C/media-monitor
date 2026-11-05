@@ -418,3 +418,76 @@ def test_duplicate_output_names_are_reported_before_queueing(client, insert_medi
         assert result['files'][0]['reason'] is None
         assert result['files'][1]['reason']
     assert result['count'] == 1
+
+
+def test_configured_flag_set_by_saving_or_queueing(client, insert_media, app_module):
+    assert client.get('/api/anime/settings').get_json()['configured'] is False
+    # A client cannot mark itself configured without saving settings.
+    client.post('/api/config', json={'anime_configured': True})
+    assert client.get('/api/anime/settings').get_json()['configured'] is False
+    assert client.post('/api/config', json={'anime_settings': {**DEFAULT_SETTINGS, 'target_lang': 'spa'}}).status_code == 200
+    assert client.get('/api/anime/settings').get_json()['configured'] is True
+    app_module.config['anime_configured'] = False
+    fid = insert_media(subtitle_tracks=tracks('spa'))
+    client.post('/api/anime/queue', json={'file_ids': [fid]})
+    assert app_module.config['anime_configured'] is True
+
+
+def test_existing_anime_jobs_count_as_configured(client, insert_media, app_module):
+    fid = insert_media(subtitle_tracks=tracks('spa'))
+    client.post('/api/anime/queue', json={'file_ids': [fid]})
+    app_module.config['anime_configured'] = False
+    assert client.get('/api/anime/settings').get_json()['configured'] is True
+
+
+def test_chosen_source_track_overrides_auto_pick(client, insert_media, app_module, monkeypatch):
+    monkeypatch.setattr(app_module, '_translation_backend_ready', lambda settings=None: (True, ''))
+    fid = insert_media(subtitle_tracks=tracks('eng', 'spa', 'fra'))
+    scope = {'kind': 'file', 'file_id': fid}
+    auto = client.post('/api/anime/plan', json={'scope': scope}).get_json()['files'][0]
+    assert auto['needs_translation'] is False
+    missing = client.post('/api/anime/plan', json={'scope': scope, 'source_sub_idx': 9}).get_json()['files'][0]
+    assert 'no longer exists' in missing['reason']
+    chosen = client.post('/api/anime/queue', json={'scope': scope, 'source_sub_idx': 2}).get_json()
+    assert chosen['count'] == 1 and chosen['files'][0]['needs_translation'] is True
+    with app_module.db() as conn:
+        job = conn.execute('SELECT * FROM translation_jobs').fetchone()
+    assert job['source_sub_idx'] == 2 and job['anime_source_sub_idx'] == 2
+
+
+@pytest.mark.parametrize('payload, message', [
+    ({'source_sub_idx': '1'}, 'by its index'),
+    ({'source_sub_idx': 0, 'settings': {'mode': 'all'}}, 'target-language'),
+])
+def test_chosen_source_track_validation(client, insert_media, payload, message):
+    fid = insert_media(subtitle_tracks=tracks('eng'))
+    response = client.post('/api/anime/plan', json={'file_ids': [fid], **payload})
+    assert response.status_code == 400 and message in response.get_json()['error']
+
+
+def test_chosen_source_track_requires_single_file(client, insert_media):
+    ids = [insert_media(filename=f'{n}.mkv', subtitle_tracks=tracks('eng')) for n in range(2)]
+    response = client.post('/api/anime/plan', json={'file_ids': ids, 'source_sub_idx': 0})
+    assert response.status_code == 400 and 'single' in response.get_json()['error']
+
+
+def test_image_source_track_without_ocr_is_rejected(client, insert_media):
+    fid = insert_media(subtitle_tracks=json.dumps([{'sub_idx': 0, 'lang': 'eng', 'codec': 'dvd_subtitle'},
+                                                   {'sub_idx': 1, 'lang': 'spa', 'codec': 'subrip'}]))
+    plan = client.post('/api/anime/plan', json={'file_ids': [fid], 'source_sub_idx': 0}).get_json()['files'][0]
+    assert 'Only PGS' in plan['reason']
+
+
+def test_real_chosen_source_track_is_used_when_job_runs(client, app_module, monkeypatch, real_media):
+    fid, video = real_media
+    calls = []
+    monkeypatch.setattr(app_module, '_translation_backend_ready', lambda settings=None: (True, ''))
+    def translate(path, source_lang, **kwargs):
+        calls.append((source_lang, kwargs['target_lang']))
+        return Path(path).read_text(encoding='utf-8')
+    monkeypatch.setattr(app_module, 'translate_subtitle_file', translate)
+    # Spanish exists, so auto-pick would not translate; the user chose French.
+    result = client.post('/api/anime/queue', json={'scope': {'kind': 'file', 'file_id': fid},
+                                                   'source_sub_idx': 2}).get_json()
+    app_module.run_translation_job(result['queued'][0])
+    assert calls == [('fra', 'spa')]

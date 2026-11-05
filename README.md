@@ -77,7 +77,8 @@ See [docs/encoding.md](docs/encoding.md) for full details.
 See [docs/subtitle-translation.md](docs/subtitle-translation.md) for full details.
 
 ### ✨ Fix Anime
-- Movie, episode, full-season, full-show, and selected-file actions
+- One-click movie, episode, full-season, full-show, and selected-file actions using **Settings → Fix Anime** (asked once on first use)
+- Pick which subtitle track to use as the source for a single movie or episode
 - Saved ASS styles with a live ffmpeg/libass preview
 - Preserve PGS text regions, source placement, and timed position changes through OCR and translation
 - Keep selected audio/subtitle languages; remux away unwanted tracks

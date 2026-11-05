@@ -290,6 +290,9 @@ config = {
     'reencode_size_gb':  REENCODE_SIZE_GB,
     'required_sub_langs': sorted(APPROVED_SUB_LANGS),
     'anime_settings': dict(ANIME_DEFAULTS),
+    # Set once the user has confirmed Fix Anime settings (Settings -> Fix Anime or
+    # the first-run prompt), so library buttons can queue without asking again.
+    'anime_configured': False,
     # Copy-completion wait. The environment variables only seed the default;
     # a value saved in Settings wins and applies to the next size check.
     'stabilize_interval': STABILIZE_INTERVAL,
@@ -524,7 +527,8 @@ def init_db():
         for column, definition in [('job_type', "TEXT DEFAULT 'translate'"),
                                    ('anime_settings', 'TEXT'), ('target_lang', 'TEXT'),
                                    ('output_path', 'TEXT'), ('translation_settings', 'TEXT'),
-                                   ('processing_settings', 'TEXT'), ('ocr_lang', 'TEXT')]:
+                                   ('processing_settings', 'TEXT'), ('ocr_lang', 'TEXT'),
+                                   ('anime_source_sub_idx', 'INTEGER')]:
             try:
                 conn.execute(f'ALTER TABLE translation_jobs ADD COLUMN {column} {definition}')
             except sqlite3.OperationalError:
@@ -4306,11 +4310,14 @@ def update_config_route():
         return jsonify({'error': 'Choose model default, off, low, medium, or high thinking'}), 400
     if 'translation_cache_enabled' in payload and type(payload['translation_cache_enabled']) is not bool:
         return jsonify({'error': 'translation_cache_enabled must be true or false'}), 400
+    # Only saving real anime settings marks Fix Anime as configured.
+    payload.pop('anime_configured', None)
     if 'anime_settings' in payload:
         try:
             payload['anime_settings'] = validate_anime_settings(payload['anime_settings'], anime_languages())
         except (ValueError, TypeError) as error:
             return jsonify({'error': str(error)}), 400
+        payload['anime_configured'] = True
     # Validate threshold fields when present so a bad UI submit can't poison
     # determine_status() (which would silently mis-flag every file).
     if 'reencode_size_gb' in payload:
@@ -5388,7 +5395,16 @@ def anime_sidecars(mf):
     return result
 
 
-def anime_file_plan(mf, settings, preferences=None, processing=None):
+def anime_configured():
+    """True once settings were confirmed. Installs that queued Fix Anime before
+    this flag existed count as configured, so they are not prompted again."""
+    if config.get('anime_configured'):
+        return True
+    with db() as conn:
+        return conn.execute("SELECT 1 FROM translation_jobs WHERE job_type='anime' LIMIT 1").fetchone() is not None
+
+
+def anime_file_plan(mf, settings, preferences=None, processing=None, source_sub_idx=None):
     tracks = json.loads(mf['subtitle_tracks'] or '[]')
     audio = json.loads(mf['audio_tracks'] or '[]')
     allowed_subs = set(settings['subtitle_languages'])
@@ -5433,6 +5449,14 @@ def anime_file_plan(mf, settings, preferences=None, processing=None):
                     t.get('sub_idx', 9999))
         candidates.sort(key=score)
         convert = candidates[:1]
+        if source_sub_idx is not None:
+            # The user picked the source track for this movie or episode.
+            chosen = next((t for t in tracks if t.get('sub_idx') == source_sub_idx), None)
+            convert = [chosen] if chosen else []
+            if not chosen:
+                reason = reason or f'Subtitle track #{source_sub_idx} no longer exists. Rescan the file and choose again.'
+            elif not supported(chosen):
+                reason = reason or f'Subtitle track #{source_sub_idx} is an image format that cannot be read. Only PGS supports OCR.'
         if not convert:
             reason = reason or 'No readable source subtitles. Add an embedded track or a language-tagged sidecar first.'
         else:
@@ -5495,7 +5519,7 @@ def anime_request_files(data, conn):
 @app.route('/api/anime/settings', methods=['GET', 'POST'])
 def anime_settings_route():
     if request.method == 'GET':
-        return jsonify({'settings': anime_preferences()})
+        return jsonify({'settings': anime_preferences(), 'configured': anime_configured()})
     try:
         data = request.get_json()
         if not isinstance(data, dict):
@@ -5504,8 +5528,9 @@ def anime_settings_route():
     except (ValueError, TypeError) as error:
         return jsonify({'error': str(error)}), 400
     config['anime_settings'] = settings
+    config['anime_configured'] = True
     save_config()
-    return jsonify({'settings': settings})
+    return jsonify({'settings': settings, 'configured': True})
 
 
 @app.route('/api/anime/preview', methods=['POST'])
@@ -5557,15 +5582,23 @@ def anime_queue_route():
             raise ValueError('Anime settings must be an object')
         settings = anime_preferences(overrides)
         processing = proc.job_settings(config)
+        source_sub_idx = data.get('source_sub_idx')
+        if source_sub_idx is not None:
+            if type(source_sub_idx) is not int or source_sub_idx < 0:
+                raise ValueError('Choose a subtitle track by its index')
+            if settings['mode'] != 'target':
+                raise ValueError('Choosing a source track applies to the target-language workflow only')
         queued = []
         with db() as conn:
             # Serialize concurrent queue submissions before checking active jobs.
             conn.execute('BEGIN IMMEDIATE')
             files = anime_request_files(data, conn)
+            if source_sub_idx is not None and len(files) != 1:
+                raise ValueError('A source track can only be chosen for a single movie or episode')
             plans = []
             destinations = set()
             for mf in files:
-                plan = anime_file_plan(mf, settings, processing=processing)
+                plan = anime_file_plan(mf, settings, processing=processing, source_sub_idx=source_sub_idx)
                 active = conn.execute(
                     "SELECT id FROM translation_jobs WHERE (filepath IN (?,?) OR output_path=?) AND status NOT IN ('done','failed','cancelled')",
                     (mf['filepath'], plan['output_path'], plan['output_path']),
@@ -5586,17 +5619,18 @@ def anime_queue_route():
                 if request.path.endswith('/queue') and not plan['reason']:
                     source = plan['convert'][0]
                     cursor = conn.execute(
-                        'INSERT INTO translation_jobs (media_file_id,filepath,source_sub_idx,source_lang,source_codec,job_type,anime_settings,target_lang,output_path,translation_settings,processing_settings) '
-                        "VALUES (?,?,?,?,?,'anime',?,?,?,?,?)",
+                        'INSERT INTO translation_jobs (media_file_id,filepath,source_sub_idx,source_lang,source_codec,job_type,anime_settings,target_lang,output_path,translation_settings,processing_settings,anime_source_sub_idx) '
+                        "VALUES (?,?,?,?,?,'anime',?,?,?,?,?,?)",
                         (mf['id'], mf['filepath'], source.get('sub_idx'), source.get('lang', ''),
                          source.get('codec', ''), json.dumps(settings), settings['target_lang'], plan['output_path'],
                          json.dumps(translation_settings(settings['target_lang'])) if plan['needs_translation'] else None,
-                         json.dumps(processing)),
+                         json.dumps(processing), source_sub_idx),
                     )
                     queued.append(cursor.lastrowid)
                 plans.append({k: v for k, v in plan.items() if k not in ('convert', 'keep_audio', 'keep_subs')})
         if request.path.endswith('/queue'):
             config['anime_settings'] = settings
+            config['anime_configured'] = True
             save_config()
             for jid in queued:
                 translation_queue.put(jid)
@@ -5648,7 +5682,9 @@ def run_anime_job(job, mf):
             raise ValueError('Could not read media tracks')
         _, audio, subs = _streams_from_ffprobe(probe)
         fresh = {**dict(mf), 'audio_tracks': json.dumps(audio), 'subtitle_tracks': json.dumps(subs)}
-        plan = anime_file_plan(fresh, settings, preferences, processing)
+        # A track the user picked stays pinned; otherwise re-pick from the fresh probe.
+        pinned = job['anime_source_sub_idx'] if 'anime_source_sub_idx' in job.keys() else None
+        plan = anime_file_plan(fresh, settings, preferences, processing, source_sub_idx=pinned)
         if plan['reason']:
             raise ValueError(plan['reason'])
         with tempfile.TemporaryDirectory(prefix='.anime-', dir=str(Path(filepath).parent)) as directory:

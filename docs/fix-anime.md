@@ -1,19 +1,42 @@
 # Fix Anime
 
-Open **Fix Anime…** in a movie or episode's **⋯** menu, or choose the full-show
-or full-season action from a group header's menu. The selection toolbar also
-supports multiple files. Group actions resolve the whole show or season on the
-server, including episodes hidden by library search or filters.
+All Fix Anime preferences live in **Settings → Fix Anime**: workflow, target
+language, languages to keep, and the ASS style with a live preview. Changes save
+automatically like every other setting.
 
-The dialog loads the last saved settings. **Save settings** persists them without
-starting a job. **Save & queue** saves the settings and queues each eligible file.
+In the library, Fix Anime is a single action that queues immediately with those
+saved settings:
+
+- a movie or episode's **⋯** menu → **Fix Anime**
+- a show or season header's **⋯** menu → **Fix Anime · full show / full season**
+- the selection toolbar's **Fix Anime** button for several files
+
+Group actions resolve the whole show or season on the server, including episodes
+hidden by library search or filters. A toast reports what was queued; files that
+can't be processed are listed with the reason they were skipped.
+
+The first time you use Fix Anime, before any settings were saved, a one-time
+**Set up Fix Anime** prompt shows the same settings. **Save & fix** saves them and
+queues the selection; later runs don't ask again. Installs that already queued Fix
+Anime jobs before this prompt existed count as set up.
+
+### Choosing the source subtitle track
+
+In the target-language workflow, a single movie or episode's **Fix Anime** opens
+a submenu: **Best available track** (the automatic choice described below) or any
+embedded subtitle track by number, language, and format. The chosen track is used
+as the dialogue source — styled as-is when it's already in the target language,
+otherwise translated. Image formats other than PGS can't be read and are disabled.
+The choice is saved with the job, so a restart or re-probe keeps using that track.
+Show, season, and multi-file runs always pick automatically.
+
 Each queued job retains its own settings snapshot, even if the defaults change.
 
 ## Subtitle workflows
 
 - **Fix target language:** prefer an existing full-dialogue subtitle in that
   language. If missing, extract another subtitle and translate it through the
-  configured OpenAI or local AI provider, then produce ASS. English text is
+  configured AI provider (OpenAI, Gemini, or local AI), then produce ASS. English text is
   preferred as a translation source. Regional style, custom instructions, and
   model preferences come from Settings → AI translation and are saved with each
   queued job. No dialect is assumed.
@@ -27,8 +50,8 @@ readable source are skipped; this feature does not search subtitle websites.
 
 ## Language filters and styles
 
-Choose a target subtitle language before using target mode. The dialog can inherit
-your explicit language choice from AI translation settings; no target language is
+Choose a target subtitle language before using target mode. When left unset, it
+inherits your explicit language choice from AI translation settings; no target language is
 selected by the repository. Converting kept tracks does not require a target.
 
 Audio defaults to Japanese, English, and Spanish. Subtitles default to English and
@@ -76,7 +99,7 @@ not carried into the MKV. Retained MP4/MOV text subtitle tracks are also convert
 to ASS, in their original languages, for container compatibility. Disc images must
 first be ripped to a video file with the existing Rip action.
 
-The review shows the output filename for container conversions. An existing output
+An existing output
 file or library record is never overwritten, and jobs targeting the same output
 are not queued together. Output publication reserves the new filename exclusively
 and updates the existing library record and job paths, preserving the media ID,
@@ -84,8 +107,7 @@ poster, and history. The source container is removed only after output verificat
 and the library update succeed. If source cleanup fails, both files remain and the
 queue detail reports the retained original.
 
-The review shows eligible/skipped files, AI translation requirements, new ASS
-tracks, and unwanted track removal counts. Jobs appear as **Fix Anime · ASS** in
+Jobs appear as **Fix Anime · ASS** in
 the subtitle queue, with extraction/OCR/translation/styling/muxing progress.
 Normal queue pause and cancellation apply. Cancellation during an external
 process takes effect before the next stage or before replacing the media file.

@@ -110,7 +110,7 @@ export function TracksSection({ config, update }: Props) {
     </SettingRow>
     <Note>
       How tracks are chosen, in order: <strong>1.</strong> Keep/Drop choices you change in the track editor always win. <strong>2.</strong> Commentary handling. <strong>3.</strong> Language lists and untagged-track options. <strong>4.</strong> Best track or all matching tracks. <strong>5.</strong> The audio fallback when nothing matched.
-      {" "}These rules apply to encoding and disc rips. Library → Required subtitles only sets the MISSING LANG status. Remux writes your track-editor choices, and Fix Anime uses its own language filters. Open a file’s details to preview the result before processing.
+      {" "}These rules apply to encoding and disc rips. Library → Required subtitles only sets the MISSING LANG status. Remux writes your track-editor choices, and Fix Anime uses its own language filters (Settings → Fix Anime). Open a file’s details to preview the result before processing.
     </Note>
   </>
 }

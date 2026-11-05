@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useEffect, useCallback, useRef } from "react";
+import { useState, useMemo, useEffect, useLayoutEffect, useCallback, useRef } from "react";
 import { MediaTypeSwitch } from "./media-type-switch";
 import { FilterBar } from "./filter-bar";
 import { MediaTable } from "./media-table";
@@ -79,6 +79,8 @@ interface LibraryStatsData {
 }
 
 interface MediaLibraryTabProps {
+  /** False while another view (Settings) is shown; the tab stays mounted. */
+  active?: boolean;
   onOpenPosterSettings?: () => void;
   scan: {
     isScanning: boolean;
@@ -89,7 +91,7 @@ interface MediaLibraryTabProps {
   };
 }
 
-export function MediaLibraryTab({ scan, onOpenPosterSettings }: MediaLibraryTabProps) {
+export function MediaLibraryTab({ scan, onOpenPosterSettings, active = true }: MediaLibraryTabProps) {
   const { isScanning, scanProgress, lastScanResult, onScan, onFolderScan } =
     scan;
   const [mediaType, setMediaType] = useState<MediaType>("movie");
@@ -257,10 +259,13 @@ export function MediaLibraryTab({ scan, onOpenPosterSettings }: MediaLibraryTabP
   // would be wasted work, so the scan-finished effect below reloads once.
   const isScanningRef = useRef(isScanning);
   isScanningRef.current = isScanning;
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  const pollRef = useRef<() => void>(() => {});
   useEffect(() => {
     let ac: AbortController | null = null;
     const poll = async () => {
-      if (document.hidden) return;
+      if (document.hidden || !activeRef.current) return;
       ac?.abort();
       ac = new AbortController();
       try {
@@ -275,6 +280,7 @@ export function MediaLibraryTab({ scan, onOpenPosterSettings }: MediaLibraryTabP
         // transient — the next tick retries
       }
     };
+    pollRef.current = poll;
     const id = setInterval(poll, hasActiveJobs ? 3000 : 15000);
     const onVisible = () => { if (!document.hidden) poll(); };
     document.addEventListener("visibilitychange", onVisible);
@@ -284,6 +290,25 @@ export function MediaLibraryTab({ scan, onOpenPosterSettings }: MediaLibraryTabP
       ac?.abort();
     };
   }, [hasActiveJobs, fetchMedia, setAllFiles]);
+
+  // Polling pauses while Settings is open; catch up as soon as the library is back.
+  const wasActive = useRef(active);
+  useEffect(() => {
+    if (active && !wasActive.current) pollRef.current();
+    wasActive.current = active;
+  }, [active]);
+
+  // Hiding the view drops the table's internal scroll offset in some browsers,
+  // so remember each scrolled panel's position and put it back on return.
+  const scrollPositions = useRef(new Map<Element, { top: number; left: number }>());
+  useLayoutEffect(() => {
+    if (!active) return;
+    for (const [element, position] of scrollPositions.current) {
+      if (!element.isConnected) { scrollPositions.current.delete(element); continue; }
+      element.scrollTop = position.top;
+      element.scrollLeft = position.left;
+    }
+  }, [active]);
 
   const filterCounts = useMemo(
     () => ({
@@ -605,7 +630,10 @@ export function MediaLibraryTab({ scan, onOpenPosterSettings }: MediaLibraryTabP
   const clearSelection = () => setSelectedIds(new Set());
 
   return (
-    <div className="flex min-h-[420px] flex-col md:h-[calc(100dvh-104px)]">
+    <div className="flex min-h-[420px] flex-col md:h-[calc(100dvh-104px)]" onScrollCapture={event => {
+      const target = event.target as Element;
+      if (activeRef.current && target instanceof HTMLElement) scrollPositions.current.set(target, { top: target.scrollTop, left: target.scrollLeft });
+    }}>
       <div className="flex shrink-0 flex-col gap-3">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-4">
           <MediaTypeSwitch value={mediaType} onChange={value => { setMediaType(value); setFilter("all"); setSearchQuery(""); setSelectedIds(new Set()); }} />

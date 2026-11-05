@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useRef, useEffect, useCallback } from "react"
+import { useState, useRef, useEffect, useLayoutEffect, useCallback } from "react"
 import { Loader2 } from "lucide-react"
 import { toast } from "sonner"
 
@@ -101,15 +101,27 @@ export default function MediaMonitor() {
     }
   }, [isScanning])
 
+  // Each view keeps its own page scroll position (the page scrolls on phones;
+  // on desktop the library table scrolls inside its own panel).
+  const pageScroll = useRef<Record<"library" | "settings", number>>({ library: 0, settings: 0 })
+  const switchView = (view: "library" | "settings", openLibrarySettings = false) => {
+    if (openLibrarySettings) setLibrarySettingsRequest(value => value + 1)
+    if (view === activeView) return
+    pageScroll.current[activeView] = window.scrollY
+    if (view === "settings") setSettingsVisited(true)
+    setActiveView(view)
+  }
+  // Runs after the DOM swap but before paint, so there's no jump.
+  useLayoutEffect(() => {
+    window.scrollTo({ top: pageScroll.current[activeView], behavior: "instant" })
+  }, [activeView])
+
   const scanState: ScanState = { isScanning, scanProgress, lastScanResult, onScan: handleScan, onFolderScan: handleFolderScan }
 
   return (
     <AuthGate>
       <div className="min-h-screen bg-background">
-        <Header activeView={activeView} onViewChange={view => {
-          if (view === "settings") setSettingsVisited(true)
-          setActiveView(view)
-        }} isScanning={isScanning} />
+        <Header activeView={activeView} onViewChange={view => switchView(view)} isScanning={isScanning} />
 
         <main className="mx-auto max-w-[1800px] px-4 pb-6 pt-4 sm:px-6">
           {/* Cross-view scan banner — visible whenever a scan runs outside the library view */}
@@ -124,7 +136,12 @@ export default function MediaMonitor() {
             </div>
           )}
 
-          {activeView === "library"  && <MediaLibraryTab scan={scanState} onOpenPosterSettings={() => { setLibrarySettingsRequest(value => value + 1); setSettingsVisited(true); setActiveView("settings"); }} />}
+          {/* The library stays mounted while Settings is open, so the media type,
+              filters, search, expanded shows/seasons and scroll position are all
+              where you left them when you come back. */}
+          <div hidden={activeView !== "library"}>
+            <MediaLibraryTab active={activeView === "library"} scan={scanState} onOpenPosterSettings={() => switchView("settings", true)} />
+          </div>
           {settingsVisited && <div hidden={activeView !== "settings"}><SettingsTab libraryRequest={librarySettingsRequest} /></div>}
         </main>
         <Toaster position="bottom-right" theme="dark" />
