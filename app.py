@@ -30,7 +30,9 @@ from flask import Flask, request, jsonify, Response, session, send_from_director
 from werkzeug.security import generate_password_hash, check_password_hash
 import requests
 from anime_subtitles import (DEFAULT_SETTINGS as ANIME_DEFAULTS, validate_settings as validate_anime_settings, srt_to_ass,
-                             restyle_ass, ass_start_times, srt_start_times, estimate_offset, should_shift, shift_srt)
+                             restyle_ass, ass_cues, srt_cues, srt_start_times, estimate_offset, should_shift, shift_srt,
+                             speech_envelope, audio_offset, SPEECH_SAMPLE_RATE, AUDIO_MISMATCH_CONFIDENCE,
+                             AUDIO_SHIFT_CONFIDENCE, AUDIO_MINIMUM_SHIFT, remove_stray_script, guess_subtitle_language)
 import processing as proc
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -3252,7 +3254,10 @@ def translate_subtitle_file(srt_path, source_lang='', progress_cb=None, job_id=N
     if progress_cb:
         progress_cb(95, 'Assembling translated file…')
 
-    return '\n\n'.join(translated_parts)
+    translated, removed = remove_stray_script(content, '\n\n'.join(translated_parts))
+    if removed:
+        log('warn', f'{_tag} removed {removed} stray character(s) in an unexpected script from the translation')
+    return translated
 
 
 def _finish_subtitle_mux(filepath, tmp_path, new_sub_idx, settings):
@@ -5389,8 +5394,17 @@ def anime_sidecars(mf):
             else:
                 continue
             lang = next((_token_to_lang(t) for t in tokens if _token_to_lang(t)), '')
+            words = {t.lower() for t in tokens if t}
+            if not lang and words and words <= SUB_MODIFIER_TOKENS:
+                # `Episode.hi.srt`: hearing-impaired (or Hindi); read the dialogue.
+                try:
+                    with sub.open(encoding='utf-8-sig', errors='replace') as fh:
+                        lang = guess_subtitle_language(fh.read(200_000))
+                except OSError:
+                    lang = ''
             if lang:
-                result.append({'path': str(sub), 'lang': lang, 'codec': sub.suffix[1:], 'title': sub.name})
+                result.append({'path': str(sub), 'lang': lang, 'codec': sub.suffix[1:], 'title': sub.name,
+                               'hearing_impaired': bool(words & {'hi', 'sdh', 'cc'})})
     except OSError:
         pass
     return result
@@ -5442,27 +5456,81 @@ def anime_reference_starts(filepath, tracks, directory):
     return None
 
 
-def timing_correction(starts, filepath, tracks, directory, job_id, what='sidecar'):
-    """Shift (seconds) that puts these cue starts on the video's timeline, with a
-    note for the job detail; None when an embedded track shows they already fit
-    or there is nothing to compare against."""
+class SubtitleMismatch(Exception):
+    """The subtitle's dialogue does not line up with this video at any shift."""
+
+
+def anime_speech_audio(audio):
+    """The audio track subtitles are timed to: Japanese, else the first that is
+    not commentary, else the first."""
+    if not audio:
+        return None
+    return (next((t for t in audio if normalize_lang(t.get('lang')) == 'jpn'), None)
+            or next((t for t in audio if not re.search('comment', t.get('title') or '', re.I)), None) or audio[0])
+
+
+def anime_speech_envelope(filepath, track):
+    """Speech activity of one audio track; timestamps gaps are filled with silence
+    so the envelope stays on the video's timeline."""
+    result = subprocess.run(['ffmpeg', '-v', 'error', '-i', filepath, '-map', f'0:a:{track["audio_idx"]}', '-vn',
+                             '-af', f'aresample={SPEECH_SAMPLE_RATE}:async=1:first_pts=0,highpass=f=300,lowpass=f=3000',
+                             '-ac', '1', '-ar', str(SPEECH_SAMPLE_RATE), '-f', 's16le', '-'],
+                            capture_output=True, timeout=None)
+    if result.returncode:
+        raise ValueError(f'could not decode audio track #{track["audio_idx"]}')
+    return speech_envelope(result.stdout)
+
+
+def timing_correction(cues, filepath, tracks, directory, job_id, what='sidecar', audio=None):
+    """(shift in seconds, note for the job detail) that puts these (start, end)
+    cues on the video's timeline; None when nothing could be checked.
+
+    An embedded dialogue track is the precise reference. Without one, or when it
+    shares too few lines to tell, the cues are lined up with the speech in the
+    audio, which also catches a subtitle made for another episode or cut:
+    SubtitleMismatch is raised then, since muxing it would show wrong dialogue.
+    """
+    starts = [start for start, _ in cues]
     try:
         reference = anime_reference_starts(filepath, tracks, directory)
-        if not reference:
-            return None
-        reference_starts, track = reference
-        estimate = estimate_offset(starts, reference_starts)
-        if not should_shift(estimate):
-            return None
-        offset, aligned, unshifted = estimate
-        note = (f'{what} timing shifted {offset:+.2f} s to match embedded track #{track["sub_idx"]} '
-                f'({aligned:.0%} of lines aligned, {unshifted:.0%} before)')
-        log('info', f'[anime] job {job_id}: {note}')
-        return offset, note
+        if reference:
+            reference_starts, track = reference
+            estimate = estimate_offset(starts, reference_starts)
+            # Most lines must agree at some shift for the reference to settle it.
+            if estimate and max(estimate[1], estimate[2]) >= 0.5:
+                offset, aligned, unshifted = estimate
+                if not should_shift(estimate):
+                    return 0.0, (f'{what} timing matches embedded track #{track["sub_idx"]} '
+                                 f'({unshifted:.0%} of lines aligned)')
+                note = (f'{what} timing shifted {offset:+.2f} s to match embedded track #{track["sub_idx"]} '
+                        f'({aligned:.0%} of lines aligned, {unshifted:.0%} before)')
+                log('info', f'[anime] job {job_id}: {note}')
+                return offset, note
+        speech = anime_speech_audio(audio)
+        measured = audio_offset(cues, anime_speech_envelope(filepath, speech)) if speech else None
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         # Alignment is a correction, never a reason to fail the job.
         log('warn', f'[anime] job {job_id}: {what} timing check skipped: {error}')
         return None
+    if not measured:
+        return None
+    offset, confidence = measured
+    if confidence < AUDIO_MISMATCH_CONFIDENCE:
+        log('warn', f'[anime] job {job_id}: {what} does not match the audio (confidence {confidence})')
+        raise SubtitleMismatch(
+            f'The {what} does not match this video\'s dialogue at any timing (audio match {confidence}, '
+            f'{AUDIO_MISMATCH_CONFIDENCE:g} needed). It is probably for another episode or cut. '
+            'Replace or remove it, or choose another source track.')
+    if confidence < AUDIO_SHIFT_CONFIDENCE:
+        offset = 0.0
+        note = f'{what} timing left as is: the dialogue audio match is too weak to confirm it (match {confidence})'
+    elif abs(offset) >= AUDIO_MINIMUM_SHIFT:
+        note = f'{what} timing shifted {offset:+.2f} s to match the dialogue audio (match {confidence})'
+    else:
+        offset = 0.0
+        note = f'{what} timing checked against the dialogue audio: in sync (match {confidence})'
+    log('info', f'[anime] job {job_id}: {note}')
+    return offset, note
 
 
 def anime_default_audio(kept_audio, settings, processing):
@@ -5529,7 +5597,7 @@ def anime_file_plan(mf, settings, preferences=None, processing=None, source_sub_
         # synced and translated: a re-run restyles it instead of adding another.
         def score(t):
             return (_partial_subtitle(t), normalize_lang(t.get('lang')) != settings['target_lang'],
-                    not is_anime_track(t),
+                    not is_anime_track(t), bool(t.get('hearing_impaired')),
                     is_image_based_subtitle(t.get('codec')), normalize_lang(t.get('lang')) != 'eng',
                     t.get('sub_idx', 9999))
         candidates.sort(key=score)
@@ -5766,6 +5834,11 @@ def run_anime_job(job, mf):
         if not probe:
             raise ValueError('Could not read media tracks')
         _, audio, subs = _streams_from_ffprobe(probe)
+        try:
+            # Cues must not outlast the video, or players report a longer file.
+            duration = float(probe.get('format', {}).get('duration')) or None
+        except (TypeError, ValueError):
+            duration = None
         fresh = {**dict(mf), 'audio_tracks': json.dumps(audio), 'subtitle_tracks': json.dumps(subs)}
         # A track the user picked stays pinned; otherwise re-pick from the fresh probe.
         pinned = job['anime_source_sub_idx'] if 'anime_source_sub_idx' in job.keys() else None
@@ -5792,11 +5865,13 @@ def run_anime_job(job, mf):
                         raise ValueError('Could not extract subtitle')
                     existing = tmp_ass.read_text(encoding='utf-8-sig')
                     # Tracks made from a mistimed sidecar before alignment existed are fixed here.
-                    correction = timing_correction(ass_start_times(existing), filepath, subs, directory, job_id, 'styled track')
+                    correction = timing_correction(ass_cues(existing), filepath, subs, directory, job_id,
+                                                   'styled track', audio=audio)
                     if correction:
                         notes.append(correction[1])
                     out = Path(directory, f'{i}.ass')
-                    out.write_text(restyle_ass(existing, settings, correction[0] if correction else 0.0), encoding='utf-8')
+                    out.write_text(restyle_ass(existing, settings, correction[0] if correction else 0.0,
+                                               end_limit=duration), encoding='utf-8')
                     outputs.append((str(out), source_lang or 'und'))
                     continue
                 if source.get('path'):
@@ -5806,9 +5881,11 @@ def run_anime_job(job, mf):
                         raise ValueError('Could not read sidecar subtitle')
                     progress('extracting', base, 'Checking sidecar timing against the video…')
                     content = Path(tmp_srt).read_text(encoding='utf-8-sig')
-                    correction = timing_correction(srt_start_times(content), filepath, subs, directory, job_id)
+                    correction = timing_correction(srt_cues(content), filepath, subs, directory, job_id,
+                                                   f'sidecar {Path(source["path"]).name}', audio=audio)
                     if correction:
-                        Path(tmp_srt).write_text(shift_srt(content, correction[0]), encoding='utf-8')
+                        if correction[0]:
+                            Path(tmp_srt).write_text(shift_srt(content, correction[0]), encoding='utf-8')
                         notes.append(correction[1])
                 elif is_image_based_subtitle(source.get('codec')):
                     progress('ocr', base, 'Reading PGS subtitle images…')
@@ -5834,7 +5911,7 @@ def run_anime_job(job, mf):
                     lang = source_lang or 'und'
                 progress('styling', 78, 'Applying ASS style…')
                 out = Path(directory, f'{i}.ass')
-                out.write_text(srt_to_ass(content, settings, layouts=layouts), encoding='utf-8')
+                out.write_text(srt_to_ass(content, settings, layouts=layouts, end_limit=duration), encoding='utf-8')
                 outputs.append((str(out), lang))
 
             progress('muxing', 85, 'Removing unwanted tracks and muxing styled ASS…')
