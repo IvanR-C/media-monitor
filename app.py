@@ -29,7 +29,8 @@ from datetime import datetime
 from flask import Flask, request, jsonify, Response, session, send_from_directory
 from werkzeug.security import generate_password_hash, check_password_hash
 import requests
-from anime_subtitles import DEFAULT_SETTINGS as ANIME_DEFAULTS, validate_settings as validate_anime_settings, srt_to_ass
+from anime_subtitles import (DEFAULT_SETTINGS as ANIME_DEFAULTS, validate_settings as validate_anime_settings, srt_to_ass,
+                             restyle_ass, ass_start_times, srt_start_times, estimate_offset, should_shift, shift_srt)
 import processing as proc
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -5395,6 +5396,88 @@ def anime_sidecars(mf):
     return result
 
 
+ANIME_TRACK_PREFIX = 'Anime ASS ('
+# Stream flags carried over when Fix Anime rewrites dispositions (all accepted by ffmpeg 4.4).
+KEPT_DISPOSITIONS = ('dub', 'original', 'comment', 'lyrics', 'karaoke', 'forced', 'hearing_impaired',
+                     'visual_impaired', 'clean_effects', 'captions', 'descriptions')
+
+
+def is_anime_track(track):
+    """A styled track an earlier Fix Anime run added to this file."""
+    return track.get('codec') in ('ass', 'ssa') and (track.get('title') or '').startswith(ANIME_TRACK_PREFIX)
+
+
+def _partial_subtitle(track):
+    return bool(re.search(r'forced|signs|songs', track.get('title') or '', re.I))
+
+
+def anime_reference_starts(filepath, tracks, directory):
+    """Cue start times of an embedded dialogue track, to time a sidecar against.
+
+    Embedded tracks share the video's timeline; a downloaded sidecar may be
+    timed for a different release of the same episode.
+    """
+    candidates = [t for t in tracks if not is_anime_track(t) and not _partial_subtitle(t)
+                  and (not is_image_based_subtitle(t.get('codec')) or t.get('codec') in OCR_CAPABLE_CODECS)]
+    # Text tracks are cheaper to read than PGS.
+    candidates.sort(key=lambda t: (is_image_based_subtitle(t.get('codec')), t.get('sub_idx', 9999)))
+    for track in candidates[:2]:
+        if is_image_based_subtitle(track.get('codec')):
+            from pgs_subtitles import iter_segments
+            sup = Path(directory, f'reference-{track["sub_idx"]}.sup')
+            result = subprocess.run(['ffmpeg', '-v', 'error', '-y', '-i', filepath, '-map', f'0:s:{track["sub_idx"]}',
+                                     '-c:s', 'copy', str(sup)], capture_output=True, timeout=None)
+            if result.returncode or not sup.exists():
+                continue
+            # A composition that shows objects starts (or changes) a cue.
+            starts = sorted({pts / 1000 for pts, kind, segment in iter_segments(sup.read_bytes())
+                             if kind == 0x16 and len(segment) >= 11 and segment[10] > 0})
+        else:
+            srt = Path(directory, f'reference-{track["sub_idx"]}.srt')
+            if not extract_subtitle_to_srt(filepath, track['sub_idx'], str(srt)):
+                continue
+            starts = srt_start_times(srt.read_text(encoding='utf-8-sig', errors='replace'))
+        if len(starts) >= 20:
+            return starts, track
+    return None
+
+
+def timing_correction(starts, filepath, tracks, directory, job_id, what='sidecar'):
+    """Shift (seconds) that puts these cue starts on the video's timeline, with a
+    note for the job detail; None when an embedded track shows they already fit
+    or there is nothing to compare against."""
+    try:
+        reference = anime_reference_starts(filepath, tracks, directory)
+        if not reference:
+            return None
+        reference_starts, track = reference
+        estimate = estimate_offset(starts, reference_starts)
+        if not should_shift(estimate):
+            return None
+        offset, aligned, unshifted = estimate
+        note = (f'{what} timing shifted {offset:+.2f} s to match embedded track #{track["sub_idx"]} '
+                f'({aligned:.0%} of lines aligned, {unshifted:.0%} before)')
+        log('info', f'[anime] job {job_id}: {note}')
+        return offset, note
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        # Alignment is a correction, never a reason to fail the job.
+        log('warn', f'[anime] job {job_id}: {what} timing check skipped: {error}')
+        return None
+
+
+def anime_default_audio(kept_audio, settings, processing):
+    """Position (within kept audio) to flag as default: the processing setting
+    if set, else the first Fix Anime audio language present."""
+    position = proc.default_audio_position(kept_audio, processing, normalize_lang)
+    if position is not None:
+        return position
+    for lang in settings['audio_languages']:
+        for i, track in enumerate(kept_audio):
+            if (normalize_lang(track.get('lang')) or 'und') == lang:
+                return i
+    return None
+
+
 def anime_configured():
     """True once settings were confirmed. Installs that queued Fix Anime before
     this flag existed count as configured, so they are not prompted again."""
@@ -5442,9 +5525,11 @@ def anime_file_plan(mf, settings, preferences=None, processing=None, source_sub_
         candidates = [t for t in sources if supported(t)]
         # Prefer full dialogue in the target language, then English text, then
         # other readable sources. A signs-only track must not mask missing dialogue.
+        # A styled track from an earlier run already holds the target dialogue,
+        # synced and translated: a re-run restyles it instead of adding another.
         def score(t):
-            partial = bool(re.search(r'forced|signs|songs', t.get('title', ''), re.I))
-            return (partial, normalize_lang(t.get('lang')) != settings['target_lang'],
+            return (_partial_subtitle(t), normalize_lang(t.get('lang')) != settings['target_lang'],
+                    not is_anime_track(t),
                     is_image_based_subtitle(t.get('codec')), normalize_lang(t.get('lang')) != 'eng',
                     t.get('sub_idx', 9999))
         candidates.sort(key=score)
@@ -5687,6 +5772,7 @@ def run_anime_job(job, mf):
         plan = anime_file_plan(fresh, settings, preferences, processing, source_sub_idx=pinned)
         if plan['reason']:
             raise ValueError(plan['reason'])
+        notes = []
         with tempfile.TemporaryDirectory(prefix='.anime-', dir=str(Path(filepath).parent)) as directory:
             outputs = []
             for i, source in enumerate(plan['convert']):
@@ -5694,11 +5780,36 @@ def run_anime_job(job, mf):
                 tmp_srt = str(Path(directory, f'{i}.srt'))
                 source_lang = normalize_lang(source.get('lang'))
                 layouts = None
+                translating = plan['needs_translation'] and i == 0
+                if not translating and not source.get('path') and is_anime_track(source):
+                    # Our own earlier output: restyle it in place rather than
+                    # round-tripping through SRT, which loses its positioning.
+                    progress('styling', base, f'Restyling existing track #{source["sub_idx"]}…')
+                    tmp_ass = Path(directory, f'{i}.source.ass')
+                    result = subprocess.run(['ffmpeg', '-v', 'error', '-y', '-i', filepath, '-map', f'0:s:{source["sub_idx"]}',
+                                             '-c:s', 'copy', '-f', 'ass', str(tmp_ass)], capture_output=True, timeout=None)
+                    if result.returncode or not tmp_ass.exists():
+                        raise ValueError('Could not extract subtitle')
+                    existing = tmp_ass.read_text(encoding='utf-8-sig')
+                    # Tracks made from a mistimed sidecar before alignment existed are fixed here.
+                    correction = timing_correction(ass_start_times(existing), filepath, subs, directory, job_id, 'styled track')
+                    if correction:
+                        notes.append(correction[1])
+                    out = Path(directory, f'{i}.ass')
+                    out.write_text(restyle_ass(existing, settings, correction[0] if correction else 0.0), encoding='utf-8')
+                    outputs.append((str(out), source_lang or 'und'))
+                    continue
                 if source.get('path'):
                     progress('extracting', base, f'Reading {Path(source["path"]).name}…')
                     result = subprocess.run(['ffmpeg', '-v', 'error', '-y', '-i', source['path'], tmp_srt], capture_output=True, timeout=120)
                     if result.returncode:
                         raise ValueError('Could not read sidecar subtitle')
+                    progress('extracting', base, 'Checking sidecar timing against the video…')
+                    content = Path(tmp_srt).read_text(encoding='utf-8-sig')
+                    correction = timing_correction(srt_start_times(content), filepath, subs, directory, job_id)
+                    if correction:
+                        Path(tmp_srt).write_text(shift_srt(content, correction[0]), encoding='utf-8')
+                        notes.append(correction[1])
                 elif is_image_based_subtitle(source.get('codec')):
                     progress('ocr', base, 'Reading PGS subtitle images…')
                     layouts = [] if settings['preserve_pgs_placement'] else None
@@ -5711,7 +5822,7 @@ def run_anime_job(job, mf):
                     progress('extracting', base, f'Extracting subtitle #{source["sub_idx"]}…')
                     if not extract_subtitle_to_srt(filepath, source['sub_idx'], tmp_srt):
                         raise ValueError('Could not extract subtitle')
-                if plan['needs_translation'] and i == 0:
+                if translating:
                     progress('translating', 25, 'Translating missing target language…')
                     content = translate_anime_subtitle_file(tmp_srt, source_lang, layouts=layouts, job_id=job_id,
                         target_lang=settings['target_lang'],
@@ -5743,9 +5854,29 @@ def run_anime_job(job, mf):
             for i in range(len(outputs)):
                 cmd += ['-map', f'{i + 1}:0']
             cmd += ['-c', 'copy', '-map_metadata', '0', '-map_chapters', '0']
-            for i, (_, lang) in enumerate(outputs, len(plan['keep_subs'])):
-                cmd += [f'-metadata:s:s:{i}', f'language={lang}',
-                        f'-metadata:s:s:{i}', f'title=Anime ASS ({lang})', f'-disposition:s:{i}', '0']
+            # Players pick the default-flagged tracks, so the styled track (the
+            # target language when there is one) and the preferred audio must
+            # carry the flag, or the original subtitles and dub keep winning.
+            # ffmpeg 4.4 cannot toggle one flag, so each value is rebuilt from
+            # the source flags (forced, commentary…) with only `default` changed.
+            source_flags = {s.get('index'): s.get('disposition') or {} for s in probe.get('streams', [])}
+
+            def disposition(track, default):
+                flags = [f for f in KEPT_DISPOSITIONS if source_flags.get(track['stream_idx'], {}).get(f)]
+                return '+'.join((['default'] if default else []) + flags) or '0'
+
+            styled_default = next((i for i, (_, lang) in enumerate(outputs) if lang == settings['target_lang']), 0)
+            for i, track in enumerate(plan['keep_subs']):
+                cmd += [f'-disposition:s:{i}', disposition(track, False)]
+            for i, (_, lang) in enumerate(outputs):
+                n = len(plan['keep_subs']) + i
+                cmd += [f'-metadata:s:s:{n}', f'language={lang}',
+                        f'-metadata:s:s:{n}', f'title={ANIME_TRACK_PREFIX}{lang})',
+                        f'-disposition:s:{n}', 'default' if i == styled_default else '0']
+            default_audio = anime_default_audio(plan['keep_audio'], settings, processing)
+            if default_audio is not None:
+                for i, track in enumerate(plan['keep_audio']):
+                    cmd += [f'-disposition:a:{i}', disposition(track, i == default_audio)]
             cmd += ['-f', 'matroska', output]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=None)
             if result.returncode:
@@ -5782,7 +5913,8 @@ def run_anime_job(job, mf):
                 with db() as conn:
                     conn.execute("UPDATE translation_jobs SET status='done',progress=100,progress_detail=?,output_path=?,"
                                  "completed_at=datetime('now') WHERE id=?",
-                                 (f'ASS styled → new file {Path(destination).name}; original kept', destination, job_id))
+                                 (f'ASS styled → new file {Path(destination).name}; original kept'
+                                  + ''.join(f'; {note}' for note in notes), destination, job_id))
                 log('info', f'[anime] job {job_id} done — {Path(destination).name} (original kept)')
                 notify('job_complete', f"Fix Anime Complete: {mf['folder_name']}",
                        f"File: {mf['filename']}\nNew file: {Path(destination).name}", tags='white_check_mark,art')
@@ -5826,7 +5958,7 @@ def run_anime_job(job, mf):
                             conn.execute(f'UPDATE {table} SET filepath=? WHERE media_file_id=?', (destination, mf['id']))
                     conn.execute("INSERT OR REPLACE INTO processed_files (filepath,status,size,processed_at) VALUES (?,?,?,datetime('now'))",
                                  (destination, info['status'], info['size_bytes']))
-                    detail = f'ASS styled; language filters applied → {Path(destination).name}'
+                    detail = f'ASS styled; language filters applied → {Path(destination).name}' + ''.join(f'; {note}' for note in notes)
                     conn.execute("UPDATE translation_jobs SET status='done',progress=100,progress_detail=?,completed_at=datetime('now') WHERE id=?", (detail, job_id))
             except Exception:
                 if owns_destination:
