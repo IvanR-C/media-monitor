@@ -1,7 +1,10 @@
 """Validated ASS styles shared by the preview and the subtitle worker."""
+import bisect
 import html
 import math
 import re
+import statistics
+from collections import Counter
 
 
 DEFAULT_SETTINGS = {
@@ -71,11 +74,7 @@ def _position_override(layout):
     return '{' + rf'\an{row * 3 + col + 1}\pos({px},{py})' + '}'
 
 
-def srt_to_ass(content, settings, layouts=None):
-    """Create a uniform dialogue style at 1080p; retain timing and basic markup.
-
-    PGS regions can retain their positions; other typesetting is flattened.
-    """
+def _ass_header(settings):
     s = settings
     style = ','.join(map(str, [
         'Anime', s['font_name'], s['font_size'], ass_color(s['primary_color']),
@@ -93,6 +92,26 @@ def srt_to_ass(content, settings, layouts=None):
         f'Style: {style}\n\n[Events]\n'
         'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n'
     )
+    return header
+
+
+# ffmpeg keeps ASS override blocks such as {\an8} when it converts an ASS
+# track to SRT. They are markup, never dialogue, so they must not be escaped
+# into visible text.
+_OVERRIDE_BLOCK = re.compile(r'\{\\[^{}]*\}')
+_ALIGNMENT = re.compile(r'\\an([1-9])')
+# Earlier versions escaped those blocks into full-width look-alikes.
+_ESCAPED_OVERRIDE = re.compile(r'｛＼([^｛｝]*)｝')
+
+
+def srt_to_ass(content, settings, layouts=None):
+    """Create a uniform dialogue style at 1080p; retain timing and basic markup.
+
+    PGS regions can retain their positions; a source {\\anN} alignment is kept;
+    other typesetting is flattened.
+    """
+    s = settings
+    header = _ass_header(s)
 
     def timestamp(value):
         h, m, sec, ms = map(int, re.split(r'[:,.]', value))
@@ -117,6 +136,8 @@ def srt_to_ass(content, settings, layouts=None):
             continue
         # Escape literal ASS control characters before adding our own tags.
         text = html.unescape(match[3].strip())
+        alignment = next((m[1] for block in _OVERRIDE_BLOCK.findall(text) for m in [_ALIGNMENT.search(block)] if m), None)
+        text = _OVERRIDE_BLOCK.sub('', text)
         text = text.replace('\\', '＼').replace('{', '｛').replace('}', '｝')
         for tag, default in [('i', s['italic']), ('b', s['bold']), ('u', False)]:
             text = re.sub(f'<{tag}>', lambda _: '{\\' + tag + '1}', text, flags=re.I)
@@ -128,9 +149,141 @@ def srt_to_ass(content, settings, layouts=None):
                 raise ValueError('PGS placement no longer matches subtitle cues')
             if settings.get('preserve_pgs_placement', True):
                 text = _position_override(placements[cue_id]) + text
+        elif alignment:
+            text = '{\\an' + alignment + '}' + text
         events.append(f'Dialogue: 0,{format_time(start)},{format_time(end)},Anime,,0,0,0,,{text}')
     if not events:
         raise ValueError('Subtitle contains no usable dialogue')
     if placements is not None and len(events) != len(placements):
         raise ValueError('PGS placement cue count changed')
     return header + '\n'.join(events) + '\n'
+
+
+def _ass_seconds(value):
+    h, m, s = value.strip().split(':')
+    return int(h) * 3600 + int(m) * 60 + float(s)
+
+
+def _ass_time(seconds):
+    cs = round(max(0.0, seconds) * 100)
+    return f'{cs // 360000}:{cs // 6000 % 60:02d}:{cs // 100 % 60:02d}.{cs % 100:02d}'
+
+
+def ass_start_times(content):
+    """Start time in seconds of every Dialogue event in an ASS document."""
+    starts = []
+    for line in content.replace('\r\n', '\n').split('\n'):
+        fields = line.split(',', 9)
+        if line.startswith('Dialogue:') and len(fields) == 10:
+            starts.append(_ass_seconds(fields[1]))
+    return starts
+
+
+def restyle_ass(content, settings, offset=0.0):
+    """Apply new style settings to a track Fix Anime made earlier.
+
+    Its events are kept (positions, translation), so a re-run restyles instead
+    of round-tripping through SRT; `offset` moves them when the timing is off.
+    Override tags an earlier version escaped into visible text are turned back
+    into real tags.
+    """
+    events = []
+    for line in content.replace('\r\n', '\n').split('\n'):
+        if line.startswith('Dialogue:'):
+            fields = line.split(',', 9)
+            if len(fields) == 10:
+                if offset:
+                    start, end = _ass_seconds(fields[1]) + offset, _ass_seconds(fields[2]) + offset
+                    if end <= 0:
+                        continue
+                    fields[1], fields[2] = _ass_time(start), _ass_time(end)
+                fields[3] = 'Anime'
+                fields[9] = _ESCAPED_OVERRIDE.sub(lambda m: '{\\' + m[1].replace('＼', '\\') + '}', fields[9])
+                events.append(','.join(fields))
+    if not events:
+        raise ValueError('Subtitle contains no usable dialogue')
+    return _ass_header(settings) + '\n'.join(events) + '\n'
+
+
+# ── Sidecar timing alignment ─────────────────────────────────────────────────
+_SRT_TIME = re.compile(r'(\d+):(\d{2}):(\d{2})[,.](\d{3})')
+_SRT_TIMING_LINE = re.compile(r'^\s*(\d+:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d+:\d{2}:\d{2}[,.]\d{3})(.*)$', re.M)
+
+
+def _seconds(value):
+    h, m, s, ms = map(int, _SRT_TIME.fullmatch(value).groups())
+    return h * 3600 + m * 60 + s + ms / 1000
+
+
+def srt_start_times(content):
+    """Start time in seconds of every cue in an SRT document."""
+    return [_seconds(m[1]) for m in _SRT_TIMING_LINE.finditer(content.replace('\r\n', '\n'))]
+
+
+def _match_fraction(source, reference, offset, tolerance):
+    hits = 0
+    for start in source:
+        shifted = start + offset
+        k = bisect.bisect_left(reference, shifted)
+        if any(0 <= j < len(reference) and abs(reference[j] - shifted) <= tolerance for j in (k - 1, k)):
+            hits += 1
+    return hits / len(source)
+
+
+def estimate_offset(source, reference, max_offset=15.0, tolerance=0.15, bin_size=0.05):
+    """Find the constant shift that best lines `source` cue starts up with `reference`.
+
+    Both are start times in seconds. The two tracks may be different
+    translations that split lines differently, so the shift is the one most cue
+    pairs agree on, not an average. Returns (offset, aligned, aligned_unshifted)
+    as fractions of source cues, or None when there are too few cues to tell.
+    """
+    reference = sorted(reference)
+    if len(source) < 20 or len(reference) < 20:
+        return None
+    votes = Counter()
+    for start in source:
+        lo = bisect.bisect_left(reference, start - max_offset)
+        hi = bisect.bisect_right(reference, start + max_offset)
+        for r in reference[lo:hi]:
+            votes[round((r - start) / bin_size)] += 1
+    if not votes:
+        return None
+    # Neighbouring bins split one true offset between them; score bins with
+    # their neighbours and refine with the median of the pairs they hold.
+    best = max(votes, key=lambda b: (votes[b - 1] + votes[b] + votes[b + 1], votes[b]))
+    near = []
+    for start in source:
+        lo = bisect.bisect_left(reference, start + (best - 1.5) * bin_size)
+        hi = bisect.bisect_right(reference, start + (best + 1.5) * bin_size)
+        near.extend(r - start for r in reference[lo:hi])
+    offset = round(statistics.median(near), 3)
+    return (offset, _match_fraction(source, reference, offset, tolerance),
+            _match_fraction(source, reference, 0.0, tolerance))
+
+
+def should_shift(estimate, minimum_shift=0.2, minimum_aligned=0.5, minimum_gain=0.2):
+    """True when a shift clearly fixes the timing rather than chasing noise."""
+    if not estimate:
+        return False
+    offset, aligned, unshifted = estimate
+    return abs(offset) >= minimum_shift and aligned >= minimum_aligned and aligned - unshifted >= minimum_gain
+
+
+def shift_srt(content, offset):
+    """Move every cue by `offset` seconds; cues pushed before 0:00 are clipped or dropped."""
+    def fmt(seconds):
+        ms = round(seconds * 1000)
+        return f'{ms // 3600000:02d}:{ms // 60000 % 60:02d}:{ms // 1000 % 60:02d},{ms % 1000:03d}'
+
+    blocks = []
+    for block in re.split(r'\n\s*\n', content.replace('\r\n', '\n').strip()):
+        match = _SRT_TIMING_LINE.search(block)
+        if not match:
+            continue
+        start, end = _seconds(match[1]) + offset, _seconds(match[2]) + offset
+        if end <= 0:
+            continue
+        timing = f'{fmt(max(0.0, start))} --> {fmt(end)}{match[3]}'
+        blocks.append(block[:match.start()] + timing + block[match.end():])
+    return '\n\n'.join(blocks) + '\n'
