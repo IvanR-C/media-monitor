@@ -236,7 +236,9 @@ def test_real_pgs_to_ass_job_keeps_timing_positions_and_translation(client, app_
     subprocess.run(['ffmpeg', '-v', 'error', '-y', '-i', str(video), '-map', f'0:s:{ass_track["sub_idx"]}',
                     '-c:s', 'copy', str(exported)], check=True, capture_output=True, timeout=30)
     ass = exported.read_text(encoding='utf-8-sig')
-    assert ass.count('Subtítulo') == 4
+    # Without placement, regions shown together with the same text would stack
+    # as duplicate lines; only one of each is kept.
+    assert ass.count('Subtítulo') == (4 if preserve else 2)
     assert r'\pos(200,100)' in ass if preserve else r'\pos(' not in ass
     assert len(app_module._parse_srt_blocks(requests[0])) == (1 if preserve else 4)
 

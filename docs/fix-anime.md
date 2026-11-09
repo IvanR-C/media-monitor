@@ -45,8 +45,42 @@ Each queued job retains its own settings snapshot, even if the defaults change.
 
 Text subtitles are extracted with ffmpeg. PGS subtitles use the existing
 Tesseract OCR pipeline. Language-tagged sidecars belonging to the movie or episode
-are also supported; neighboring episodes' sidecars are excluded. Files without a
+are also supported; neighboring episodes' sidecars are excluded. A sidecar named
+only with a modifier (`Episode.hi.srt`, `.sdh.srt`, `.cc.srt`) gets its language
+from its dialogue, since `hi` is also Hindi's code; when a plain sidecar of the same
+language exists, it is preferred over the hearing-impaired one. Files without a
 readable source are skipped; this feature does not search subtitle websites.
+
+### Sidecar timing and wrong-episode checks
+
+Downloaded sidecars are often timed for another release of the episode (about a
+second early is common), and are sometimes for another episode altogether. Before
+a sidecar is styled, its cues are checked against the video:
+
+1. **Against an embedded dialogue track** (text or PGS, never signs/songs), when
+   most lines line up with it at some shift. This is precise; the shift is applied
+   when it is at least 0.2 s.
+2. **Against the dialogue audio** otherwise: the Japanese track, else the first
+   that is not commentary. Cues are lined up with speech-band loudness. Shifts of
+   0.3 s or more are applied when the match is clear (confidence 6 or more).
+3. **A sidecar the audio doesn't match at any shift** (confidence under 5) fails
+   the job with an explanation. The original file is kept. It is almost always a
+   subtitle for another episode or cut: replace or remove it, or choose an embedded
+   source track.
+
+The same checks run when a re-run restyles a track an earlier Fix Anime run
+added. The job detail says which check ran and what it found.
+
+### Text clean-up
+
+- `\h`, `\N` and `\n` written in an SRT are kept as real ASS escapes (hard space,
+  line break). Other backslashes and braces are shown literally. A re-run repairs
+  tracks where earlier versions turned these into visible `＼h` or `｛＼an8｝` text.
+- Exact duplicate cues (same times and text) are dropped, and no cue outlasts the
+  video.
+- After AI translation, letters from a writing system that is rare in the
+  translation and missing from the source line are removed. These are model noise,
+  such as a Bengali word at the end of a Spanish line.
 
 ## Language filters and styles
 
