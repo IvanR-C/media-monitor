@@ -7,6 +7,7 @@ import { LanguageMultiPicker, LanguagePicker } from "./language-picker"
 import { Switch } from "@/components/ui/switch"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { AccountSecurityCard } from "@/components/media-monitor/account-security-card"
+import { McpAccessCard } from "@/components/media-monitor/mcp-access-card"
 import { SettingRow, DraftInput } from "./settings-controls"
 import { GeminiModelPicker, type GeminiCatalog } from "./gemini-model-picker"
 import { EncodingSection, LibraryRules, NotificationEvents, OcrSettings, OutputSection, PROCESSING_DEFAULTS, TracksSection, type ProcessingUpdate } from "./processing-settings"
@@ -15,7 +16,7 @@ import { ANIME_DEFAULTS, AnimeSettingsPanel } from "./anime-settings"
 import { onAnimeSettingsSaved, setAnimePrefs } from "./fix-anime-dialog"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
-import { AudioLines, Bell, Check, ChevronRight, Clapperboard, FolderOutput, Languages, Loader2, RefreshCw, Send, ShieldCheck, SlidersHorizontal, Sparkles, AlertCircle } from "lucide-react"
+import { AudioLines, Bell, Bot, Check, ChevronRight, Clapperboard, FolderOutput, Languages, Loader2, RefreshCw, Send, ShieldCheck, SlidersHorizontal, Sparkles, AlertCircle } from "lucide-react"
 
 const DEFAULTS = {
   enable_ntfy: true, ntfy_server: "https://ntfy.sh", ntfy_topic: "",
@@ -38,6 +39,7 @@ const SECTIONS = [
   { id: "output", title: "Output files", icon: FolderOutput, description: "Decide where processed files go and what happens to originals." },
   { id: "notifications", title: "Notifications", icon: Bell, description: "Decide where media updates are delivered and which events notify you." },
   { id: "library", title: "Library", icon: SlidersHorizontal, description: "Set file status rules, folder rules, new-file detection, and poster artwork." },
+  { id: "mcp", title: "AI assistants (MCP)", icon: Bot, description: "Let AI assistants such as Claude search your library and run jobs through the Model Context Protocol." },
   { id: "security", title: "Account & security", icon: ShieldCheck, description: "Manage your password and passkeys. Confirm account actions below." },
 ] as const
 const validUrl = (value: string) => {
@@ -314,6 +316,7 @@ export function SettingsTab({ libraryRequest = 0 }: { libraryRequest?: number })
               <div hidden={!config.enable_posters}><SettingRow id="tvdb_api_key" title="TVDB API key" description="Required to find poster artwork on TheTVDB.">{field("tvdb_api_key", "TVDB API key", { type: "password", placeholder: "Your TVDB API key" })}</SettingRow></div>
               <LibraryRules {...sectionProps} />
             </section>
+            <section id="settings-mcp" hidden={section !== "mcp"} aria-label="AI assistants (MCP)">{section === "mcp" && <McpAccessCard />}</section>
             <section id="settings-security" hidden={section !== "security"} aria-label="Account and security"><AccountSecurityCard compact /></section>
           </>}
         </div>

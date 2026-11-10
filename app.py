@@ -8,6 +8,7 @@ import ast
 import json
 import gzip
 import hashlib
+import hmac
 import math
 import time
 import copy
@@ -34,6 +35,7 @@ from anime_subtitles import (DEFAULT_SETTINGS as ANIME_DEFAULTS, validate_settin
                              speech_envelope, audio_offset, SPEECH_SAMPLE_RATE, AUDIO_MISMATCH_CONFIDENCE,
                              AUDIO_SHIFT_CONFIDENCE, AUDIO_MINIMUM_SHIFT, remove_stray_script, guess_subtitle_language)
 import processing as proc
+import mcp_server
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
@@ -6443,6 +6445,92 @@ def get_logs():
     with _log_lock:
         entries = [e for e in _log_buffer if e['seq'] > since]
     return jsonify({'logs': entries, 'total': _log_seq})
+
+
+# ── MCP endpoint (AI assistants) ──────────────────────────────────────────────
+# /mcp speaks the Model Context Protocol so assistants such as Claude can use
+# the library. It sits outside /api/ (so the session guard doesn't apply) and
+# authenticates with its own bearer token, stored only as a SHA-256 hash.
+MCP_TOKEN_SCOPES = ('read', 'full')
+
+
+def internal_api(method, path, body=None, query=None):
+    """Run a dashboard API handler in-process and return its result.
+
+    The MCP tools reuse the REST handlers rather than duplicating their
+    validation and job-queue logic. Request hooks (session guard, gzip) are
+    skipped: the caller has already authenticated the MCP token."""
+    endpoint, view_args = app.url_map.bind('localhost').match(path, method=method)
+    kwargs = {'method': method, 'query_string': query}
+    if method != 'GET':
+        kwargs['json'] = {} if body is None else body
+    with app.test_request_context(path, **kwargs):
+        resp = app.make_response(app.view_functions[endpoint](**view_args))
+        resp.direct_passthrough = False
+        raw = resp.get_data()
+    if resp.mimetype == 'application/json':
+        data = json.loads(raw or b'null')
+    else:
+        data = raw.decode('utf-8', errors='replace')
+    return mcp_server.ApiResult(resp.status_code, data, resp.mimetype, dict(resp.headers))
+
+
+def mcp_token_scope(authorization):
+    """'read' / 'full' for a valid MCP bearer token, else None."""
+    expected = auth_state.get('mcp_token_hash')
+    scheme, _, token = (authorization or '').partition(' ')
+    if not expected or scheme.lower() != 'bearer' or not token.strip():
+        return None
+    actual = hashlib.sha256(token.strip().encode()).hexdigest()
+    if not hmac.compare_digest(actual, expected):
+        return None
+    scope = auth_state.get('mcp_token_scope')
+    return scope if scope in MCP_TOKEN_SCOPES else 'read'
+
+
+mcp = mcp_server.MCPServer(internal_api, mcp_token_scope, log=log)
+
+
+def _mcp_token_info():
+    return {
+        'enabled': bool(auth_state.get('mcp_token_hash')),
+        'scope': auth_state.get('mcp_token_scope') if auth_state.get('mcp_token_hash') else None,
+        'created_at': auth_state.get('mcp_token_created_at'),
+        'hint': auth_state.get('mcp_token_hint'),
+        'path': '/mcp',
+        'tools': {scope: len(mcp.visible_tools(scope)) for scope in MCP_TOKEN_SCOPES},
+    }
+
+
+@app.route('/api/mcp/token', methods=['GET', 'POST', 'DELETE'])
+def mcp_token_route():
+    if request.method == 'GET':
+        return jsonify(_mcp_token_info())
+    if request.method == 'DELETE':
+        for key in ('mcp_token_hash', 'mcp_token_scope', 'mcp_token_created_at', 'mcp_token_hint'):
+            auth_state.pop(key, None)
+        save_auth()
+        log('info', '[mcp] access token revoked')
+        return jsonify(_mcp_token_info())
+    scope = (request.get_json(silent=True) or {}).get('scope', 'read')
+    if scope not in MCP_TOKEN_SCOPES:
+        return jsonify({'error': 'Choose read-only or full access'}), 400
+    token = 'mm_' + secrets.token_urlsafe(32)
+    auth_state.update(
+        mcp_token_hash=hashlib.sha256(token.encode()).hexdigest(),
+        mcp_token_scope=scope,
+        mcp_token_created_at=datetime.now().isoformat(timespec='seconds'),
+        mcp_token_hint=token[-4:],
+    )
+    save_auth()
+    log('info', f'[mcp] new {scope} access token created')
+    # The plain token is returned once and never stored.
+    return jsonify({**_mcp_token_info(), 'token': token})
+
+
+@app.route('/mcp', methods=['GET', 'POST', 'DELETE'])
+def mcp_endpoint():
+    return mcp.handle(request)
 
 
 # ── Startup ───────────────────────────────────────────────────────────────────
