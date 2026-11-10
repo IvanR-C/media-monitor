@@ -3309,6 +3309,7 @@ def mux_subtitle_into_video(filepath, srt_path, target_lang=None, variant='', se
         '-c', 'copy',
         f'-metadata:s:s:{new_sub_idx}', f'language={target_lang}',
         f'-metadata:s:s:{new_sub_idx}', f'title={title}',
+        '-max_interleave_delta', '0',
         '-f', 'matroska',
         tmp_path,
     ]
@@ -5956,7 +5957,10 @@ def run_anime_job(job, mf):
             if default_audio is not None:
                 for i, track in enumerate(plan['keep_audio']):
                     cmd += [f'-disposition:a:{i}', disposition(track, i == default_audio)]
-            cmd += ['-f', 'matroska', output]
+            # A sparse subtitle track otherwise exceeds ffmpeg's default 10 s
+            # interleave delta, and all but its first block land at the end of
+            # the file, so streaming players show one line and then nothing.
+            cmd += ['-max_interleave_delta', '0', '-f', 'matroska', output]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=None)
             if result.returncode:
                 raise RuntimeError(f'ASS remux failed: {result.stderr[-500:]}')
@@ -6276,7 +6280,7 @@ def mux_external_subtitle(filepath, sub_path, lang='und', title='', settings=Non
     ]
     if title:
         cmd += [f'-metadata:s:s:{new_sub_idx}', f'title={title}']
-    cmd += ['-f', 'matroska', tmp_path]
+    cmd += ['-max_interleave_delta', '0', '-f', 'matroska', tmp_path]
 
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=None)
     if result.returncode != 0:
