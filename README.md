@@ -108,6 +108,14 @@ details drawer previews exactly which tracks will be kept, and why.
 
 See [docs/processing-settings.md](docs/processing-settings.md) for every setting, precedence rule, and upgrade note.
 
+### 🤖 AI Assistants (MCP)
+- Built-in [Model Context Protocol](https://modelcontextprotocol.io) endpoint at `/mcp`
+- Lets Claude and other assistants search the library, read tracks and logs, and queue
+  encodes, remuxes, rips, translations and Fix Anime
+- Read-only or full-control access token, created in **Settings → AI assistants (MCP)**
+
+See [docs/mcp.md](docs/mcp.md) for setup and the full tool list.
+
 ### 📊 Real-Time Logs
 - In-app log viewer streamed from the backend
 - Level filtering (info / warn / error)
@@ -286,6 +294,21 @@ From **Settings → Account & Security** you can:
 
 ---
 
+## 🤖 MCP (AI Assistants)
+
+Open **Settings → AI assistants (MCP)**, pick **Read-only** or **Full control**, and create an
+access token. Then add the server to your assistant, for example Claude Code:
+
+```bash
+claude mcp add --transport http media-monitor http://<your-host>:5000/mcp --header "Authorization: Bearer <token>"
+```
+
+The token is shown once and stored only as a hash. Creating a new one replaces the old one.
+Serve the app over HTTPS if the assistant connects from outside your network. See
+[docs/mcp.md](docs/mcp.md) for every tool and client.
+
+---
+
 ## 🏗️ Architecture
 
 ```
@@ -295,6 +318,7 @@ From **Settings → Account & Security** you can:
 │                                                     │
 │  ┌─ Static dashboard (Next.js SPA, pre-built)      │
 │  ├─ Auth (password + optional passkey/WebAuthn MFA)│
+│  ├─ MCP endpoint for AI assistants (/mcp)         │
 │  ├─ File watcher (watchdog)                        │
 │  ├─ Media analyzer (ffprobe)                       │
 │  ├─ Encode worker (ffmpeg/NVENC)                    │
@@ -350,6 +374,7 @@ From **Settings → Account & Security** you can:
 ```
 .
 ├── app.py                    # Flask API, auth, file watcher, workers — serves the built frontend too
+├── mcp_server.py             # MCP endpoint: JSON-RPC transport and the AI assistant tools
 ├── requirements.txt          # Python dependencies
 ├── Dockerfile                # Multi-stage: builds frontend/ (Node), then the Python runtime image
 ├── docker-compose.yml        # Production stack (single image, Docker Hub)
@@ -363,11 +388,12 @@ From **Settings → Account & Security** you can:
 │   └── package.json
 ├── config/                   # Created automatically on first run
 │   ├── config.json           # Saved settings
-│   ├── auth.json             # Admin credentials (hashed) + MFA setting
+│   ├── auth.json             # Admin credentials (hashed), MFA setting, MCP token hash
 │   └── processed.db          # SQLite database (incl. registered passkeys)
 └── docs/
     ├── current_state.md      # Project state and known gaps
     ├── encoding.md           # Encoding feature walkthrough
+    ├── mcp.md                # AI assistant (MCP) setup and tools
     ├── subtitle-translation.md  # Subtitle translation + OCR walkthrough
     └── media-library.md      # Library browser guide
 ```
